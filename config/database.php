@@ -63,31 +63,17 @@ return [
                 Mysql::ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
             ]) : [],
         ],
-        /*
-         * Carrier database hosted on EC2. Read-only from this application:
-         * no migrations are run against it.
-         */
-        'external_db' => [
-            'driver' => 'mysql',
-            'url' => env('EXTERNAL_DB_URL'),
-            'host' => env('EXTERNAL_DB_HOST'),
-            'port' => env('EXTERNAL_DB_PORT', '3306'),
-            'database' => env('EXTERNAL_DB_DATABASE'),
-            'username' => env('EXTERNAL_DB_USERNAME'),
-            'password' => env('EXTERNAL_DB_PASSWORD'),
-            'charset' => env('EXTERNAL_DB_CHARSET', 'utf8mb4'),
-            'collation' => env('EXTERNAL_DB_COLLATION', 'utf8mb4_unicode_ci'),
-            'prefix' => '',
-            'prefix_indexes' => true,
-            'strict' => true,
-            'engine' => null,
-            'options' => extension_loaded('pdo_mysql') ? array_filter([
-                // Fail fast instead of hanging when the EC2 security group
-                // blocks the connection.
-                PDO::ATTR_TIMEOUT => (int) env('EXTERNAL_DB_TIMEOUT', 5),
-                Mysql::ATTR_SSL_CA => env('EXTERNAL_DB_SSL_CA'),
-            ]) : [],
-        ],
+ 'external_db' => [
+        'driver' => 'mysql',
+        'host' => env('EXTERNAL_DB_HOST'),
+        'port' => env('EXTERNAL_DB_PORT'),
+        'database' => env('EXTERNAL_DB_DATABASE'),
+        'username' => env('EXTERNAL_DB_USERNAME'),
+        'password' => env('EXTERNAL_DB_PASSWORD'),
+        'charset' => 'utf8mb4',
+        'collation' => 'utf8mb4_unicode_ci',
+        'prefix' => '',
+    ],
 
         'mariadb' => [
             'driver' => 'mariadb',

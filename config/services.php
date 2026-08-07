@@ -35,23 +35,4 @@ return [
         ],
     ],
 
-    // Identity document verification during carrier onboarding.
-    'didit' => [
-        'api_key' => env('DIDIT_API_KEY'),
-        'workflow_id' => env('DIDIT_WORKFLOW_ID'),
-    ],
-
-    // Carrier payout accounts (Stripe Express).
-    'stripe' => [
-        'key' => env('STRIPE_KEY'),
-        'secret' => env('STRIPE_SECRET'),
-        'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
-    ],
-
-    // SMS gateway for onboarding OTPs.
-    'clicksend' => [
-        'username' => env('CLICKSEND_USERNAME'),
-        'key' => env('CLICKSEND_KEY'),
-    ],
-
 ];

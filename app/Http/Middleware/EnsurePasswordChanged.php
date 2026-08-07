@@ -7,12 +7,9 @@ use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Holds an account that is still on a system-generated password to the
+ * Holds a user who is still on a system-generated password to the
  * change-password screen. Everything else stays out of reach until they pick
  * their own password.
- *
- * Both audiences pass through here: broker staff invited into a company, and
- * carriers whose portal account was created at the end of onboarding.
  */
 class EnsurePasswordChanged
 {
@@ -23,10 +20,6 @@ class EnsurePasswordChanged
         'api/v1/me',
         'api/v1/logout',
         'api/v1/change-password',
-
-        'api/v1/carrier-portal/me',
-        'api/v1/carrier-portal/logout',
-        'api/v1/carrier-portal/change-password',
     ];
 
     public function handle(Request $request, Closure $next): Response

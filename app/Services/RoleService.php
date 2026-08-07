@@ -10,18 +10,11 @@ use Illuminate\Validation\ValidationException;
 class RoleService
 {
     /**
-     * Spatie guard the broker matrix lives under. Carrier seats sit in the
-     * `carrier` guard in the same table and must never surface here.
-     */
-    protected string $guard = 'web';
-
-    /**
      * All active seat types, ordered from least to most senior.
      */
     public function all(): Collection
     {
         return Role::active()
-            ->where('guard_name', $this->guard)
             ->with('permissions')
             ->orderBy('level')
             ->get();
@@ -41,7 +34,6 @@ class RoleService
         }
 
         return Role::active()
-            ->where('guard_name', $this->guard)
             ->slugs($slugs)
             ->with('permissions')
             ->orderBy('level')
@@ -65,9 +57,7 @@ class RoleService
      */
     public function resolveAssignable(User $user, int|string $roleId): Role
     {
-        $role = Role::active()
-            ->where('guard_name', $this->guard)
-            ->find($roleId);
+        $role = Role::active()->find($roleId);
 
         if (! $role || ! $this->canAssign($user, $role)) {
             throw ValidationException::withMessages([

@@ -44,7 +44,6 @@ class Shipment extends Model
         'team_load' => 'boolean',
         'tracking_start_at' => 'datetime',
         'update_datetime' => 'datetime',
-        // TELL LARAVEL TO HANDLE THIS AS AN ARRAY
         'email_updates_to' => 'array', 
     ];
 
