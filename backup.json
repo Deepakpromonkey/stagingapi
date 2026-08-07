@@ -1,0 +1,7 @@
+   // Route::get('/carriers/search', [CarrierSearchController::class, 'index'])
+        //     ->middleware(PermissionMiddleware::using('view-carrier-directory'));
+   Route::get('/carriers/{dot}/risk-factors', [CarrierInsightController::class, 'riskFactors']);
+            Route::get('/carriers/{dot}/reliability', [CarrierInsightController::class, 'reliability']);
+            Route::get('/carriers/{dot}/associations', [CarrierInsightController::class, 'associations']);
+            Route::get('/carriers/{dot}/equipment', [CarrierInsightController::class, 'equipment']);
+            Route::get('/carriers/{dot}/activity', [CarrierInsightController::class, 'activity']);

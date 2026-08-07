@@ -7,8 +7,10 @@ use App\Models\LoginDevice;
 use App\Models\Role;
 use App\Models\TrustedDevice;
 use App\Models\User;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -181,5 +183,24 @@ class AuthService
             'token' => $token,
             'user' => $user->fresh()->load('company', 'roles.permissions', 'permissions'),
         ];
+    }
+
+    public function updateProfile(User $user, array $data, ?UploadedFile $profileImage = null): User
+    {
+        if ($profileImage) {
+
+            // Remove the old file so storage doesn't accumulate orphans.
+            if ($user->profile_image) {
+                Storage::disk('s3')->delete($user->profile_image);
+            }
+
+            $data['profile_image'] = $profileImage->store('profile-images', 's3');
+        }
+
+        $user->fill(
+            collect($data)->only(['first_name', 'last_name', 'phone', 'profile_image'])->toArray()
+        )->save();
+
+        return $user->fresh()->load('company', 'roles.permissions', 'permissions');
     }
 }

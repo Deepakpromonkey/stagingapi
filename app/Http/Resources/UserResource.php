@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Facades\Storage;
 
 class UserResource extends JsonResource
 {
@@ -20,6 +21,9 @@ class UserResource extends JsonResource
             'designation' => $this->designation,
             'is_owner' => $this->is_owner,
             'status' => $this->status,
+            'profile_image' => $this->profile_image
+             ? Storage::disk('s3')->url($this->profile_image)
+             : null,
 
             // True while the user is still on the temporary password from
             // their invitation email — the client should route them to the
