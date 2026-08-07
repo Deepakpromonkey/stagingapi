@@ -57,7 +57,9 @@ jobs:
             # the three individual :cache calls it replaces were redundant.
             php artisan optimize
 
-            php artisan storage:link || true
+             if [ ! -L public/storage ]; then
+                  php artisan storage:link
+              fi
 
             # Queue workers hold the old code in memory until told otherwise.
             php artisan queue:restart
