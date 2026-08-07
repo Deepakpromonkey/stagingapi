@@ -49,7 +49,10 @@ class InviteUserRequest extends FormRequest
 
             'role_id' => [
                 'required',
-                Rule::exists('roles', 'id')->where('is_active', true),
+                // Broker guard only — carrier seats live in the same table.
+                Rule::exists('roles', 'id')
+                    ->where('is_active', true)
+                    ->where('guard_name', 'web'),
 
                 // A Compliance Manager may only seat Viewer / Agent /
                 // Senior Agent; Owner/Admin and Compliance Manager seats are

@@ -133,49 +133,17 @@ class ShipmentService
     }
 
 
-    /**
+   /**
      * Add Stops to an existing Shipment
      */
-    public function addStops(Shipment $shipment, array $stopsData, \Illuminate\Http\Request $request)
+   public function addStops(Shipment $shipment, array $stopsData, \Illuminate\Http\Request $request)
     {
         return DB::transaction(function () use ($shipment, $stopsData, $request) {
             
-            $pickupStop = collect($stopsData)->firstWhere(function ($stop) {
-                return strcasecmp(trim($stop['stop_type'] ?? ''), 'Pickup') === 0;
-            });
-            
-            if ($pickupStop && !empty($pickupStop['track_start_date']) && !empty($pickupStop['track_start_time'])) {
-                $tzMap = [
-                    'IST' => 'Asia/Kolkata',
-                    'UTC' => 'UTC'
-                ];
-
-                $timezone = $tzMap[$pickupStop['start_timezone'] ?? 'IST'] ?? 'UTC';
-                $datetimeString = trim($pickupStop['track_start_date']) . ' ' . trim($pickupStop['track_start_time']);
-                
-                $shipment->tracking_start_at = \Carbon\Carbon::createFromFormat('Y-m-d h:i A', $datetimeString, $timezone)->setTimezone('UTC');
-                $shipment->save();
-            }
-            // -------------------------------------------------
-
             $shipment->stops()->delete();
 
             foreach ($stopsData as $index => $stop) {
                 
-                $stopType = $stop['stop_type'] ?? null;
-
-                if (!$stopType) {
-                    throw ValidationException::withMessages([
-                        'stops_data' => ["Stop #".($index + 1)." is missing the compulsory 'stop_type' field."],
-                    ]);
-                }
-
-                if (strcasecmp(trim($stopType), 'Pickup') === 0) {
-                    $stop['end_date'] = null;
-                    $stop['end_time'] = null;
-                    $stop['end_timezone'] = null;
-                }
-
                 $processedEvents = [];
                 if (isset($stop['custom_events']) && is_array($stop['custom_events'])) {
                     foreach ($stop['custom_events'] as $event) {
@@ -200,11 +168,12 @@ class ShipmentService
                     }
                 }
 
-                $shipment->stops()->create([
+             $shipment->stops()->create([
                     'stop_number' => $index + 1,
-                    'stop_type' => trim($stopType), 
+                    'stop_type' => $stop['stop_type'] ?? 'Pickup',
                     'stop_name' => $stop['stop_name'] ?? null,
                     
+                    // Location
                     'address' => $stop['address'] ?? '',
                     'address_2' => $stop['address_2'] ?? null,
                     'city' => $stop['city'] ?? null,
@@ -215,6 +184,7 @@ class ShipmentService
                     'latitude' => $stop['latitude'] ?? null,
                     'longitude' => $stop['longitude'] ?? null,
                     
+                    // Timing (Start & End)
                     'start_date' => $stop['start_date'] ?? null,
                     'start_time' => $stop['start_time'] ?? null,
                     'start_timezone' => $stop['start_timezone'] ?? null,
@@ -222,9 +192,11 @@ class ShipmentService
                     'end_time' => $stop['end_time'] ?? null,
                     'end_timezone' => $stop['end_timezone'] ?? null,
                     
+                    // Comms
                     'comment_to_driver' => $stop['comment_to_driver'] ?? null,
                     'alert_emails' => $stop['alert_emails'] ?? null,
                     
+                    // Events
                     'events' => !empty($processedEvents) ? $processedEvents : null,
                 ]);
             }
@@ -232,7 +204,6 @@ class ShipmentService
             return $shipment->load('stops');
         });
     }
-
 
     /**
      * Get all shipments for the authenticated user's company
