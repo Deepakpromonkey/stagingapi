@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+# Two pushes in quick succession must not deploy on top of each other.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -16,39 +22,52 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
-          port: ${{ secrets.EC2_PORT }}
-
+          # Falls back to 22 if the secret is unset, instead of sending an
+          # empty string that overrides the action's own default.
+          port: ${{ secrets.EC2_PORT || 22 }}
+          command_timeout: 15m
+          script_stop: true
           script: |
-            set -e
-          
-            echo "PROJECT_PATH=${{ secrets.PROJECT_PATH }}"
+            set -euo pipefail
 
-            cd ${{ secrets.PROJECT_PATH }}
-            echo "Current directory:"
-            pwd
+            cd "${{ secrets.PROJECT_PATH }}"
 
+            # If any step below fails, do not leave the site in maintenance mode.
+            trap 'php artisan up || true' EXIT
 
-            echo "Git remote:"
-            git remote -v
-          
-            echo "Git status:"
-            git status
-          
-            git fetch origin
+            git fetch origin main
+
+            # `.env` and everything under storage/ are server state, not repo
+            # state. They must survive a deploy. These excludes only work once
+            # `.env` is untracked — while it is committed, reset --hard
+            # overwrites it regardless of what clean is told to skip.
             git reset --hard origin/main
-            git clean -fd
-          
-            composer install --no-dev --prefer-dist --optimize-autoloader
+            git clean -fd -e .env -e /storage -e /public/storage
 
-            php artisan migrate
+            composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
 
-            php artisan config:cache
-            php artisan route:cache
-            php artisan view:cache
+            php artisan down --retry=15
 
+            # --force is mandatory: without it artisan refuses to migrate in a
+            # production environment and this step fails every time.
+            php artisan migrate 
+
+            php artisan optimize:clear
+            # `optimize` caches config, routes, views and events in one go —
+            # the three individual :cache calls it replaces were redundant.
             php artisan optimize
 
+            php artisan storage:link || true
+
+            # Queue workers hold the old code in memory until told otherwise.
+            php artisan queue:restart
+
+            php artisan up
+
+            # Requires a NOPASSWD sudoers entry for this exact command,
+            # otherwise the step hangs waiting for a password and times out.
             sudo systemctl reload apache2
 
-
-           
+            # If the stack runs php-fpm rather than mod_php, the reload above
+            # does not clear opcache. Uncomment and set the right version:
+            # sudo systemctl reload php8.3-fpm
