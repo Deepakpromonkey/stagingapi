@@ -8,14 +8,17 @@ use App\Http\Requests\Connect\CarrierDocumentRequest;
 use App\Http\Requests\Connect\CarrierEsignRequest;
 use App\Http\Requests\Connect\CarrierFactoringRequest;
 use App\Http\Requests\Connect\CarrierQuestionnaireRequest;
+use App\Http\Requests\Connect\CarrierSkipStepRequest;
 use App\Http\Requests\Connect\SendCarrierConnectRequest;
 use App\Http\Requests\Connect\VerifyCarrierOtpRequest;
 use App\Http\Resources\CarrierConnectRequestResource;
+use App\Mail\CarrierAlternateEmailApprovalMail;
 use App\Mail\CarrierConnectInvitationMail;
 use App\Models\BrokerAgreementDocument;
 use App\Models\CarrierConnectAnswer;
 use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
+use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
 use App\Models\Carriers\Carrier;
 use App\Models\EmailTemplate;
@@ -83,12 +86,51 @@ class CarrierConnectController extends BaseController
             })
             ->latest();
 
-        $rows = $query->get()->map(function (CarrierConnectRequest $connectRequest) {
+        $requests = $query->get();
+
+        /*
+        | The most recent successful portal sign-in per carrier, so the broker
+        | can compare where the carrier onboarded from with where they actually
+        | log in. Resolved in one query keyed by carrier user rather than per
+        | row, which would be an N+1 across the whole list.
+        |
+        | Only successful attempts count — a failed one says nothing about where
+        | the real carrier is.
+        */
+        $lastLogins = collect();
+
+        $carrierUserIds = $requests->pluck('carrier_user_id')->filter()->unique()->values();
+
+        if ($carrierUserIds->isNotEmpty()) {
+            $lastLogins = CarrierLoginAttempt::query()
+                ->select('carrier_user_id', 'ip_address', 'created_at')
+                ->whereIn('carrier_user_id', $carrierUserIds)
+                ->where('outcome', CarrierLoginAttempt::OUTCOME_SUCCESS)
+
+                // `id` breaks the tie: two sign-ins land in the same second
+                // often enough (a retry, a second device) that ordering on the
+                // timestamp alone would pick between them arbitrarily and could
+                // report the older address as the latest.
+                ->orderByDesc('created_at')
+                ->orderByDesc('id')
+                ->get()
+                ->groupBy('carrier_user_id')
+                ->map(fn ($attempts) => $attempts->first());
+        }
+
+        $rows = $requests->map(function (CarrierConnectRequest $connectRequest) use ($lastLogins) {
             $payload = (new CarrierConnectRequestResource($connectRequest))->resolve();
 
             $payload['invited_by'] = $connectRequest->user
                 ? trim($connectRequest->user->first_name.' '.$connectRequest->user->last_name)
                 : null;
+
+            $lastLogin = $connectRequest->carrier_user_id
+                ? $lastLogins->get($connectRequest->carrier_user_id)
+                : null;
+
+            $payload['last_login_ip'] = $lastLogin?->ip_address;
+            $payload['last_login_at'] = $lastLogin?->created_at;
 
             return $payload;
         });
@@ -117,17 +159,27 @@ class CarrierConnectController extends BaseController
     /**
      * The Connect button on a carrier profile. Creates (or refreshes) the
      * request and mails the carrier their onboarding link.
+     *
+     * The broker may ask for the invitation to go somewhere other than the
+     * address on the carrier's FMCSA record — a dispatch or compliance inbox,
+     * typically. That address is not trusted on the broker's word: nothing is
+     * sent to it until the carrier approves it from their FMCSA inbox. See
+     * approveAlternateEmail().
      */
     public function store(SendCarrierConnectRequest $request)
     {
         $user = $request->user();
 
-        $carrier = $this->findCarrier($request->validated()['row_id']);
+        $validated = $request->validated();
+
+        $carrier = $this->findCarrier($validated['row_id']);
 
         if (! $carrier) {
             return $this->error('Carrier not found in the carrier directory.', null, 404);
         }
 
+        // Always read off the carrier record. The client picks a route, never
+        // the registered address itself.
         $email = trim((string) (config('carrier_connect.test_email') ?: $carrier->email_address));
 
         // The FMCSA feed is dirty — plenty of rows carry junk in this column —
@@ -141,6 +193,20 @@ class CarrierConnectController extends BaseController
             );
         }
 
+        $alternate = strtolower(trim((string) ($validated['email'] ?? '')));
+
+        // An "alternate" that is really the registered address needs no
+        // approval — it would be asking that inbox to approve itself.
+        $wantsAlternate = ($validated['email_option'] ?? 'fmcsa') === 'alternate'
+            && $alternate !== ''
+            && $alternate !== strtolower($email);
+
+        // Belt and braces over the form request's `email` rule, since this
+        // address is what the invitation will eventually be mailed to.
+        if ($wantsAlternate && ! filter_var($alternate, FILTER_VALIDATE_EMAIL)) {
+            return $this->error('Enter a valid email address.', null, 422);
+        }
+
         // The document the carrier will be asked to sign at the last step. Null
         // is fine — the carrier can still onboard, they just cannot e-sign yet.
         $agreement = BrokerAgreementDocument::forCompany($user->company_id)
@@ -148,7 +214,9 @@ class CarrierConnectController extends BaseController
             ->latest()
             ->first();
 
-        $connectRequest = DB::transaction(function () use ($user, $carrier, $email, $agreement) {
+        $connectRequest = DB::transaction(function () use (
+            $user, $carrier, $email, $agreement, $wantsAlternate, $alternate
+        ) {
 
             // updateOrCreate on (company_id, carrier_row_id) means re-clicking
             // Connect resends the invitation and pushes the expiry out, rather
@@ -158,7 +226,9 @@ class CarrierConnectController extends BaseController
                 'carrier_row_id' => $carrier->row_id,
             ]);
 
-            if (! $connectRequest->exists) {
+            $isNew = ! $connectRequest->exists;
+
+            if ($isNew) {
                 $connectRequest->uuid = Str::uuid();
                 $connectRequest->token = Str::random(64);
                 $connectRequest->status = CarrierConnectRequest::STATUS_NEW;
@@ -168,14 +238,68 @@ class CarrierConnectController extends BaseController
                 'user_id' => $user->id,
                 'carrier_dot_number' => $carrier->dot_number,
                 'carrier_legal_name' => $carrier->legal_name ?: $carrier->dba_name,
-                'carrier_email' => $email,
                 'carrier_phone' => $carrier->telephone,
                 'agreement_document_id' => $agreement?->id,
-                'sent_on' => now(),
-            ])->save();
+            ]);
+
+            if ($wantsAlternate) {
+                /*
+                | Park the address and start the approval clock. `sent_on` is
+                | deliberately left alone: no invitation has gone out, so
+                | starting the link's expiry here would burn the lifetime while
+                | the carrier is still deciding — and on an existing request it
+                | would silently extend an invitation nobody asked to resend.
+                */
+                $connectRequest->fill([
+                    'carrier_email' => $connectRequest->carrier_email ?: $email,
+                    'pending_email' => $alternate,
+                    'pending_email_token' => Str::random(64),
+                    'pending_email_requested_at' => now(),
+                    'pending_email_approved_at' => null,
+                ]);
+            } else {
+                // Choosing the registered address abandons any approval still
+                // outstanding, so a stale request cannot be approved later and
+                // silently redirect the invitation.
+                $connectRequest->fill([
+                    'carrier_email' => $email,
+                    'pending_email' => null,
+                    'pending_email_token' => null,
+                    'pending_email_requested_at' => null,
+                    'pending_email_approved_at' => null,
+                    'sent_on' => now(),
+                ]);
+            }
+
+            $connectRequest->save();
+
+            /*
+            | A carrier who already onboarded with another broker has proved
+            | their phone, their ID, their bank and handed over their W-9 and
+            | COI. None of that is broker-specific, so making them repeat it is
+            | pure friction. Seed the new request from the old one and leave
+            | them only the questionnaire and the agreement, which genuinely
+            | belong to this broker.
+            |
+            | Only on creation: re-clicking Connect on an existing request must
+            | not overwrite progress the carrier has since made here.
+            */
+            if ($isNew) {
+                $this->prefillFromPreviousOnboarding($connectRequest);
+            }
 
             return $connectRequest->fresh(['company']);
         });
+
+        if ($wantsAlternate) {
+            $this->sendAlternateEmailApprovalMail($connectRequest, $email, $user);
+
+            return $this->respondWithRequest(
+                $connectRequest,
+                'Approval requested. We have emailed the carrier’s FMCSA-registered address to confirm sending the onboarding link to '.$alternate.'.',
+                201
+            );
+        }
 
         $this->sendInvitationMail($connectRequest, $user);
 
@@ -184,6 +308,50 @@ class CarrierConnectController extends BaseController
             'Connection request sent. The carrier has been emailed an onboarding link.',
             201
         );
+    }
+
+    /**
+     * The link in the approval email, opened from the carrier's FMCSA-registered
+     * inbox. Reaching it is the carrier's consent to onboarding being run
+     * through a different address, so this is the only thing that promotes the
+     * pending address and releases the invitation to it.
+     *
+     * The token is single-use and cleared on approval, so a forwarded or
+     * re-crawled link cannot re-point an invitation later.
+     */
+    public function approveAlternateEmail(string $token)
+    {
+        $connectRequest = CarrierConnectRequest::where('pending_email_token', $token)
+            ->with('company')
+            ->first();
+
+        if (! $connectRequest || ! $connectRequest->pending_email) {
+            return redirect()->away($this->frontendUrl('/carrier/email-approval?status=invalid'));
+        }
+
+        $lifetime = (int) config('carrier_connect.request_lifetime_hours', 72);
+
+        if ($connectRequest->pending_email_requested_at?->copy()->addHours($lifetime)->isPast() ?? true) {
+            return redirect()->away($this->frontendUrl('/carrier/email-approval?status=expired'));
+        }
+
+        $approvedEmail = $connectRequest->pending_email;
+
+        $connectRequest->forceFill([
+            'carrier_email' => $approvedEmail,
+            'pending_email' => null,
+            'pending_email_token' => null,
+            'pending_email_approved_at' => now(),
+
+            // The invitation goes out now, so this is where its clock starts.
+            'sent_on' => now(),
+        ])->save();
+
+        $this->sendInvitationMail($connectRequest->fresh(['company']), $connectRequest->user);
+
+        return redirect()->away($this->frontendUrl(
+            '/carrier/email-approval?status=approved&email='.urlencode($approvedEmail)
+        ));
     }
 
 
@@ -249,7 +417,7 @@ class CarrierConnectController extends BaseController
      * proof the carrier controls the mailbox we sent it to, so this is what
      * marks the email verified.
      */
-    public function open(string $token)
+    public function open(Request $request, string $token)
     {
         $connectRequest = CarrierConnectRequest::where('token', $token)->first();
 
@@ -266,6 +434,12 @@ class CarrierConnectController extends BaseController
                 'first_visit_at' => now(),
                 'email_verified_at' => now(),
                 'status' => CarrierConnectRequest::STATUS_EMAIL_VERIFIED,
+
+                // Where the carrier opened the invitation from. Captured on the
+                // first touch and left alone afterwards, so it answers "where
+                // did this onboarding come from" rather than drifting to
+                // wherever they happened to reload it last.
+                'onboarding_ip' => $request->ip(),
             ])->save();
         }
 
@@ -281,6 +455,13 @@ class CarrierConnectController extends BaseController
 
         if (! $connectRequest) {
             return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        // Backstop for a carrier who reached the wizard without passing through
+        // open() — a bookmarked or forwarded link, say. Still first-touch-only,
+        // so the recorded address does not move once it is known.
+        if ($connectRequest->onboarding_ip === null) {
+            $connectRequest->forceFill(['onboarding_ip' => $request->ip()])->save();
         }
 
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
@@ -776,9 +957,65 @@ class CarrierConnectController extends BaseController
             $attributes['factoring_document_name'] = null;
         }
 
+        /*
+        | A carrier who factors is paid by their factoring company, not by the
+        | broker, so there is no payout account for the broker to collect — the
+        | bank step stops applying the moment they say yes. Recorded as a skip
+        | so the broker sees why it is not there, rather than as an unexplained
+        | gap.
+        |
+        | Switching back to "no" clears it again: the bank step applies once
+        | more, and a stale skip would let them past a step that now counts.
+        */
+        if ($usesFactoring) {
+            if ($connectRequest->stripe_verified_at === null) {
+                $attributes['bank_skipped_at'] = now();
+            }
+        } elseif ($connectRequest->bank_skipped_at !== null) {
+            $attributes['bank_skipped_at'] = null;
+        }
+
         $connectRequest->forceFill($attributes)->save();
 
         return $this->respondWithRequest($connectRequest, 'Factoring details saved.');
+    }
+
+    /**
+     * Records that the carrier chose to move past the government ID or bank
+     * step without completing it.
+     *
+     * Only these two are skippable. The phone check, the questionnaire and the
+     * agreement are not: the first is what proves we are talking to the
+     * carrier, and the other two are the broker's own requirements.
+     */
+    public function skipStep(CarrierSkipStepRequest $request)
+    {
+        $data = $request->validated();
+
+        $connectRequest = $this->resolveRequest($data['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        // Skipping something already done would throw away a real verification.
+        if ($data['step'] === 'identity') {
+            if ($connectRequest->didit_status === 'Approved') {
+                return $this->respondWithRequest($connectRequest, 'Your ID is already verified.');
+            }
+
+            $connectRequest->forceFill(['identity_skipped_at' => now()])->save();
+
+            return $this->respondWithRequest($connectRequest, 'Government ID step skipped.');
+        }
+
+        if ($connectRequest->stripe_verified_at !== null) {
+            return $this->respondWithRequest($connectRequest, 'Your bank account is already connected.');
+        }
+
+        $connectRequest->forceFill(['bank_skipped_at' => now()])->save();
+
+        return $this->respondWithRequest($connectRequest, 'Bank account step skipped.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1175,12 +1412,18 @@ class CarrierConnectController extends BaseController
      * and falls back to the packaged mailable otherwise. A delivery failure
      * must not lose the request that was just created, so it only logs.
      */
-    private function sendInvitationMail(CarrierConnectRequest $connectRequest, User $user): void
+    private function sendInvitationMail(CarrierConnectRequest $connectRequest, ?User $user): void
     {
-        $connectUrl = rtrim(config('app.url'), '/')
-            .'/carrier/connect/'.$connectRequest->token;
+        // Built from the request's own host rather than APP_URL, for the reason
+        // set out in sendAlternateEmailApprovalMail(): APP_URL is not
+        // necessarily an address that routes to this application.
+        $connectUrl = url('/carrier/connect/'.$connectRequest->token);
 
-        $brokerName = trim($user->first_name.' '.$user->last_name) ?: $connectRequest->company->company_name;
+        // Nullable because approval arrives from the carrier's inbox, with no
+        // broker session behind it — and the teammate who sent the request may
+        // since have been removed.
+        $brokerName = trim(($user?->first_name ?? '').' '.($user?->last_name ?? ''))
+            ?: $connectRequest->company->company_name;
 
         try {
             $template = EmailTemplate::forCompany($connectRequest->company_id)
@@ -1222,6 +1465,59 @@ class CarrierConnectController extends BaseController
             Log::info('=========== Carrier Connect Invitation ===========');
             Log::info('To', ['email' => $connectRequest->carrier_email]);
             Log::info('Link', ['url' => $connectUrl]);
+            Log::info('==================================================');
+        }
+    }
+
+    /**
+     * Asks the carrier, at their FMCSA-registered address, to approve running
+     * onboarding through a different inbox.
+     *
+     * This goes to the registered address and nowhere else — mailing the
+     * alternate address at this point would defeat the check, since the whole
+     * question is whether the carrier recognises it.
+     */
+    private function sendAlternateEmailApprovalMail(
+        CarrierConnectRequest $connectRequest,
+        string $fmcsaEmail,
+        ?User $user
+    ): void {
+        /*
+        | url() resolves against the host this request actually arrived on,
+        | rather than APP_URL. The two differ in every local setup here — the
+        | API is served on 127.0.0.1:8000 while APP_URL still reads
+        | http://localhost — and a link built from APP_URL lands on a host that
+        | does not route to Laravel at all, so clicking it appears to do
+        | nothing. Same reasoning as the document URLs in
+        | CarrierConnectRequestResource.
+        */
+        $approvalUrl = url('/carrier/connect/approve-email/'.$connectRequest->pending_email_token);
+
+        $brokerName = trim(($user?->first_name ?? '').' '.($user?->last_name ?? ''))
+            ?: $connectRequest->company->company_name;
+
+        try {
+            Mail::to($fmcsaEmail)->send(new CarrierAlternateEmailApprovalMail(
+                $connectRequest,
+                $approvalUrl,
+                $brokerName,
+                $connectRequest->pending_email
+            ));
+        } catch (\Throwable $e) {
+            // Matches sendInvitationMail: the request is already saved, so a
+            // mail failure is logged rather than losing the broker's work.
+            Log::error('Carrier alternate email approval mail failed', [
+                'connect_request' => $connectRequest->uuid,
+                'email' => $fmcsaEmail,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        if (app()->environment('local')) {
+            Log::info('======= Carrier Alternate Email Approval =========');
+            Log::info('To (FMCSA)', ['email' => $fmcsaEmail]);
+            Log::info('Requested for', ['email' => $connectRequest->pending_email]);
+            Log::info('Link', ['url' => $approvalUrl]);
             Log::info('==================================================');
         }
     }
@@ -1287,6 +1583,200 @@ class CarrierConnectController extends BaseController
         $path = Storage::disk($disk)->putFileAs($directory, $file, $name);
 
         return $path ? ['disk' => $disk, 'path' => $path] : null;
+    }
+
+    /**
+     * Seeds a brand new request from the same carrier's most recent onboarding
+     * with a different broker.
+     *
+     * What carries over is what belongs to the *carrier* — their verified
+     * phone, their government ID check, their payout account, their compliance
+     * paperwork. What does not carry over is what belongs to the *broker*: the
+     * questionnaire, the agreement and its signature. Those are re-answered and
+     * re-signed for every broker, which is the whole point of onboarding again.
+     *
+     * The email is also deliberately left unverified — the carrier still has to
+     * open this broker's own invitation link, which is what proves they control
+     * the address it was sent to.
+     */
+    private function prefillFromPreviousOnboarding(CarrierConnectRequest $connectRequest): void
+    {
+        $source = CarrierConnectRequest::query()
+            ->where('carrier_row_id', $connectRequest->carrier_row_id)
+            ->where('company_id', '!=', $connectRequest->company_id)
+            ->where('id', '!=', $connectRequest->id)
+
+            // Something worth copying. A request that never got past the
+            // invitation has nothing to give.
+            ->where(function ($query) {
+                $query->whereNotNull('mobile_verified_at')
+                    ->orWhereNotNull('stripe_verified_at')
+                    ->orWhere('didit_status', 'Approved');
+            })
+
+            // A finished onboarding is the most complete source; failing that,
+            // the most recently worked on.
+            ->orderByRaw("CASE WHEN status = ? THEN 0 ELSE 1 END", [CarrierConnectRequest::STATUS_COMPLETED])
+            ->orderByDesc('updated_at')
+            ->with('documents')
+            ->first();
+
+        if (! $source) {
+            return;
+        }
+
+        $attributes = [
+            'prefilled_from_request_id' => $source->id,
+            'prefilled_at' => now(),
+
+            // The number the carrier actually verified, which is not
+            // necessarily the one on the FMCSA record.
+            'carrier_phone' => $source->carrier_phone ?: $connectRequest->carrier_phone,
+            'mobile_verified_at' => $source->mobile_verified_at,
+
+            'didit_session_id' => $source->didit_session_id,
+            'didit_status' => $source->didit_status,
+            'didit_responded_at' => $source->didit_responded_at,
+            'didit_response' => $source->didit_response,
+            'didit_risk_flagged' => $source->didit_risk_flagged,
+            'didit_registration_ip' => $source->didit_registration_ip,
+
+            'stripe_express_account' => $source->stripe_express_account,
+            'stripe_verified_at' => $source->stripe_verified_at,
+
+            'uses_factoring_company' => $source->uses_factoring_company,
+            'factoring_company_name' => $source->factoring_company_name,
+            'factoring_answered_at' => $source->factoring_answered_at,
+
+            // The portal login is the carrier's own and spans brokers, so the
+            // new request points at the same account rather than provisioning
+            // a second one.
+            'carrier_user_id' => $source->carrier_user_id,
+        ];
+
+        /*
+        | The factoring answer carries over, so the waiver it implies has to
+        | come with it — otherwise a factoring carrier arrives with the question
+        | already answered but the bank step still barring the way.
+        |
+        | A skip the carrier chose for themselves is deliberately NOT carried
+        | over: passing on the ID check for one broker is not consent to pass on
+        | it for the next, who may well want it done.
+        */
+        if ($source->uses_factoring_company && $source->stripe_verified_at === null) {
+            $attributes['bank_skipped_at'] = now();
+        }
+
+        /*
+        | Files are copied, never referenced. They live under a per-company
+        | prefix, and deleteDocument() removes the underlying object — sharing a
+        | path would let one broker's carrier delete a file the other broker's
+        | request still points at.
+        */
+        if ($source->factoring_document_path) {
+            $copied = $this->copyPrivateFile(
+                $source->factoring_document_disk,
+                $source->factoring_document_path,
+                'carrier-factoring/'.$connectRequest->company_id,
+                $connectRequest->uuid
+            );
+
+            if ($copied) {
+                $attributes['factoring_document_disk'] = $copied['disk'];
+                $attributes['factoring_document_path'] = $copied['path'];
+                $attributes['factoring_document_name'] = $source->factoring_document_name;
+            }
+        }
+
+        foreach ($source->documents as $document) {
+            $copied = $this->copyPrivateFile(
+                $document->disk,
+                $document->path,
+                'carrier-documents/'.$connectRequest->company_id,
+                $connectRequest->uuid.'-'.$document->type
+            );
+
+            if (! $copied) {
+                continue;
+            }
+
+            $connectRequest->documents()->updateOrCreate(
+                ['type' => $document->type],
+                [
+                    'disk' => $copied['disk'],
+                    'path' => $copied['path'],
+                    'name' => $document->name,
+                    'size' => $document->size,
+                    'mime' => $document->mime,
+                ]
+            );
+        }
+
+        // status tracks the furthest step reached, so it has to reflect what
+        // was just carried over or the request would read as untouched.
+        if ($source->stripe_verified_at) {
+            $attributes['status'] = CarrierConnectRequest::STATUS_BANK_VERIFIED;
+        } elseif ($source->didit_status === 'Approved') {
+            $attributes['status'] = CarrierConnectRequest::STATUS_ID_VERIFIED;
+        } elseif ($source->mobile_verified_at) {
+            $attributes['status'] = CarrierConnectRequest::STATUS_MOBILE_VERIFIED;
+        }
+
+        $connectRequest->forceFill($attributes)->save();
+
+        // Sets documents_completed_at only if every required type made it
+        // across, so a failed copy cannot mark the step done.
+        $this->syncDocumentsCompletion($connectRequest);
+
+        Log::info('Carrier onboarding prefilled from a previous broker', [
+            'connect_request' => $connectRequest->uuid,
+            'source_request' => $source->uuid,
+            'documents_copied' => $connectRequest->documents()->count(),
+        ]);
+    }
+
+    /**
+     * Duplicates a stored upload so the new request owns its own copy.
+     *
+     * A missing source or a storage failure returns null rather than throwing:
+     * the carrier can always upload the file again, which is a far better
+     * outcome than the broker's Connect click failing outright.
+     */
+    private function copyPrivateFile(
+        ?string $disk,
+        ?string $path,
+        string $directory,
+        string $prefix
+    ): ?array {
+        if (! $disk || ! $path) {
+            return null;
+        }
+
+        try {
+            if (! Storage::disk($disk)->exists($path)) {
+                return null;
+            }
+
+            $targetDisk = config('filesystems.default');
+
+            $extension = pathinfo($path, PATHINFO_EXTENSION);
+
+            $name = $prefix.'-'.now()->format('YmdHis').'-'.Str::random(6)
+                .($extension ? '.'.$extension : '');
+
+            $target = rtrim($directory, '/').'/'.$name;
+
+            Storage::disk($targetDisk)->put($target, Storage::disk($disk)->get($path));
+
+            return ['disk' => $targetDisk, 'path' => $target];
+        } catch (\Throwable $e) {
+            Log::warning('Could not copy a carrier upload while prefilling', [
+                'path' => $path,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     private function deletePrivateFile(?string $disk, ?string $path): void

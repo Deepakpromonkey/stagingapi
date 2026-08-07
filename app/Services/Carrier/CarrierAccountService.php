@@ -189,7 +189,7 @@ class CarrierAccountService
     ): void {
         $connectRequest->loadMissing(['company', 'user']);
 
-        $portalUrl = $this->portalUrl();
+        $portalUrl = self::loginUrl();
 
         $brokerName = $connectRequest->company->company_name;
 
@@ -479,7 +479,14 @@ class CarrierAccountService
         return $carrierUser->fresh()->load('carrierCompany', 'roles.permissions');
     }
 
-    private function portalUrl(): string
+    /**
+     * Where a carrier signs in to the portal.
+     *
+     * Public and static because the onboarding resource shows the same link on
+     * the completion screen — the address the carrier is mailed and the one
+     * they are shown must not be able to drift apart.
+     */
+    public static function loginUrl(): string
     {
         return rtrim(config('carrier_connect.portal_url'), '/').'/login';
     }

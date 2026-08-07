@@ -31,8 +31,14 @@ class CarrierReportController extends BaseController
     }
 
     /**
-     * Reports against one carrier: everything this company filed, plus other
-     * companies' non-private reports.
+     * Every report against one carrier.
+     *
+     * A private report is still shown — the incident is a warning the whole
+     * network benefits from, and hiding it would let a carrier's history look
+     * clean to the next broker. What "private" withholds is the reporter's
+     * identity, not the report: for anyone outside the filing company the
+     * broker and user names are stripped before the payload is built, so they
+     * never reach the client at all.
      */
     public function index(Request $request)
     {
@@ -49,15 +55,19 @@ class CarrierReportController extends BaseController
         $companyId = $request->user()->company_id;
 
         $reports = CarrierReport::where('carrier_id', $carrier->id)
-            ->where(function ($query) use ($companyId) {
-                $query->where('company_id', $companyId)
-                    ->orWhere('is_private', false);
-            })
             ->with(['user:id,first_name,last_name', 'company:id,company_name'])
             ->latest()
             ->get()
             ->map(function (CarrierReport $report) use ($companyId) {
                 $isOwn = $report->company_id === $companyId;
+
+                /*
+                | The identity is withheld here, in the payload, rather than
+                | left to the client to hide. Anything sent is readable in the
+                | network tab whether or not it is drawn on screen, so a private
+                | report's attribution must not be serialised at all.
+                */
+                $showsReporter = $isOwn || ! $report->is_private;
 
                 return [
                     'uuid' => $report->uuid,
@@ -78,12 +88,12 @@ class CarrierReportController extends BaseController
                     'is_private' => $report->is_private,
                     'is_own_company' => $isOwn,
 
-                    // A private report is only ever returned to its author's
-                    // company, so attribution is safe to expose here.
-                    'reported_by' => $report->user
+                    'reported_by' => $showsReporter && $report->user
                         ? trim($report->user->first_name.' '.$report->user->last_name)
                         : null,
-                    'reported_by_company' => $report->company?->company_name,
+                    'reported_by_company' => $showsReporter
+                        ? $report->company?->company_name
+                        : null,
 
                     // Delivery detail is the reporter's business, not the wider
                     // audience's.
