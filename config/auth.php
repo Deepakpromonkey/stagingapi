@@ -1,6 +1,5 @@
 <?php
 
-use App\Models\CarrierUser;
 use App\Models\User;
 
 return [
@@ -43,17 +42,6 @@ return [
             'driver' => 'session',
             'provider' => 'users',
         ],
-
-        /*
-        | Carrier portal. Carriers sign in with Sanctum tokens like broker
-        | staff, but they are a different model with a different permission
-        | matrix — this guard is what keeps the two sets of roles apart in
-        | Spatie (see config/carrier_rbac.php).
-        */
-        'carrier' => [
-            'driver' => 'sanctum',
-            'provider' => 'carrier_users',
-        ],
     ],
 
     /*
@@ -77,11 +65,6 @@ return [
         'users' => [
             'driver' => 'eloquent',
             'model' => env('AUTH_MODEL', User::class),
-        ],
-
-        'carrier_users' => [
-            'driver' => 'eloquent',
-            'model' => CarrierUser::class,
         ],
 
         // 'users' => [

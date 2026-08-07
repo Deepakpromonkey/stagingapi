@@ -6,7 +6,6 @@ use App\Http\Controllers\Api\V1\BaseController;
 use App\Http\Requests\Auth\ChangePasswordRequest;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\SignupRequest;
-use App\Http\Requests\Auth\UpdateProfileRequest;
 use App\Http\Requests\Auth\VerifyLoginOtpRequest;
 use App\Http\Resources\AuthUserResource;
 use App\Services\AuthService;
@@ -104,20 +103,6 @@ class AuthController extends BaseController
         return $this->success(
             new AuthUserResource($user),
             'Password changed successfully.'
-        );
-    }
-
-    public function updateProfile(UpdateProfileRequest $request)
-    {
-        $user = $this->authService->updateProfile(
-            $request->user(),
-            $request->validated(),
-            $request->file('profile_image')
-        );
-
-        return $this->success(
-            new AuthUserResource($user),
-            'Profile updated successfully.'
         );
     }
 }
