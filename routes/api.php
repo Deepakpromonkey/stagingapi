@@ -11,7 +11,6 @@ use App\Http\Controllers\Api\V1\CarrierPortal\CarrierLoadController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierPasswordResetController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierProfileController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierUserController;
-use App\Services\Carrier\CarrierPortalDocumentService;
 use App\Http\Controllers\Api\V1\CarrierReportController;
 use App\Http\Controllers\Api\V1\CarrierShortlistController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
@@ -29,6 +28,7 @@ use App\Http\Controllers\SearchHistoryController;
 use App\Http\Middleware\EnsureBrokerUser;
 use App\Http\Middleware\EnsureCarrierUser;
 use App\Http\Middleware\EnsurePasswordChanged;
+use App\Services\Carrier\CarrierPortalDocumentService;
 use Illuminate\Support\Facades\Route;
 use Spatie\Permission\Middleware\PermissionMiddleware;
 
@@ -78,6 +78,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/stripe/connect', [CarrierConnectController::class, 'connectStripe']);
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
+            Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);
             Route::post('/answers', [CarrierConnectController::class, 'saveAnswers']);
             Route::post('/documents', [CarrierConnectController::class, 'uploadDocument']);
@@ -87,7 +88,7 @@ Route::prefix('v1')->group(function () {
 
         // Sending an SMS costs money, so resends get their own tight bucket.
         Route::post('/otp/send', [CarrierConnectController::class, 'sendOtp'])
-            ->middleware('throttle:3,1');
+            ->middleware('throttle:10,1');
 
         // Guessing is already bounded by otp_attempts; this just stops someone
         // hammering the endpoint to burn through codes.

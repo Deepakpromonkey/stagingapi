@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
+use App\Services\Carrier\CarrierAccountService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -38,12 +39,49 @@ class CarrierConnectRequestResource extends JsonResource
                 'phone' => $this->carrier_phone,
             ],
 
+            /*
+            | An alternate address the broker asked for that is still waiting on
+            | the carrier's approval. While this is set, nothing has been sent to
+            | it — the broker needs to see that, rather than assume the carrier
+            | is sitting on an invitation.
+            |
+            | The approval token is never exposed here: holding it is what
+            | constitutes the carrier's consent.
+            */
+            // Set when this request was seeded from the carrier's onboarding
+            // with an earlier broker, so the wizard can say why the first few
+            // steps are already done rather than leaving it unexplained.
+            'prefilled' => $this->prefilled_at !== null,
+
+            'pending_email_approval' => $this->pending_email !== null,
+            'pending_email' => $this->pending_email,
+            'pending_email_requested_at' => $this->pending_email_requested_at,
+            'pending_email_approved_at' => $this->pending_email_approved_at,
+
             // Step completion flags, which is all the wizard needs to decide
             // where to drop the carrier back in.
             'email_verified' => $this->email_verified_at !== null,
             'mobile_verified' => $this->mobile_verified_at !== null,
             'identity_verified' => $this->didit_status === 'Approved',
             'bank_verified' => $this->stripe_verified_at !== null,
+
+            /*
+            | The carrier chose to move past these without completing them, or —
+            | for the bank — said they use a factoring company, which makes a
+            | payout account moot.
+            |
+            | Kept separate from the *_verified flags on purpose. Folding a skip
+            | into "verified" would tell the broker something was checked when
+            | it was not, and that is the one thing this screen must not do.
+            */
+            'identity_skipped' => $this->identity_skipped_at !== null,
+            'bank_skipped' => $this->bank_skipped_at !== null,
+
+            // What the wizard gates on: done, or deliberately passed over.
+            'identity_settled' => $this->didit_status === 'Approved'
+                || $this->identity_skipped_at !== null,
+            'bank_settled' => $this->stripe_verified_at !== null
+                || $this->bank_skipped_at !== null,
             'factoring_answered' => $this->factoring_answered_at !== null,
             'questionnaire_completed' => $this->questionnaire_completed_at !== null,
             'documents_completed' => $this->documents_completed_at !== null,
@@ -57,6 +95,17 @@ class CarrierConnectRequestResource extends JsonResource
             // Flagged when Didit saw the session come from a VPN, Tor exit or a
             // data centre. Surfaced so the broker can review before tendering.
             'identity_risk_flagged' => (bool) $this->didit_risk_flagged,
+
+            /*
+            | Where this carrier came from.
+            |
+            | `onboarding_ip` is the address the invitation was opened from, and
+            | exists for every request. `identity_ip` is what Didit saw during
+            | the ID check, so it is only present when that step was actually
+            | taken — the two disagreeing is worth a broker's attention.
+            */
+            'onboarding_ip' => $this->onboarding_ip,
+            'identity_ip' => $this->didit_registration_ip,
 
             'factoring' => [
                 'uses_factoring_company' => $this->uses_factoring_company,
@@ -109,6 +158,11 @@ class CarrierConnectRequestResource extends JsonResource
                 'email' => $this->portal_account_email,
                 'provisioned_at' => $this->portal_account_provisioned_at,
                 'error' => $this->portal_account_error,
+
+                // Shown on the completion screen so the carrier can reach the
+                // portal without digging the link out of the credentials email.
+                // Same source as that email, so the two cannot diverge.
+                'login_url' => CarrierAccountService::loginUrl(),
             ],
 
             // Served by this API rather than linked straight to S3: the bucket
@@ -162,6 +216,16 @@ class CarrierConnectRequestResource extends JsonResource
         // is still pending, not a rejection.
         if (in_array($this->didit_status, ['Declined', 'Rejected', 'Failed', 'Expired'], true)) {
             return ['declined', 'ID check failed'];
+        }
+
+        /*
+        | Waiting on the carrier to approve a different address. Only reported
+        | as the stage when onboarding has not actually started — if the carrier
+        | is already part-way through, that progress is the more useful headline
+        | and the pending redirect is carried by `pending_email_approval`.
+        */
+        if ($this->pending_email !== null && $this->first_visit_at === null) {
+            return ['pending_approval', 'Awaiting email approval'];
         }
 
         $lifetime = (int) config('carrier_connect.request_lifetime_hours', 72);
