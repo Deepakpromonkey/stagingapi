@@ -113,9 +113,33 @@ class CreateShipmentRequest extends FormRequest
                 'boolean',
             ],
  
+            'broker_dispatcher_name' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'broker_dispatcher_email' => [
+                'nullable',
+                'email',
+                'max:255',
+            ],
+
             'tracking_start_at' => [
                 'nullable',
                 'date',
+            ],
+
+            /*
+            | Bounded on both ends. Under a minute drains a phone battery inside
+            | a shift and buys no useful precision; over six hours is not
+            | tracking. Omitted means the column default of 5 minutes.
+            */
+            'tracking_interval_seconds' => [
+                'nullable',
+                'integer',
+                'min:60',
+                'max:21600',
             ],
  
             

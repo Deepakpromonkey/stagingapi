@@ -31,10 +31,10 @@ class Shipment extends Model
         'driver_phone_3',
         'driver_type',
         'team_load',
+        'broker_dispatcher_name',
+        'broker_dispatcher_email',
         'tracking_start_at',
-        'update_datetime',
-        'tracking_days',
-        'tracking_interval',
+        'tracking_interval_seconds',
         'email_updates_to',
         'notes',
         'status',
@@ -43,9 +43,9 @@ class Shipment extends Model
     protected $casts = [
         'team_load' => 'boolean',
         'tracking_start_at' => 'datetime',
-        'update_datetime' => 'datetime',
+        'tracking_interval_seconds' => 'integer',
         // TELL LARAVEL TO HANDLE THIS AS AN ARRAY
-        'email_updates_to' => 'array', 
+        'email_updates_to' => 'array',
     ];
 
     public function company()
@@ -66,5 +66,46 @@ class Shipment extends Model
     public function stops()
     {
         return $this->hasMany(ShipmentStop::class)->orderBy('stop_number');
+    }
+
+    /** The "Send Updates To" schedule rows, in the order the broker added them. */
+    public function trackingUpdates()
+    {
+        return $this->hasMany(ShipmentTrackingUpdate::class)->orderBy('sequence');
+    }
+
+    /** The broker/driver chat for this load, oldest first. */
+    public function messages()
+    {
+        return $this->hasMany(ShipmentMessage::class)->orderBy('id');
+    }
+
+    /**
+     * Shipments a given driver phone was named on.
+     *
+     * This is the entirety of a driver's reach: the broker typed their number
+     * into one of the three driver slots, and that is what grants access. The
+     * comparison is made digits-only so formatting differences between what the
+     * broker typed and what the driver signed in with cannot hide a load.
+     */
+    public function scopeForDriverPhone($query, ?string $phone)
+    {
+        $normalised = Driver::normalisePhone($phone);
+
+        if (! $normalised) {
+            // Never fall through to "every shipment" on a missing number.
+            return $query->whereRaw('1 = 0');
+        }
+
+        $digits = ltrim($normalised, '+');
+
+        return $query->where(function ($inner) use ($digits) {
+            foreach (['driver_phone_1', 'driver_phone_2', 'driver_phone_3'] as $column) {
+                $inner->orWhereRaw(
+                    "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE({$column}, ''), '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), '.', '') LIKE ?",
+                    ['%'.$digits]
+                );
+            }
+        });
     }
 }

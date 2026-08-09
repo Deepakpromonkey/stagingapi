@@ -38,16 +38,21 @@ class ShipmentResource extends JsonResource
             'driver_phone_3' => $this->driver_phone_3,
             'driver_type' => $this->driver_type,
             'team_load' => $this->team_load,
- 
+
+            // Broker dispatcher
+            'broker_dispatcher_name' => $this->broker_dispatcher_name,
+            'broker_dispatcher_email' => $this->broker_dispatcher_email,
+
             // Tracking Schedule
             'tracking_start_at' => $this->tracking_start_at,
- 
-            // 'send_updates_to' => [
-            //     'date_time' => $this->update_datetime,
-            //     'tracking_days' => $this->tracking_days,
-            //     'interval' => $this->tracking_interval,
-            // ],
-            'send_updates_to' => $this->send_updates_to,
+
+            // Every scheduled update window, shaped the way Step 1 reads it back.
+            'send_updates_to' => $this->trackingUpdates->map(fn ($update) => [
+                'date_time' => $update->date_time?->toDateTimeString(),
+                'tracking_days' => $update->tracking_days,
+                'interval' => $update->interval,
+            ])->values(),
+
             'email_updates_to' => $this->email_updates_to,
  
             

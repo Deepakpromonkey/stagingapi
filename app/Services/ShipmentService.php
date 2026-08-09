@@ -89,13 +89,22 @@ class ShipmentService
 
                 'team_load' => $data['team_load'] ?? false,
 
+                // Broker dispatcher — the person these updates come from
+                // The frontend posts "" for an untouched field — keep those NULL
+                // so a mailer can trust "has a dispatcher address" checks.
+                'broker_dispatcher_name' => trim($data['broker_dispatcher_name'] ?? '') ?: null,
+
+                'broker_dispatcher_email' => trim($data['broker_dispatcher_email'] ?? '') ?: null,
+
                 // Tracking Start
                 'tracking_start_at' => $data['tracking_start_at'] ?? null,
 
-                'update_datetime' => $data['send_updates_to']['date_time'] ?? null,
-                'tracking_days' => $data['send_updates_to']['tracking_days'] ?? null,
-                'tracking_interval' => $data['send_updates_to']['interval'] ?? null,
-                'email_updates_to' => $data['email_updates_to'] ?? null,
+                // How often the driver app reports in on this load. The frontend
+                // posts "" for an untouched select, which would fail the integer
+                // column, so anything blank falls back to five minutes.
+                'tracking_interval_seconds' => (int) ($data['tracking_interval_seconds'] ?? 0) ?: 300,
+
+                'email_updates_to' => $this->normaliseEmailList($data['email_updates_to'] ?? null),
 
 
                 // Notes
@@ -108,8 +117,155 @@ class ShipmentService
 
             ]);
 
-            return $shipment->fresh();
+            $this->syncTrackingUpdates($shipment, $data['send_updates_to'] ?? []);
+
+            return $shipment->fresh(['trackingUpdates']);
         });
+    }
+
+    /**
+     * Store every "Send Updates To" row the broker added.
+     *
+     * The frontend posts a list of rows; rows the broker left completely
+     * untouched are skipped so an empty repeater does not create a schedule.
+     */
+    private function syncTrackingUpdates(Shipment $shipment, $rows): void
+    {
+        if (! is_array($rows)) {
+            return;
+        }
+
+        $sequence = 0;
+
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $dateTime = $row['date_time'] ?? null;
+            $trackingDays = $row['tracking_days'] ?? null;
+            $interval = $row['interval'] ?? null;
+
+            if (blank($dateTime) && blank($trackingDays) && blank($interval)) {
+                continue;
+            }
+
+            $shipment->trackingUpdates()->create([
+                'sequence' => ++$sequence,
+                'date_time' => $dateTime ?: null,
+                'tracking_days' => $trackingDays ?: null,
+                'interval' => $interval ?: null,
+            ]);
+        }
+    }
+
+    /**
+     * "" -> null, so an inapplicable field never reaches a typed column.
+     *
+     * A form posts an empty string for a field the user never filled in. That
+     * is fine for a VARCHAR but fatal for DATE/DECIMAL columns under MySQL
+     * strict mode, which rejects '' rather than coercing it.
+     */
+    private function blankToNull($value)
+    {
+        if (is_string($value)) {
+            $value = trim($value);
+        }
+
+        return ($value === '' || $value === null) ? null : $value;
+    }
+
+    /**
+     * Normalise an email list into a clean array for storage.
+     *
+     * Accepts either an array (Step 1's chip input) or a comma/semicolon
+     * separated string (Step 2's per-stop alert field). Trims, drops blanks
+     * and de-duplicates, and returns null rather than an empty array so the
+     * column stays NULL when nothing was entered.
+     */
+    private function normaliseEmailList($value): ?array
+    {
+        if (blank($value)) {
+            return null;
+        }
+
+        $emails = is_array($value)
+            ? $value
+            : preg_split('/[,;]+/', (string) $value);
+
+        $emails = array_filter(
+            array_map(fn ($email) => trim((string) $email), $emails ?: []),
+            fn ($email) => $email !== ''
+        );
+
+        $emails = array_values(array_unique($emails));
+
+        return $emails ?: null;
+    }
+
+    /**
+     * The ways a driver can be asked to answer a custom event.
+     *
+     * Mirrors ANSWER_TYPES in the broker frontend's Step 2. An event the driver
+     * cannot be shown a control for is not an event, so anything else falls
+     * back to free text rather than being stored and failing later in the app.
+     */
+    public const ANSWER_TYPES = [
+        'yes_no',
+        'text',
+        'textarea',
+        'number',
+        'image_upload',
+    ];
+
+    /**
+     * Normalise the broker's per-stop custom events into what the driver app
+     * renders.
+     *
+     * These are questions the broker wants answered at the stop, not values the
+     * broker fills in: the frontend collects `question` and `answer_type`, and
+     * the answer arrives later from the driver. Each event gets a stable id so
+     * an answer can point at the event it belongs to — the array index cannot
+     * do that, because editing the trip sheet rewrites every stop.
+     *
+     * The `customEventName`/`type` keys are the shape an earlier version of the
+     * frontend posted; they are still read so trip sheets saved against it keep
+     * their questions.
+     */
+    private function normaliseCustomEvents($events): ?array
+    {
+        if (! is_array($events)) {
+            return null;
+        }
+
+        $normalised = [];
+
+        foreach ($events as $event) {
+            if (! is_array($event)) {
+                continue;
+            }
+
+            $question = trim((string) ($event['question'] ?? $event['customEventName'] ?? ''));
+
+            // The repeater starts every new row blank, so a broker who added a
+            // row and thought better of it posts one with nothing in it.
+            if ($question === '') {
+                continue;
+            }
+
+            $answerType = (string) ($event['answer_type'] ?? $event['type'] ?? '');
+
+            $normalised[] = [
+                'id' => (string) Str::uuid(),
+                'question' => $question,
+                'answer_type' => in_array($answerType, self::ANSWER_TYPES, true)
+                    ? $answerType
+                    : 'text',
+                'required' => (bool) ($event['required'] ?? true),
+            ];
+        }
+
+        return $normalised ?: null;
     }
 
     /**
@@ -144,57 +300,48 @@ class ShipmentService
 
             foreach ($stopsData as $index => $stop) {
                 
-                $processedEvents = [];
-                if (isset($stop['custom_events']) && is_array($stop['custom_events'])) {
-                    foreach ($stop['custom_events'] as $event) {
-                        
-                        $eventData = [
-                            'customEventName' => $event['customEventName'] ?? 'Event',
-                            'type' => $event['type'] ?? 'text',
-                            'value' => $event['value'] ?? null,
-                        ];
-
-                        if ($eventData['type'] === 'file' && !empty($event['file_key'])) {
-                            $fileKey = $event['file_key'];
-                            
-                            if ($request->hasFile($fileKey)) {
-                                $file = $request->file($fileKey);
-                                $path = $file->store('shipments/' . $shipment->uuid . '/events', 's3');
-                                $eventData['value'] = Storage::disk('s3')->url($path);
-                            }
-                        }
-
-                        $processedEvents[] = $eventData;
-                    }
-                }
+                $processedEvents = $this->normaliseCustomEvents(
+                    $stop['custom_events'] ?? $stop['customEvents'] ?? null
+                );
 
              $shipment->stops()->create([
                     'stop_number' => $index + 1,
                     'stop_type' => $stop['stop_type'] ?? 'Pickup',
                     'stop_name' => $stop['stop_name'] ?? null,
-                    
+
+                    // Where the driver app sends the loading/delivery code
+                    'contact_name' => trim($stop['contact_name'] ?? '') ?: null,
+                    'contact_phone' => trim($stop['contact_phone'] ?? '') ?: null,
+
+
                     // Location
                     'address' => $stop['address'] ?? '',
-                    'address_2' => $stop['address_2'] ?? null,
-                    'city' => $stop['city'] ?? null,
-                    'state' => $stop['state'] ?? null,
-                    'zipcode' => $stop['zipcode'] ?? null,
-                    'country' => $stop['country'] ?? null,
+                    'address_2' => $this->blankToNull($stop['address_2'] ?? null),
+                    'city' => $this->blankToNull($stop['city'] ?? null),
+                    'state' => $this->blankToNull($stop['state'] ?? null),
+                    'zipcode' => $this->blankToNull($stop['zipcode'] ?? null),
+                    'country' => $this->blankToNull($stop['country'] ?? null),
 
-                    'latitude' => $stop['latitude'] ?? null,
-                    'longitude' => $stop['longitude'] ?? null,
-                    
+                    'latitude' => $this->blankToNull($stop['latitude'] ?? null),
+                    'longitude' => $this->blankToNull($stop['longitude'] ?? null),
+
                     // Timing (Start & End)
-                    'start_date' => $stop['start_date'] ?? null,
-                    'start_time' => $stop['start_time'] ?? null,
-                    'start_timezone' => $stop['start_timezone'] ?? null,
-                    'end_date' => $stop['end_date'] ?? null,
-                    'end_time' => $stop['end_time'] ?? null,
-                    'end_timezone' => $stop['end_timezone'] ?? null,
-                    
+                    //
+                    // The frontend posts "" for a field that does not apply to
+                    // the stop — Pickup has no End window, Delivery has no track
+                    // offset. `?? null` does not catch that, and MySQL in strict
+                    // mode rejects '' for a DATE column (error 1292), so every
+                    // one of these is emptied to NULL explicitly.
+                    'start_date' => $this->blankToNull($stop['start_date'] ?? null),
+                    'start_time' => $this->blankToNull($stop['start_time'] ?? null),
+                    'start_timezone' => $this->blankToNull($stop['start_timezone'] ?? null),
+                    'end_date' => $this->blankToNull($stop['end_date'] ?? null),
+                    'end_time' => $this->blankToNull($stop['end_time'] ?? null),
+                    'end_timezone' => $this->blankToNull($stop['end_timezone'] ?? null),
+
                     // Comms
-                    'comment_to_driver' => $stop['comment_to_driver'] ?? null,
-                    'alert_emails' => $stop['alert_emails'] ?? null,
+                    'comment_to_driver' => $this->blankToNull($stop['comment_to_driver'] ?? null),
+                    'alert_emails' => $this->normaliseEmailList($stop['alert_emails'] ?? null),
                     
                     // Events
                     'events' => !empty($processedEvents) ? $processedEvents : null,
@@ -211,7 +358,7 @@ class ShipmentService
     public function getAllForUser($user)
     {
         return Shipment::where('company_id', $user->company_id)
-            ->with('stops') 
+            ->with(['stops', 'trackingUpdates'])
             ->latest('id') 
             ->paginate(15); 
     }

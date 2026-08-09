@@ -16,6 +16,16 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    /*
+    | Broadcast authorisation. Registered here rather than through
+    | withRouting(channels:) so the guard can be named: the web panel and the
+    | driver app both authenticate with Sanctum tokens and carry no session
+    | cookie, so the default session guard would refuse every subscription.
+    */
+    ->withBroadcasting(
+        __DIR__.'/../routes/channels.php',
+        ['middleware' => ['api', 'auth:sanctum']],
+    )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'role' => RoleMiddleware::class,

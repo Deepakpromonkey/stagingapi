@@ -7,6 +7,7 @@ use App\Http\Requests\Shipment\CreateShipmentRequest;
 use App\Http\Resources\ShipmentResource;
 use App\Models\Shipment;
 use App\Models\ShipmentTemplate;
+use App\Services\DriverActivityService;
 use App\Services\ShipmentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,7 +15,8 @@ use Illuminate\Support\Facades\DB;
 class ShipmentController extends BaseController
 {
     public function __construct(
-        protected ShipmentService $shipmentService
+        protected ShipmentService $shipmentService,
+        protected DriverActivityService $driverActivity
     ) {}
 
     public function getCarrier()
@@ -117,7 +119,40 @@ class ShipmentController extends BaseController
             ->orderBy('stop_number')
             ->get();
 
+        /*
+        | What the driver replied to the custom events on each stop.
+        |
+        | The answers are written by the driver app, which keeps its own tables
+        | in this database — hence the plain query rather than a relation. One
+        | query for the whole load, then attached per stop, so a ten-stop trip
+        | sheet does not cost ten round trips.
+        */
+        $answers = DB::table('stop_event_answers')
+            ->where('shipment_id', $shipment->id)
+            ->orderBy('id')
+            ->get()
+            ->groupBy('shipment_stop_id');
+
+        $stops = $stops->map(function ($stop) use ($answers) {
+            $stop->event_answers = $answers->get($stop->id, collect())->values();
+
+            return $stop;
+        });
+
         $shipment->stops = $stops;
+
+        $shipment->send_updates_to = DB::table('shipment_tracking_updates')
+            ->where('shipment_id', $shipment->id)
+            ->orderBy('sequence')
+            ->get(['date_time', 'tracking_days', 'interval']);
+
+        /*
+        | Everything the driver app recorded on this load: who drove it, the GPS
+        | trail, equipment photos, and each stop's arrival / OTP / seal / POD.
+        | The control tower is the one screen that shows the broker's plan and
+        | the driver's execution side by side, so it is served in one response.
+        */
+        $this->driverActivity->attachTo($shipment);
 
         return $this->success(
             $shipment,

@@ -12,7 +12,9 @@ class ShipmentStop extends Model
     protected $guarded = []; 
 
     protected $casts = [
-        'events' => 'array',  
+        'events' => 'array',
+        // Stored as a JSON array so a long alert list cannot overflow the column.
+        'alert_emails' => 'array',
     ];
 
     public function shipment()

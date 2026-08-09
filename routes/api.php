@@ -25,8 +25,12 @@ use App\Http\Controllers\Api\V1\User\UserController;
 use App\Http\Controllers\Carrier\CarrierController;
 use App\Http\Controllers\CarrierQuestionController;
 use App\Http\Controllers\SearchHistoryController;
+use App\Http\Controllers\Api\V1\Driver\DriverAuthController;
+use App\Http\Controllers\Api\V1\Driver\DriverShipmentController;
+use App\Http\Controllers\Api\V1\ShipmentChatController;
 use App\Http\Middleware\EnsureBrokerUser;
 use App\Http\Middleware\EnsureCarrierUser;
+use App\Http\Middleware\EnsureDriver;
 use App\Http\Middleware\EnsurePasswordChanged;
 use App\Services\Carrier\CarrierPortalDocumentService;
 use Illuminate\Support\Facades\Route;
@@ -97,6 +101,36 @@ Route::prefix('v1')->group(function () {
 
         // Didit calls this server to server, so it carries no session.
         Route::post('/identity/webhook', [CarrierConnectController::class, 'identityWebhook']);
+    });
+
+    /*
+    | Driver app.
+    |
+    | Drivers sign in with their phone number and a texted code — there is no
+    | password and no signup. Being named on a shipment is what makes someone a
+    | driver here, so the account is created on first successful sign-in.
+    |
+    | Same Sanctum guard as everyone else, so EnsureDriver keeps broker and
+    | carrier tokens out of these routes.
+    */
+    Route::prefix('driver')->group(function () {
+
+        // Tight bucket: each call sends an SMS, which costs money, and the
+        // endpoint is unauthenticated by nature.
+        Route::middleware('throttle:5,1')->group(function () {
+            Route::post('/auth/request-otp', [DriverAuthController::class, 'requestOtp']);
+            Route::post('/auth/verify-otp', [DriverAuthController::class, 'verifyOtp']);
+        });
+
+        Route::middleware(['auth:sanctum', EnsureDriver::class])->group(function () {
+            Route::get('/me', [DriverAuthController::class, 'me']);
+            Route::post('/logout', [DriverAuthController::class, 'logout']);
+
+            // The driver's loads, and the chat on each.
+            Route::get('/shipments', [DriverShipmentController::class, 'index']);
+            Route::get('/shipments/{uuid}/messages', [ShipmentChatController::class, 'index']);
+            Route::post('/shipments/{uuid}/messages', [ShipmentChatController::class, 'store']);
+        });
     });
 
     /*
@@ -228,6 +262,16 @@ Route::prefix('v1')->group(function () {
         Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
             Route::post('/shipments', [ShipmentController::class, 'store']);
             Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']);
+        });
+
+        /*
+        | Broker side of the shipment chat. Gated on seeing the load at all —
+        | talking to the driver about a shipment you cannot view makes no sense,
+        | and there is no separate "may chat" permission to grant.
+        */
+        Route::middleware(PermissionMiddleware::using('view-loads-tracking'))->group(function () {
+            Route::get('/shipments/{uuid}/messages', [ShipmentChatController::class, 'index']);
+            Route::post('/shipments/{uuid}/messages', [ShipmentChatController::class, 'store']);
         });
 
         // Carrier search (reads the EC2 carrier database)
