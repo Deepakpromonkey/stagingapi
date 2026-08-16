@@ -36,6 +36,16 @@ use App\Services\Carrier\CarrierPortalDocumentService;
 use Illuminate\Support\Facades\Route;
 use Spatie\Permission\Middleware\PermissionMiddleware;
 
+use App\Http\Controllers\DtPay\DtPayProfileController;
+use App\Http\Controllers\DtPay\DtPayController;
+use App\Http\Controllers\DtPay\DtPayTransactionsController;
+use App\Http\Controllers\DtPay\DtPayDisputesController;
+
+use App\Http\Controllers\DtPay\DtPayCarriersController;
+use App\Http\Controllers\DtPay\DtPayAppealController;
+
+use App\Http\Controllers\DtPay\GuestPayController;
+
 Route::prefix('v1')->group(function () {
 
     Route::get('/health', function () {
@@ -343,4 +353,79 @@ Route::prefix('v1')->group(function () {
         Route::delete('/carrier-questions/{id}', [CarrierQuestionController::class, 'destroy']);
     });
 
+    /*
+    DT Pay
+    */
+    Route::middleware('auth:sanctum')->group(function () {
+
+        /*
+        Profile
+        */
+        Route::post('/dt-pay/profile/init', [DtPayProfileController::class, 'init']);
+
+        Route::post('/dt-pay/profile/methods/attach', [DtPayProfileController::class, 'attachPaymentMethods']);
+
+        Route::post('/dt-pay/stats', [DtPayController::class, 'brokerStats']);
+
+        Route::post('/dt-pay/payment/auto/loads', [DtPayController::class, 'fetchLoads']);
+        
+        Route::post('/dt-pay/payment/auto/sources', [DtPayController::class, 'fetchSources']);
+        Route::post('/dt-pay/payment/auto/fund', [DtPayController::class, 'initFunding']);
+        
+        Route::post('/dt-pay/payment/auto/finish', [DtPayController::class, 'paymentFinish']);
+        Route::post('/dt-pay/payment/manual/finish', [DtPayController::class, 'paymentManualFinish']);
+
+        Route::post('/dt-pay/payment/intent', [DtPayController::class, 'paymentIntent']);
+        Route::post('/dt-pay/payment/calculate', [DtPayController::class, 'calculateAmounts']);
+
+        Route::post('/dt-pay/payment/pay', [DtPayController::class, 'makePayment']);
+
+        Route::post('/dt-pay/transactions/init', [DtPayController::class, 'initTransaction']);
+
+        Route::post('/dt-pay/payment/manual/init', [DtPayController::class, 'initManualTransaction']);
+        Route::post('/dt-pay/payment/manual/submit', [DtPayController::class, 'submitManualTransaction']);
+        Route::post('/dt-pay/payment/manual/carrier/search', [DtPayController::class, 'manualCarrierSearch']);
+        Route::post('/dt-pay/payment/manual/carrier/update', [DtPayController::class, 'manualCarrierUpdate']);
+        Route::post('/dt-pay/payment/manual/fund', [DtPayController::class, 'initManualFunding']);
+
+        /*
+        Transactions
+        */
+        Route::post('/dt-pay/transactions', [DtPayTransactionsController::class, 'listTransactions']);
+        Route::post('/dt-pay/transactions/load', [DtPayTransactionsController::class, 'loadTransaction']);
+
+        Route::post('/dt-pay/transactions/refund', [DtPayTransactionsController::class, 'refundPayment']);
+        Route::post('/dt-pay/transactions/hold', [DtPayTransactionsController::class, 'holdPayment']);
+
+        Route::post('/dt-pay/transactions/release', [DtPayTransactionsController::class, 'releasePayment']);
+
+        /*
+        Disputes
+        */
+        Route::post('/dt-pay/disputes/init', [DtPayDisputesController::class, 'init']);
+        Route::post('/dt-pay/disputes/submit', [DtPayDisputesController::class, 'submitDispute']);
+
+        /*
+        Carriers
+        */
+        Route::post('/dt-pay/carriers/transactional_loads', [DtPayCarriersController::class, 'transactionalLoads']);
+        Route::post('/dt-pay/carriers/pod/init', [DtPayCarriersController::class, 'initPod']);
+        Route::post('/dt-pay/carriers/pod/upload', [DtPayCarriersController::class, 'uploadPod']);
+        Route::post('/dt-pay/carriers/transaction/fetch', [DtPayCarriersController::class, 'fetchTransaction']);
+
+        Route::post('/dt-pay/carriers/appeal/init', [DtPayAppealController::class, 'init']);
+        Route::post('/dt-pay/carriers/appeal/submit', [DtPayAppealController::class, 'submitAppeal']);
+    });
+
+    /*
+    DT Pay Guest Pay
+    */
+    Route::get('/guest-pay/carrier/search', [CarrierController::class, 'search']);
+
+    // Route::post('/guest-pay/carrier/search', [GuestPayController::class, 'manualCarrierSearch']);
+    Route::post('/guest-pay/transaction/load', [GuestPayController::class, 'loadTransaction']);
+    Route::post('/guest-pay/payment/init', [GuestPayController::class, 'initGuestPay']);
+    Route::post('/guest-pay/load/submit', [GuestPayController::class, 'loadSubmission']);
+    Route::post('/guest-pay/info/submit', [GuestPayController::class, 'handlePersonalSubmit']);
 });
+
