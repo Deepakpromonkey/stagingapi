@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 class CoiDocumentExtraction extends Model
 {
     use HasFactory;
+    protected $connection = 'external_db';
 
     protected $table = 'coi_document_extractions';
 

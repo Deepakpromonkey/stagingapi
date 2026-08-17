@@ -6,7 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\CoiDocumentExtraction;
 use Illuminate\Support\Facades\Validator;
-
+use Illuminate\Support\Facades\DB;
 class OcrController extends Controller
 {
     public function getOcrData(Request $request)
@@ -29,6 +29,12 @@ class OcrController extends Controller
             ->orderBy('extracted_at', 'desc')
             ->get();
 
+$coiDocument = DB::connection('external_db')
+            ->table('coi_documents')
+            ->where('dot_number', $dotNumber)
+            ->orderByDesc('uploaded_at')
+            ->first();
+
         if ($ocrData->isEmpty()) {
             return response()->json([
                 'success' => false,
@@ -40,7 +46,8 @@ class OcrController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'OCR data retrieved successfully.',
-            'data' => $ocrData
+            'data' => $ocrData,
+'coiDocument' =>$coiDocument
         ], 200);
     }
 }
