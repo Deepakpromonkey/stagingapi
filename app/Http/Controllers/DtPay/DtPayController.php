@@ -13,23 +13,28 @@ use Illuminate\Support\Facades\Storage;
 use App\Models\DtPay\DtPayModel;
 use App\Models\DtPay\DtPayLogsModel;
 use App\Models\DtPay\DtPayPaymentLoadsModel;
+use App\Models\DtPay\DTPayBrokerStats;
 
-use App\Models\Customers\CustomersModel;
-use App\Models\Shipments\ShipmentsModel;
+use App\Models\Shipment;
 
-use App\Models\Carriers\CarriersModel;
-use App\Models\Shipments\ShipmentsTrackingMethodsModel;
+use App\Models\Carriers\Carrier;
 
 use App\Models\Payments\StripeModel;
 use Stripe\StripeClient;
+
+use App\Services\ShipmentService;
 
 use Illuminate\Support\Number;
 use Illuminate\Support\Str;
 
 class DtPayController extends Controller
 {
+
+    public function __construct(
+        protected ShipmentService $shipmentService
+    ) {}
     
-    public function fetchLoads(Request $request, ShipmentsModel $shipments_model, CarriersModel $carriers_model, ShipmentsTrackingMethodsModel $shipments_tracking_methods_model){
+    public function fetchLoads(Request $request){
 
         $user = $request->user();
 
@@ -37,72 +42,17 @@ class DtPayController extends Controller
 
         if($user){
 
-            $statuses = array_column($shipments_model->status(), 'value', 'key');
-            $status_color = $shipments_model->status_colors();
-
-            /*
-            Fetch all loads
-            */
-            $_shipments = $shipments_model
-                            ->select("shipments.*", "carriers.legal_name", "shipment_tracking_methods.title as tracking_method_label")
-                            ->where('shipments.customer', $user->row_id)
-                            ->whereIn('shipments.status', [$shipments_model::STATUS_IN_TRANSIT, $shipments_model::STATUS_DELIVERED])
-                            ->join($carriers_model->getTable(), "shipments.shippment_carrier", "=", "carriers.row_id")
-                            ->leftJoin($shipments_tracking_methods_model->getTable(), "shipments.tracking_method", "=", "shipment_tracking_methods.row_id")
-                            ->get();
-
-            if($_shipments->count()){
-
-                $shipment_ids = $_shipments->pluck('row_id')->all();
-
-                $first_pickups = [];
-                $last_drop_offs = [];
-
-                $stops = DB::table('shipment_stops')
-                            ->whereIn('shipment_id', $shipment_ids)
-                            ->whereIn('stop_type', ['pickup', 'drop_off'])
-                            ->orderBy('sort_order', 'asc')
-                            ->get();
-
-                foreach($stops as $stop){
-
-                    if($stop->stop_type == 'pickup' && !isset($first_pickups[$stop->shipment_id])){
-                        $first_pickups[$stop->shipment_id] = $stop;
-                    }
-
-                    if($stop->stop_type == 'drop_off'){
-                        $last_drop_offs[$stop->shipment_id] = $stop;
-                    }
-                }
-
-                foreach($_shipments as $_shipment){
-
-                    $_shipment->pickup = $first_pickups[$_shipment->row_id] ?? null;
-                    $_shipment->drop_off = $last_drop_offs[$_shipment->row_id] ?? null;
-
-                    $_shipment->amount_formatted = Number::currency($_shipment->amount);
-
-                    $_shipment->status_label = $statuses[$_shipment->status] ?? 'NA';
-                    $_shipment->status_color = $status_color[$_shipment->status] ?? 'default';
-
-                    $_shipment->pod_label = '';
-
-                    $shipments[] = $_shipment;
-                }
-            }
+            $shipments = $this->shipmentService->getAllForUser($user);
 
             return response()->json(['status' => true, 'loads' => $shipments], 200);
         }
 
-        return response()->json(['error' => 'Unauthorized access'], 404);
+        return response()->json(['error' => 'Unauthorized access'], 200);
     }
 
     public function initFunding(
         Request $request,
-        DtPayModel $dt_pay_model,
-        ShipmentsModel $shipments_model,
-        CarriersModel $carriers_model,
-        ShipmentsTrackingMethodsModel $shipments_tracking_methods_model
+        DtPayModel $dt_pay_model
     ){
 
         $user = $request->user();
@@ -117,45 +67,19 @@ class DtPayController extends Controller
 
                 if($transaction){
 
-                    $load = $shipments_model
-                            ->select("shipments.*", "carriers.legal_name", "shipment_tracking_methods.title as tracking_method_label")
-                            ->where('shipments.row_id', $transaction->load_id)
-                            ->join($carriers_model->getTable(), "shipments.shippment_carrier", "=", "carriers.row_id")
-                            ->leftJoin($shipments_tracking_methods_model->getTable(), "shipments.tracking_method", "=", "shipment_tracking_methods.row_id")
-                            ->first();
+                    $load = Shipment::where('company_id', $user->company_id)->where('uuid', $transaction->load_id)
+                                ->with('stops')->first(); 
                     
                     if($load){
 
-                        $load->pickup = null;
-                        $load->drop_off = null;
-
-                        $stops = DB::table('shipment_stops')
-                            ->where('shipment_id', $load->row_id)
-                            ->whereIn('stop_type', ['pickup', 'drop_off'])
-                            ->orderBy('sort_order', 'asc')
-                            ->get();
-
-                        foreach($stops as $stop){
-
-                            if($stop->stop_type == 'pickup' && !isset($first_pickups[$stop->shipment_id])){
-
-                                $load->pickup = $stop;
-                            }
-
-                            if($stop->stop_type == 'drop_off'){
-
-                                $load->drop_off = $stop;
-                            }
-                        }
-
-                        $load->amount_formatted = Number::currency($load->amount);
+                        $load->amount_formatted = Number::currency($transaction->amount);
 
                         /*
                         Stripe
                         */
                         $stripe_sources = $dt_pay_model->stripePaymentSources($user);
 
-                        $amount = $load->amount;
+                        $amount = $transaction->amount;
 
                         $amounts = $dt_pay_model->calculations($amount);
 
@@ -170,10 +94,7 @@ class DtPayController extends Controller
 
     public function paymentFinish(
         Request $request,
-        DtPayModel $dt_pay_model,
-        ShipmentsModel $shipments_model,
-        CarriersModel $carriers_model,
-        ShipmentsTrackingMethodsModel $shipments_tracking_methods_model
+        DtPayModel $dt_pay_model
     ){
 
         $user = $request->user();
@@ -188,40 +109,14 @@ class DtPayController extends Controller
 
                 if($transaction){
 
-                    $load = $shipments_model
-                            ->select("shipments.*", "carriers.legal_name", "shipment_tracking_methods.title as tracking_method_label")
-                            ->where('shipments.row_id', $transaction->load_id)
-                            ->join($carriers_model->getTable(), "shipments.shippment_carrier", "=", "carriers.row_id")
-                            ->leftJoin($shipments_tracking_methods_model->getTable(), "shipments.tracking_method", "=", "shipment_tracking_methods.row_id")
-                            ->first();
+                    $load = Shipment::where('company_id', $user->company_id)->where('uuid', $transaction->load_id)
+                                ->with('stops')->first(); 
                     
                     if($load){
 
-                        $load->pickup = null;
-                        $load->drop_off = null;
+                        $load->amount_formatted = Number::currency($transaction->amount);
 
-                        $stops = DB::table('shipment_stops')
-                            ->where('shipment_id', $load->row_id)
-                            ->whereIn('stop_type', ['pickup', 'drop_off'])
-                            ->orderBy('sort_order', 'asc')
-                            ->get();
-
-                        foreach($stops as $stop){
-
-                            if($stop->stop_type == 'pickup' && !isset($first_pickups[$stop->shipment_id])){
-
-                                $load->pickup = $stop;
-                            }
-
-                            if($stop->stop_type == 'drop_off'){
-
-                                $load->drop_off = $stop;
-                            }
-                        }
-
-                        $load->amount_formatted = Number::currency($load->amount);
-
-                        $amounts = $dt_pay_model->calculations($load->amount, $transaction->payment_method);
+                        $amounts = $dt_pay_model->calculations($transaction->amount, $transaction->payment_method);
 
                         $progress = [];
 
@@ -269,10 +164,7 @@ class DtPayController extends Controller
     public function paymentManualFinish(
         Request $request,
         DtPayModel $dt_pay_model,
-        ShipmentsModel $shipments_model,
-        CarriersModel $carriers_model,
-        ShipmentsTrackingMethodsModel $shipments_tracking_methods_model,
-        DtPayPaymentLoadsModel $dt_pay_payment_loads_model
+        DtPayLogsModel $dt_pay_logs_model
     ){
 
         $user = $request->user();
@@ -283,41 +175,17 @@ class DtPayController extends Controller
 
             if($transaction_id){
 
-                $transaction = $dt_pay_model
-                                ->select(
-                                    "dt_payments.*",
-                                    "dt_payments_loads.load_ref",
-                                    "dt_payments_loads.carrier_invoice",
-                                    "dt_payments_loads.origin",
-                                    "dt_payments_loads.destination",
-                                    "dt_payments_loads.pickup_date",
-                                    "dt_payments_loads.delivery_date",
-                                    "dt_payments_loads.equipment",
-                                    "dt_payments_loads.commodity",
-                                    "dt_payments_loads.weight",
-                                    "dt_payments_loads.linehaul_rate",
-                                    "dt_payments_loads.accessorials",
-                                    "dt_payments_loads.total_to_carrier",
-                                    "dt_payments_loads.rate_confirmation",
-                                    "dt_payments_loads.pod",
-                                    "carriers.legal_name",
-                                    "carriers.dba_name",
-                                    "carriers.dot_number",
-                                    "carriers.email_address as carrier_email_address"
-                                )
-                                ->where('dt_payments.row_id', $transaction_id)
-                                ->join($dt_pay_payment_loads_model->getTable(), "dt_payments.row_id", "=", "dt_payments_loads.transaction_id")
-                                ->join($carriers_model->getTable(), "dt_payments.carrier_id", "=", "carriers.row_id")
-                                ->first();
+                $transaction = $dt_pay_model->with([
+                    'carrier', 
+                    'payment_load', 
+                    'payment_logs' => function ($query) {
+                        $query->orderBy('sequence', 'asc');
+                    }
+                ])->find($transaction_id);
 
                 if($transaction){
 
-                    $transaction->amount_formatted = Number::currency($transaction->total_to_carrier);
-
-                    /*
-                    Stripe sources
-                    */
-                    $stripe_sources = $dt_pay_model->stripePaymentSources($user);
+                    $transaction_amount_formatted = Number::currency($transaction->payment_load->total_to_carrier);
 
                     $amount = $transaction->amount;
 
@@ -329,56 +197,34 @@ class DtPayController extends Controller
 
                     $progress['label'] = Number::currency($final_amount) . " debited via " . ($transaction->payment_method == 'card' ? 'Card' : 'ACH');
 
-                    if($transaction->payment_method_id != ''){
-                    
-                        $stripe_model = new StripeModel;
-
-                        list($api_secret_id, $api_secret_key) = $stripe_model->get_credentials();
-
-                        $stripe = new StripeClient($api_secret_key);
-
-                        $paymentMethod = $stripe->paymentMethods->retrieve($transaction->payment_method_id);
-
-                        if($paymentMethod){
-
-                            if($transaction->payment_method == 'card'){
-
-                                $payment_method_label = strtoupper($paymentMethod->card->display_brand) . "...-" . $paymentMethod->card->last4;
-                            }else{
-
-                                $payment_method_label = "ACH " . $paymentMethod->us_bank_account->bank_name . "...-" . $paymentMethod->us_bank_account->last4;
-                            }
-
-                            $progress['steps'][] = ['step' => 'Now', 'label' => 'ACH debit initiated', 'text' => $payment_method_label . ' · clears in 1-2 business days'];
-                        }
-                    }
-
-                    $progress['steps'][] = ['step' => 'Next', 'label' => 'Funds clear → hold active', 'text' => 'Release unlocks once settled'];
-                    $progress['steps'][] = ['step' => 'Then', 'label' => 'POD verified by AI', 'text' => 'Carrier uploads · Vault agent matches against the load'];
-                    $progress['steps'][] = ['step' => 'Finally', 'label' => 'You release → carrier paid', 'text' => 'Next ACH batch 6:00 PM CT, or instant for 1%'];
+                    $progress['steps'] = $dt_pay_logs_model->transactionProgress($transaction, 'broker');
 
                     return response()->json(['status' => true, 'transaction' => $transaction, 'amounts' => $amounts, 'progress' => $progress], 200);
                 }
             }
         }
 
-        return response()->json(['status' => false, 'load' => null, 'sources' => []], 200);
+        return response()->json(['status' => false, 'message' => 'There was an error while processing your request.', 'load' => null, 'sources' => []], 200);
     }
 
-    public function initTransaction(Request $request, DtPayModel $dt_pay_model, ShipmentsModel $shipments_model, DtPayLogsModel $dt_pay_logs_model){
+    public function initTransaction(Request $request, DtPayModel $dt_pay_model, DTPayBrokerStats $dt_pay_broker_stats){
 
         $user = $request->user();
 
         if($user){
 
             $load_id = $request->post('load_id');
+            $transaction_id = $request->post('transaction_id');
 
             if($load_id){
 
                 /*
                 Fetch load
                 */
-                $load = $shipments_model->where('row_id', $load_id)->first();
+                $load = DB::table('shipments')
+                                ->where('uuid', $load_id)
+                                ->where('company_id', auth()->user()->company_id)
+                                ->first();
 
                 if($load){
 
@@ -386,24 +232,60 @@ class DtPayController extends Controller
 
                     try {
                     
-                        $row_id = (string) Str::ulid();
                         $payment_ref = $dt_pay_model->create_payment_number('AUTO');
 
-                        $amount = $load->amount;
+                        $amount = 3000; // $load->amount;
                         $platform_fee = $dt_pay_model->calculatePercentage($amount, $dt_pay_model->platform_fees());
 
-                        DtPayModel::create([
-                            'row_id' => $row_id,
-                            'broker_id' => $user->row_id,
-                            'carrier_id' => $load->shippment_carrier,
-                            'load_id' => $load->row_id,
-                            'source' => DtPayModel::SOURCE_AUTO,
-                            'payment_ref' => $payment_ref,
-                            'amount' => $load->amount,
-                            'fee' => $platform_fee,
-                            'payment_date' => date('Y-m-d H:i:s'),
-                            'status' => DtPayModel::STATUS_INIT,
-                        ]);
+                        $update = false;
+
+                        if($transaction_id){
+
+                            /*
+                            Check if transaction exists
+                            */
+                            $transaction = $dt_pay_model->find($transaction_id);
+
+                            if($transaction){
+
+                                $update = true;
+                            }
+                        }
+
+                        if($update){
+
+                            $transaction->update([
+                                'broker_id' => $user->uuid,
+                                'carrier_id' => $load->carrier_dot,
+                                'load_id' => $load->uuid,
+                                'source' => DtPayModel::SOURCE_AUTO,
+                                'payment_ref' => $payment_ref,
+                                'amount' => $amount,
+                                'fee' => $platform_fee,
+                                'payment_date' => date('Y-m-d H:i:s'),
+                                'status' => DtPayModel::STATUS_INIT,
+                            ]);
+                        }else{
+
+                            $transaction = DtPayModel::create([
+                                'broker_id' => $user->uuid,
+                                'carrier_id' => $load->carrier_dot,
+                                'load_id' => $load->uuid,
+                                'source' => DtPayModel::SOURCE_AUTO,
+                                'payment_ref' => $payment_ref,
+                                'amount' => $amount,
+                                'fee' => $platform_fee,
+                                'payment_date' => date('Y-m-d H:i:s'),
+                                'status' => DtPayModel::STATUS_INIT,
+                            ]);
+                        }
+
+                        $row_id = $transaction->uuid;
+
+                        /*
+                        Add stats
+                        */
+                        $dt_pay_broker_stats->addStat($user->uuid, 'hold', $amount);
 
                         /*
                         Generate logs
@@ -412,7 +294,7 @@ class DtPayController extends Controller
                             'payment_id' => $row_id,
                             'transaction_label' => "Payment created (auto)",
                             'sub_label' => "by " . $user->first_name . " " . $user->last_name,
-                            'added_by' => $user->row_id,
+                            'added_by' => $user->uuid,
                             'added_by_type' => 'broker',
                             'transaction_date' => now(),
                             'load_ref' => $load_id
@@ -428,12 +310,14 @@ class DtPayController extends Controller
 
                         Log::error('DTPay Transaction Error: ' . $e->getMessage());
                         DB::rollback();
+
+                        return response()->json(['status' => false, 'message' => $e->getMessage()], 200);
                     }
                 }
             }
         }
 
-        return response()->json(['status' => false, 'message' => 'Load not found!'], 404);
+        return response()->json(['status' => false, 'message' => 'Load not found!'], 200);
     }
 
     public function calculateAmounts(Request $request, DtPayModel $dt_pay_model){
@@ -566,6 +450,10 @@ class DtPayController extends Controller
                             'enabled' => true,
                             'allow_redirects' => 'never',
                         ],
+
+                        'metadata' => [
+                            'transaction_id' => $transaction->uuid,
+                        ],
                     ]);
 
                     $message = "Payment successful.";
@@ -588,6 +476,44 @@ class DtPayController extends Controller
                     $transaction->update([
                         'payment_id' => $intent->id,
                         'payment_date' => now(),
+                        'payment_status' => 'hold',
+
+                        'stripe_payment_date' => now(),
+                        'stripe_transaction_id' => $intent->id,
+                        
+                        'stripe_status' => $intent->status,
+                        'stripe_response' => json_encode($intent)
+                    ]);
+
+                    $payment_method_label = 'ACH';
+
+                    $paymentMethod = $stripe->paymentMethods->retrieve($transaction->payment_method_id);
+
+                    if($paymentMethod){
+
+                        if($transaction->payment_method == 'card'){
+
+                            $payment_method_label = strtoupper($paymentMethod->card->display_brand) . "...-" . $paymentMethod->card->last4;
+                        }else{
+
+                            $payment_method_label = $paymentMethod->us_bank_account->bank_name . "...-" . $paymentMethod->us_bank_account->last4;
+                        }
+                    }
+                    
+                    /*
+                    Generate logs
+                    */
+                    DtPayLogsModel::create([
+                        'payment_id' => $transaction->uuid,
+                        'transaction_label' => "ACH debit initiated",
+                        'sub_label' => $payment_method_label . " · clears in 1-2 business days",
+                        'added_by' => $user->uuid,
+                        'added_by_type' => 'broker',
+                        'transaction_date' => now(),
+                        'sequence' => 2,
+                        'stripe_transaction_id' => $intent->id,
+                        'stripe_payment_status' => $intent->status,
+                        'stripe_response' => json_encode($intent)
                     ]);
                 
                     return response()->json(['status' => true, 'payment_intent' => $intent, 'message' => $message]);
@@ -606,12 +532,21 @@ class DtPayController extends Controller
     Manual transactions
     */
 
-    public function initManualTransaction(Request $request, DtPayPaymentLoadsModel $dt_pay_payment_loads_model){
+    public function initManualTransaction(Request $request, DtPayPaymentLoadsModel $dt_pay_payment_loads_model, DtPayModel $dt_pay_model){
 
-        return response()->json(['status' => true, 'conditions' => $dt_pay_payment_loads_model->releas_conditions()], 200);
+        $transaction_id = $request->post('transaction_id');
+
+        $transaction = null;
+
+        if($transaction_id){
+
+            $transaction = $dt_pay_model->with('payment_load')->find($transaction_id);
+        }
+
+        return response()->json(['status' => true, 'conditions' => $dt_pay_payment_loads_model->releas_conditions(), 'transaction' => $transaction], 200);
     }
 
-    public function submitManualTransaction(Request $request, DtPayModel $dt_pay_model, DtPayPaymentLoadsModel $dt_pay_payment_loads_model, DtPayLogsModel $dt_pay_logs_model){
+    public function submitManualTransaction(Request $request, DtPayModel $dt_pay_model, DTPayBrokerStats $dt_pay_broker_stats){
 
         $user = $request->user();
 
@@ -642,7 +577,6 @@ class DtPayController extends Controller
             $rate_confirmation_path = $request->hasFile('rate_confirmation') ? $this->storeManualLoadDocument($request->file('rate_confirmation')) : '';
             $pod_path = $request->hasFile('pod') ? $this->storeManualLoadDocument($request->file('pod')) : '';
 
-            $row_id = (string) Str::ulid();
             $payment_ref = $dt_pay_model->create_payment_number('MANUAL');
 
             $amount = $data['total_to_carrier'];
@@ -652,42 +586,100 @@ class DtPayController extends Controller
             DB::beginTransaction();
 
             try {
-            
-                /*
-                Persist the manually entered load
-                */
-                $load = DtPayPaymentLoadsModel::create([
-                    'transaction_id' => $row_id,
-                    'load_ref' => $data['load_ref'],
-                    'carrier_invoice' => $data['carrier_invoice'] ?? '',
-                    'origin' => $data['origin'],
-                    'destination' => $data['destination'],
-                    'pickup_date' => $data['pickup_date'],
-                    'delivery_date' => $data['delivery_date'],
-                    'equipment' => $data['equipment'],
-                    'commodity' => '',
-                    'weight' => $data['weight'],
-                    'linehaul_rate' => $data['linehaul_rate'],
-                    'accessorials' => '',
-                    'total_to_carrier' => $data['total_to_carrier'],
-                    'rate_confirmation' => $rate_confirmation_path,
-                    'pod' => $pod_path,
-                    'added_by' => $user->row_id,
-                    'added_by_type' => 'broker',
-                ]);
 
-                DtPayModel::create([
-                    'row_id' => $row_id,
-                    'broker_id' => $user->row_id,
-                    'carrier_id' => '',
-                    'source' => DtPayModel::SOURCE_MANUAL,
-                    'payment_ref' => $payment_ref,
-                    'amount' => $amount,
-                    'fee' => $platform_fee,
-                    'payment_date' => date('Y-m-d H:i:s'),
-                    'status' => DtPayModel::STATUS_INIT,
-                    'notes' => $request->post('release_condition', null)
-                ]);
+                $update = false;
+
+                $transaction_id = $request->post('transaction_id');
+
+                if($transaction_id){
+
+                    $transaction = $dt_pay_model->find($transaction_id);
+
+                    if($transaction){
+
+                        $update = true;
+                    }
+                }
+
+                if($update){
+
+                    $transaction->update([
+                        'broker_id' => $user->uuid,
+                        'source' => DtPayModel::SOURCE_MANUAL,
+                        'payment_ref' => $payment_ref,
+                        'amount' => $amount,
+                        'fee' => $platform_fee,
+                        'payment_date' => date('Y-m-d H:i:s'),
+                        'status' => DtPayModel::STATUS_INIT,
+                        'notes' => $request->post('release_condition', null)
+                    ]);
+
+                    $row_id = $transaction->uuid;
+
+                    $load = DtPayPaymentLoadsModel::where('transaction_id', $row_id)->update([
+                        'load_ref' => $data['load_ref'],
+                        'carrier_invoice' => $data['carrier_invoice'] ?? '',
+                        'origin' => $data['origin'],
+                        'destination' => $data['destination'],
+                        'pickup_date' => $data['pickup_date'],
+                        'delivery_date' => $data['delivery_date'],
+                        'equipment' => $data['equipment'],
+                        'commodity' => '',
+                        'weight' => $data['weight'],
+                        'linehaul_rate' => $data['linehaul_rate'],
+                        'accessorials' => '',
+                        'total_to_carrier' => $data['total_to_carrier'],
+                        'rate_confirmation' => $rate_confirmation_path,
+                        'pod' => $pod_path,
+                        'added_by' => $user->uuid,
+                        'added_by_type' => 'broker',
+                    ]);
+
+                }else{
+
+                    $transaction = DtPayModel::create([
+                        'broker_id' => $user->uuid,
+                        'carrier_id' => '',
+                        'source' => DtPayModel::SOURCE_MANUAL,
+                        'payment_ref' => $payment_ref,
+                        'amount' => $amount,
+                        'fee' => $platform_fee,
+                        'payment_date' => date('Y-m-d H:i:s'),
+                        'stage' => DtPayModel::STAGE_IN_HOLD,
+                        'status' => DtPayModel::STATUS_INIT,
+                        'notes' => $request->post('release_condition', null)
+                    ]);
+
+                    $row_id = $transaction->uuid;
+
+                    /*
+                    Persist the manually entered load
+                    */
+                    $load = DtPayPaymentLoadsModel::create([
+                        'transaction_id' => $row_id,
+                        'load_ref' => $data['load_ref'],
+                        'carrier_invoice' => $data['carrier_invoice'] ?? '',
+                        'origin' => $data['origin'],
+                        'destination' => $data['destination'],
+                        'pickup_date' => $data['pickup_date'],
+                        'delivery_date' => $data['delivery_date'],
+                        'equipment' => $data['equipment'],
+                        'commodity' => '',
+                        'weight' => $data['weight'],
+                        'linehaul_rate' => $data['linehaul_rate'],
+                        'accessorials' => '',
+                        'total_to_carrier' => $data['total_to_carrier'],
+                        'rate_confirmation' => $rate_confirmation_path,
+                        'pod' => $pod_path,
+                        'added_by' => $user->uuid,
+                        'added_by_type' => 'broker',
+                    ]);
+                }
+
+                /*
+                Add stats
+                */
+                $dt_pay_broker_stats->addStat($user->uuid, 'hold', $amount);
 
                 /*
                 Generate logs
@@ -696,8 +688,10 @@ class DtPayController extends Controller
                     'payment_id' => $row_id,
                     'transaction_label' => "Payment created (manual)",
                     'sub_label' => "by " . $user->first_name . " " . $user->last_name,
-                    'added_by' => $user->row_id,
+                    'added_by' => $user->uuid,
                     'added_by_type' => 'broker',
+                    'load' => $data['load_ref'],
+                    'sequence' => 1,
                     'transaction_date' => now(),
                 ]);
 
@@ -711,13 +705,15 @@ class DtPayController extends Controller
 	
                 Log::error('DTPay Transaction Error: ' . $e->getMessage());
 	            DB::rollback();
+
+                return response()->json(['status' => false, 'message' => "There was an error while processing your request."], 200);
             }   
         }
 
-        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 404);
+        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 200);
     }
 
-    public function manualCarrierSearch(Request $request, CarriersModel $carriers_model){
+    public function manualCarrierSearch(Request $request, Carrier $carriers_model){
 
         $user = $request->user();
 
@@ -742,23 +738,57 @@ class DtPayController extends Controller
             return response()->json(['status' => true, 'carriers' => $results], 200);
         }
 
-        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 404);
+        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 200);
     }
 
-    public function manualCarrierUpdate(Request $request){
+    public function manualCarrierUpdate(Request $request, Carrier $carriers_model){
 
         $transaction_id = $request->post('transaction_id');
         $carrier_id = $request->post('carrier');
 
         if($transaction_id && $carrier_id){
 
-            DtPayModel::where('row_id', $transaction_id)->update(['carrier_id' => $carrier_id]);
+            /*
+            Load carrier
+            */
+            $carrier = $carriers_model->where('dot_number', $carrier_id)->first();
+
+            if($carrier){
+
+                try{
+                
+                    DB::beginTransaction();
+                    
+                        DtPayModel::where('uuid', $transaction_id)->update(['carrier_id' => $carrier_id, 'carrier_name' => $carrier->legal_name]);
+
+                        /*
+                        Update logs
+                        */
+                        DtPayLogsModel::where('payment_id', $transaction_id)->where('sequence', 1)->update([
+                            'carrier_dot_number' => $carrier_id,
+                            'carrier_name' => $carrier->legal_name,
+                        ]);
+                    DB::commit();
+
+                }catch(\Exception $e){
+	
+                    Log::error('DTPay Carrier Update Error - Manual payment: ' . $e->getMessage());
+                    DB::rollback();
+
+                    return response()->json(['status' => false, 'message' => "There was an error while processing your request."], 200);
+                }   
+
+                return response()->json(['status' => true, 'message' => 'Carrier updated successfully.'], 200);
+            }else{
+
+                return response()->json(['status' => false, 'message' => "Carrier not found for the DOT Number: " . $carrier_id], 200);
+            }
         }
         
-        return response()->json(['status' => true, 'message' => 'Carrier updated successfully.'], 200);
+        return response()->json(['status' => false, 'message' => 'Invalid inputs.'], 200);
     }
 
-    public function initManualFunding(Request $request, DtPayModel $dt_pay_model, DtPayPaymentLoadsModel $dt_pay_payment_loads_model, CarriersModel $carriers_model){
+    public function initManualFunding(Request $request, DtPayModel $dt_pay_model, DtPayPaymentLoadsModel $dt_pay_payment_loads_model){
 
         $user = $request->user();
 
@@ -768,36 +798,11 @@ class DtPayController extends Controller
 
             if($transaction_id){
 
-                $transaction = $dt_pay_model
-                                ->select(
-                                    "dt_payments.*",
-                                    "dt_payments_loads.load_ref",
-                                    "dt_payments_loads.carrier_invoice",
-                                    "dt_payments_loads.origin",
-                                    "dt_payments_loads.destination",
-                                    "dt_payments_loads.pickup_date",
-                                    "dt_payments_loads.delivery_date",
-                                    "dt_payments_loads.equipment",
-                                    "dt_payments_loads.commodity",
-                                    "dt_payments_loads.weight",
-                                    "dt_payments_loads.linehaul_rate",
-                                    "dt_payments_loads.accessorials",
-                                    "dt_payments_loads.total_to_carrier",
-                                    "dt_payments_loads.rate_confirmation",
-                                    "dt_payments_loads.pod",
-                                    "carriers.legal_name",
-                                    "carriers.dba_name",
-                                    "carriers.dot_number",
-                                    "carriers.email_address as carrier_email_address"
-                                )
-                                ->where('dt_payments.row_id', $transaction_id)
-                                ->join($dt_pay_payment_loads_model->getTable(), "dt_payments.row_id", "=", "dt_payments_loads.transaction_id")
-                                ->join($carriers_model->getTable(), "dt_payments.carrier_id", "=", "carriers.row_id")
-                                ->first();
+                $transaction = $dt_pay_model::where('uuid', $transaction_id)->with(['carrier', 'payment_load'])->first(); 
 
                 if($transaction){
 
-                    $transaction->amount_formatted = Number::currency($transaction->total_to_carrier);
+                    $transaction->amount_formatted = Number::currency($transaction->payment_load->total_to_carrier);
 
                     /*
                     Stripe sources
@@ -817,7 +822,7 @@ class DtPayController extends Controller
             return response()->json(['status' => false, 'message' => 'Transaction ID is required.'], 200);
         }
 
-        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 404);
+        return response()->json(['status' => false, 'message' => 'Unauthorized access'], 200);
     }
 
     private function storeManualLoadDocument($file){
@@ -829,5 +834,29 @@ class DtPayController extends Controller
         Storage::put($storage_path, file_get_contents($file->getRealPath()));
 
         return $storage_path;
+    }
+
+    public function brokerStats(Request $request, DTPayBrokerStats $dt_pay_broker_stats){
+
+        $user = $request->user();
+
+        if($user){
+        
+            $stats = $dt_pay_broker_stats->fetchBrokerStats($user->uuid);
+
+            return response()->json(['status' => true, 'data' => $stats], 200);
+        }
+
+        $stats = [
+            'hold_sum' => '$0',
+            'hold_count' => 0,
+            'ready_to_release_sum' => '$0',
+            'ready_to_release_count' => 0,
+            'released_sum' => '$0',
+            'released_count' => 0,
+            'disputes_count' => 0,
+        ];
+
+        return response()->json(['status' => true, 'data' => $stats], 200);
     }
 }
