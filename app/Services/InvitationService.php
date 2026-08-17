@@ -185,7 +185,7 @@ class InvitationService
 
             return [
                 'token' => $token,
-                'user' => $user->load('company', 'roles.permissions', 'permissions'),
+                'user' => $user->load('company.subscription', 'roles.permissions', 'permissions'),
             ];
         });
     }

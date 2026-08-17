@@ -30,6 +30,8 @@ class AuthService
                 'company_name' => $data['company_name'],
                 'company_email' => $data['email'],
                 'company_phone' => $data['phone'] ?? null,
+                'business_type' => $data['business_type'] ?? null,
+                'dot_number' => $data['dot_number'] ?? null,
             ]);
 
             // Create Owner User
@@ -60,14 +62,14 @@ class AuthService
 
             return [
                 'token' => $token,
-                'user' => $user->load('company', 'roles.permissions', 'permissions'),
+                'user' => $user->load('company.subscription', 'roles.permissions', 'permissions'),
             ];
         });
     }
 
     public function login(array $data)
     {
-        $user = User::with(['company', 'roles.permissions', 'permissions'])
+        $user = User::with(['company.subscription', 'roles.permissions', 'permissions'])
             ->where('email', $data['email'])
             ->first();
 
@@ -130,7 +132,7 @@ class AuthService
             ->when($currentToken, fn ($query) => $query->where('id', '!=', $currentToken->id))
             ->delete();
 
-        return $user->fresh()->load('company', 'roles.permissions', 'permissions');
+        return $user->fresh()->load('company.subscription', 'roles.permissions', 'permissions');
     }
 
     public function verifyLoginOtp(array $data)
@@ -181,7 +183,7 @@ class AuthService
 
         return [
             'token' => $token,
-            'user' => $user->fresh()->load('company', 'roles.permissions', 'permissions'),
+            'user' => $user->fresh()->load('company.subscription', 'roles.permissions', 'permissions'),
         ];
     }
 
@@ -201,6 +203,6 @@ class AuthService
             collect($data)->only(['first_name', 'last_name', 'phone', 'profile_image'])->toArray()
         )->save();
 
-        return $user->fresh()->load('company', 'roles.permissions', 'permissions');
+        return $user->fresh()->load('company.subscription', 'roles.permissions', 'permissions');
     }
 }

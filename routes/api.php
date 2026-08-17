@@ -21,6 +21,8 @@ use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentTemplateController;
+use App\Http\Controllers\Api\V1\Subscription\StripeWebhookController;
+use App\Http\Controllers\Api\V1\Subscription\SubscriptionController;
 use App\Http\Controllers\Api\V1\User\UserController;
 use App\Http\Controllers\Carrier\CarrierController;
 use App\Http\Controllers\CarrierQuestionController;
@@ -62,6 +64,13 @@ Route::prefix('v1')->group(function () {
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
+
+    // The pricing table shown right after signup. Public, because the plan
+    // screen renders before the new account has finished authenticating.
+    Route::get('/subscription/plans', [SubscriptionController::class, 'plans']);
+
+    // Stripe's own callback. Authorised by the signed payload, not a token.
+    Route::post('/stripe/webhook', [StripeWebhookController::class, 'handle']);
 
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
@@ -243,6 +252,16 @@ Route::prefix('v1')->group(function () {
         Route::put('/company', [CompanyController::class, 'update'])
             ->middleware(PermissionMiddleware::using('edit-company-profile-billing'));
 
+        // Subscription — the monthly plan picked up straight after signup.
+        Route::get('/subscription', [SubscriptionController::class, 'show']);
+
+        Route::middleware(PermissionMiddleware::using('edit-company-profile-billing'))->group(function () {
+            Route::post('/subscription/checkout', [SubscriptionController::class, 'checkout']);
+            Route::post('/subscription/checkout/sync', [SubscriptionController::class, 'syncCheckout']);
+            Route::post('/subscription/portal', [SubscriptionController::class, 'billingPortal']);
+            Route::post('/subscription/enterprise-inquiry', [SubscriptionController::class, 'enterpriseInquiry']);
+        });
+
         // Team & roles
         Route::middleware(PermissionMiddleware::using(['manage-users-basic', 'manage-users-all']))->group(function () {
 
@@ -368,10 +387,10 @@ Route::prefix('v1')->group(function () {
         Route::post('/dt-pay/stats', [DtPayController::class, 'brokerStats']);
 
         Route::post('/dt-pay/payment/auto/loads', [DtPayController::class, 'fetchLoads']);
-        
+
         Route::post('/dt-pay/payment/auto/sources', [DtPayController::class, 'fetchSources']);
         Route::post('/dt-pay/payment/auto/fund', [DtPayController::class, 'initFunding']);
-        
+
         Route::post('/dt-pay/payment/auto/finish', [DtPayController::class, 'paymentFinish']);
         Route::post('/dt-pay/payment/manual/finish', [DtPayController::class, 'paymentManualFinish']);
 
@@ -428,4 +447,3 @@ Route::prefix('v1')->group(function () {
     Route::post('/guest-pay/load/submit', [GuestPayController::class, 'loadSubmission']);
     Route::post('/guest-pay/info/submit', [GuestPayController::class, 'handlePersonalSubmit']);
 });
-

@@ -8,7 +8,7 @@ class CompanyService
 {
     public function getCompany($user)
     {
-        return Company::findOrFail($user->company_id);
+        return Company::with('subscription')->findOrFail($user->company_id);
     }
 
     public function updateCompany($user, array $data)
@@ -17,6 +17,6 @@ class CompanyService
 
         $company->update($data);
 
-        return $company->fresh();
+        return $company->fresh()->load('subscription');
     }
 }

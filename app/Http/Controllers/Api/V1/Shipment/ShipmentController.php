@@ -9,6 +9,7 @@ use App\Models\Shipment;
 use App\Models\ShipmentTemplate;
 use App\Services\DriverActivityService;
 use App\Services\ShipmentService;
+use App\Services\SubscriptionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -16,7 +17,8 @@ class ShipmentController extends BaseController
 {
     public function __construct(
         protected ShipmentService $shipmentService,
-        protected DriverActivityService $driverActivity
+        protected DriverActivityService $driverActivity,
+        protected SubscriptionService $subscriptionService
     ) {}
 
     public function getCarrier()
@@ -43,6 +45,11 @@ class ShipmentController extends BaseController
     {
         $data = $request->validated();
         $user = auth()->user();
+
+        // Plans buy a monthly load allowance — 100 on Standard, 250 on Pro.
+        // Checked before anything is written so a refused load leaves nothing
+        // half-created behind it.
+        $this->subscriptionService->assertCanCreateLoad($user->company);
 
         $shipment = $this->shipmentService->create($data, $user);
 

@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\BillingException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -37,6 +38,20 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+
+        // Billing / subscription problems -> consistent API envelope, with the
+        // status the failure deserves (Stripe unreachable is not a 400).
+        $exceptions->render(function (BillingException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'status' => false,
+                'message' => $e->getMessage(),
+                'errors' => $e->errors,
+            ], $e->status);
+        });
 
         // Missing permission / role -> consistent API envelope.
         $exceptions->render(function (UnauthorizedException $e, Request $request) {
