@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use App\Models\DtPay\DtPayIncrementModel;
 use App\Models\DtPay\DtPayLogsModel;
 
+use App\Models\Carriers\Carrier;
+
 class DtPayGuestPayModel extends Model
 {
     use HasUuids;
@@ -80,6 +82,11 @@ class DtPayGuestPayModel extends Model
     public function uniqueIds(): array
     {
         return ['uuid'];
+    }
+
+    public function carrier(){
+
+        return $this->hasOne(Carrier::class, 'dot_number', 'carrier_id');
     }
 
     public function payment_logs(){

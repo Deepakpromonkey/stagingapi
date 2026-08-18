@@ -446,4 +446,7 @@ Route::prefix('v1')->group(function () {
     Route::post('/guest-pay/payment/init', [GuestPayController::class, 'initGuestPay']);
     Route::post('/guest-pay/load/submit', [GuestPayController::class, 'loadSubmission']);
     Route::post('/guest-pay/info/submit', [GuestPayController::class, 'handlePersonalSubmit']);
+
+    Route::post('/guest-pay/payment/intent', [GuestPayController::class, 'paymentIntent']);
+    Route::post('/guest-pay/payment/confirm', [GuestPayController::class, 'confirmPayment']);
 });
