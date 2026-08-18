@@ -20,6 +20,11 @@ ALTER TABLE company_census_file ADD INDEX        idx_phone (phone),             
 ALTER TABLE company_census_file ADD INDEX        idx_email (email_address),            ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE company_census_file ADD INDEX        idx_duns  (dun_bradstreet_no),        ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE company_census_file ADD INDEX        idx_phy   (phy_state, phy_city, phy_street(64)), ALGORITHM=INPLACE, LOCK=NONE;
+-- The company-association endpoint matches on fax and on the mailing address
+-- as well. Without these two, each is a full scan of 4.48M rows inside a UNION
+-- and the endpoint takes seven minutes.
+ALTER TABLE company_census_file ADD INDEX        idx_fax   (fax),                        ALGORITHM=INPLACE, LOCK=NONE;
+ALTER TABLE company_census_file ADD INDEX        idx_mail  (carrier_mailing_street(64), carrier_mailing_city, carrier_mailing_state, carrier_mailing_zip), ALGORITHM=INPLACE, LOCK=NONE;
 
 ALTER TABLE sms_input_motor_carrier_census_information ADD INDEX idx_dot (dot_number), ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_ab_passproperty  ADD UNIQUE INDEX uk_dot (dot_number),                 ALGORITHM=INPLACE, LOCK=NONE;

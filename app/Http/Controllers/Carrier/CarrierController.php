@@ -19,6 +19,7 @@ use App\Models\CarrierShortlist;
 use App\Models\Connect\CarrierConnectRequestsModel;
 use App\Models\Customers\CustomersQuestionsModel;
 use App\Models\SearchHistory;
+use App\Support\CarrierBenchmarks;
 use App\Support\Fmcsa;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
@@ -610,71 +611,16 @@ class CarrierController extends Controller
     /**
      * National 50th / 75th / 90th cut-points for each BASIC measure.
      *
-     * The Motus load reshaped sms_measures: `*_pct`, `*_basic_alert` and
-     * `*_rd_alert` are gone, and only the raw `*_measure` values survived. The
-     * pillar scoring is written against percentiles, so rebuild them from the
-     * measures that are still there.
-     *
-     * Sampled at one row in sixteen — the cut-points land within a few
-     * hundredths of the full-population values and the query drops from ~24s to
-     * ~2s — and cached for a day, since the source is a nightly batch load.
+     * The Motus feed carries no `*_pct` column, so the percentile bands the
+     * scoring is written against are rebuilt from the raw measures. Computing
+     * them is a five-way window sort over the whole SMS table (~12s), so like
+     * the other benchmarks it is refreshed by `carrier:refresh-benchmarks` and
+     * only read here.
      */
     private function smsPercentiles(): array
     {
-        return Cache::remember('dt_sms_percentiles', 86400, function () {
-
-            $cases = [];
-            $windows = [];
-
-            foreach (self::SMS_BASICS as $i => $basic) {
-                $windows[] = "PERCENT_RANK() OVER (ORDER BY {$basic}_measure) AS r{$i}";
-                $windows[] = "{$basic}_measure AS m{$i}";
-
-                foreach ([50, 75, 90] as $p) {
-                    $cases[] = "MAX(CASE WHEN r{$i} <= ".($p / 100)." THEN m{$i} END) AS p{$p}_{$i}";
-                }
-            }
-
-            try {
-                $row = DB::connection('external_db')
-                    ->selectOne(
-                        'SELECT '.implode(', ', $cases).
-                        ' FROM (SELECT '.implode(', ', $windows).
-                        ' FROM sms_measures WHERE insp_total > 0 AND (id % 16) = 0) t'
-                    );
-            } catch (\Throwable $e) {
-                Log::warning('SMS percentile cut-points unavailable, using fallback', [
-                    'error' => $e->getMessage(),
-                ]);
-
-                $row = null;
-            }
-
-            $cuts = [];
-
-            foreach (self::SMS_BASICS as $i => $basic) {
-                $cuts[$basic] = [
-                    50 => isset($row->{"p50_$i"}) ? (float) $row->{"p50_$i"} : self::SMS_FALLBACK_CUTS[$basic][50],
-                    75 => isset($row->{"p75_$i"}) ? (float) $row->{"p75_$i"} : self::SMS_FALLBACK_CUTS[$basic][75],
-                    90 => isset($row->{"p90_$i"}) ? (float) $row->{"p90_$i"} : self::SMS_FALLBACK_CUTS[$basic][90],
-                ];
-            }
-
-            return $cuts;
-        });
+        return CarrierBenchmarks::smsCuts();
     }
-
-    /**
-     * Observed national cut-points, used only when the live query fails, so a
-     * cold cache never leaves a profile with no safety scoring at all.
-     */
-    private const SMS_FALLBACK_CUTS = [
-        'unsafe_driv' => [50 => 0.0, 75 => 2.50, 90 => 8.00],
-        'hos_driv' => [50 => 0.0, 75 => 0.51, 90 => 2.80],
-        'driv_fit' => [50 => 0.0, 75 => 0.12, 90 => 1.79],
-        'contr_subst' => [50 => 0.0, 75 => 0.0, 90 => 0.0],
-        'veh_maint' => [50 => 3.60, 75 => 8.66, 90 => 15.00],
-    ];
 
     /**
      * The percentile band a BASIC measure falls into: 90, 75, 50 or 0.
@@ -3244,15 +3190,15 @@ class CarrierController extends Controller
         $inspectedStates = $carrier->inspections->pluck('county_code_state')->filter()->unique()->count();
 
         // Inspected power units vs trailers (unique VINs)
-        // Same vocabulary problem as observed_units above: 'truck' / 'tractor'
-        // match nothing, so this always reported zero inspected power units.
-        $inspectedPowerUnits = $carrier->inspections
-            ->filter(fn ($i) => $isPowerUnit($i->unit_type_desc))
-            ->pluck('vin')->filter()->unique()->count();
+        // These are the same measurement as observed_units / observed_trailers
+        // above — distinct VINs seen roadside — so they have to be counted the
+        // same way. They previously looked at the primary unit only, while the
+        // observed_* pair looked at both, which is why a carrier whose trailers
+        // are always the second unit reported 5 observed trailers and 0
+        // inspected ones in the same payload.
+        $inspectedPowerUnits = $observedUnits;
 
-        $inspectedTrailers = $carrier->inspections
-            ->filter(fn ($i) => $isTowedUnit($i->unit_type_desc))
-            ->pluck('vin')->filter()->unique()->count();
+        $inspectedTrailers = $observedTrailers;
 
         // Preferred lanes — top 5 states by inspection count
         $stateCounts = $carrier->inspections
@@ -3703,53 +3649,27 @@ class CarrierController extends Controller
      * National benchmarks, cached 1h. Cache — not a table. Real-time enough:
      * national aggregates don't move intraday.
      */
+    /**
+     * National benchmarks for the risk factors.
+     *
+     * Read-only. These are whole-population aggregates — the power-units-per-
+     * mile percentile takes about four minutes over 4.48M carriers — so they
+     * are computed by `carrier:refresh-benchmarks` and only looked up here.
+     * Computing them inline is what made this endpoint time out: the request
+     * died before Cache::remember could store anything, so every request paid
+     * the full cost again.
+     */
     private function benchmarks(): array
     {
-        return Cache::remember('dt_risk_benchmarks', 3600, function () {
-            $b = [];
+        $b = CarrierBenchmarks::all();
 
-            $b['natl_vehicle_oos'] = (float) (SmsMeasure::query()
-                ->where('vehicle_insp_total', '>=', 5)
-                ->selectRaw('AVG(vehicle_oos_insp_total / NULLIF(vehicle_insp_total,0)) AS avg_v_oos')
-                ->value('avg_v_oos') ?? 0.208);
+        $cuts = $this->smsPercentiles();
 
-            // The 90th percentile of each BASIC measure. This used to be ten
-            // statements — a COUNT plus an OFFSET walk over 694k unindexed rows
-            // for each of the five — against a database that is a ~300ms round
-            // trip away. smsPercentiles() answers all five in one sampled query
-            // and holds them for a day.
-            $cuts = $this->smsPercentiles();
+        foreach (self::SMS_BASICS as $basic) {
+            $b["p90_{$basic}_measure"] = $cuts[$basic][90] > 0 ? $cuts[$basic][90] : null;
+        }
 
-            foreach (self::SMS_BASICS as $basic) {
-                $b["p90_{$basic}_measure"] = $cuts[$basic][90] > 0 ? $cuts[$basic][90] : null;
-            }
-
-            $ratioQueries = [
-                'pum' => Carrier::query()
-                    ->where('nbr_power_unit', '>', 0)
-                    ->whereRaw("CAST(NULLIF(mcs150_mileage,'') AS UNSIGNED) > 0")
-                    ->selectRaw("nbr_power_unit / NULLIF(CAST(NULLIF(mcs150_mileage,'') AS UNSIGNED),0) AS r"),
-                'im' => SmsMeasure::query()
-                    ->join('carriers', 'carriers.dot_number', '=', 'sms_measures.dot_number')
-                    ->where('sms_measures.insp_total', '>', 0)
-                    ->whereRaw("CAST(NULLIF(carriers.mcs150_mileage,'') AS UNSIGNED) > 0")
-                    ->selectRaw("sms_measures.insp_total / NULLIF(CAST(NULLIF(carriers.mcs150_mileage,'') AS UNSIGNED),0) AS r"),
-            ];
-
-            foreach ($ratioQueries as $key => $builder) {
-                $cnt = DB::connection('external_db')->query()->fromSub($builder, 't')->count();
-                if ($cnt > 100) {
-                    $lo = (int) floor($cnt * 0.05);
-                    $hi = (int) floor($cnt * 0.95);
-                    $b["{$key}_lo"] = (float) DB::connection('external_db')->query()->fromSub($builder, 't')->orderBy('r')->skip($lo)->value('r');
-                    $b["{$key}_hi"] = (float) DB::connection('external_db')->query()->fromSub($builder, 't')->orderBy('r')->skip($hi)->value('r');
-                } else {
-                    $b["{$key}_lo"] = $b["{$key}_hi"] = null;
-                }
-            }
-
-            return $b;
-        });
+        return $b;
     }
 
     // ------------------------------------------------------------- assembly
