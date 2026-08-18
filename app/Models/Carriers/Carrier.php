@@ -2,6 +2,7 @@
 
 namespace App\Models\Carriers;
 
+use App\Casts\FmcsaFlag;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -17,45 +18,37 @@ class Carrier extends Model
 
     protected $fillable = [
         'dot_number', 'legal_name', 'dba_name', 'carrier_operation',
-        'hm_flag', 'pc_flag', 'row_id',
+        'hm_flag', 'row_id',
         'phy_street', 'phy_city', 'phy_state', 'phy_zip', 'phy_country',
         'mailing_street', 'mailing_city', 'mailing_state', 'mailing_zip', 'mailing_country',
         'telephone', 'fax', 'email_address',
         'mcs150_date', 'mcs150_mileage', 'mcs150_mileage_year',
-        'recent_mileage', 'recent_mileage_year', 'vmt_source_id',
-        'add_date', 'oic_state', 'nbr_power_unit', 'driver_total',
-        'private_only', 'authorized_for_hire', 'exempt_for_hire',
-        'private_property', 'private_passenger_business', 'private_passenger_nonbusiness',
-        'migrant', 'us_mail', 'federal_government', 'state_government',
-        'local_government', 'indian_tribe', 'op_other',
+        'add_date', 'nbr_power_unit', 'driver_total',
     ];
 
+    /**
+     * hm_flag is company_census_file.hm_ind, a tinyint. The MCS-150 operation
+     * flags are not on this view at all — see the census() relation.
+     */
     protected $casts = [
-        'hm_flag' => 'boolean',
-        'pc_flag' => 'boolean',
+        'hm_flag' => FmcsaFlag::class,
         'mcs150_date' => 'date',
         'add_date' => 'date',
-        'private_only' => 'boolean',
-        'authorized_for_hire' => 'boolean',
-        'exempt_for_hire' => 'boolean',
-        'private_property' => 'boolean',
-        'private_passenger_business' => 'boolean',
-        'private_passenger_nonbusiness' => 'boolean',
-        'migrant' => 'boolean',
-        'us_mail' => 'boolean',
-        'federal_government' => 'boolean',
-        'state_government' => 'boolean',
-        'local_government' => 'boolean',
-        'indian_tribe' => 'boolean',
-        'op_other' => 'boolean',
     ];
 
     // ── Relationships ────────────────────────────────────────────────────────
 
-    /** FMCSA operating authority record */
+    /**
+     * FMCSA operating authority record.
+     *
+     * A DOT number can carry several authority rows (re-filings, HHG/passenger
+     * dockets), so pin this to the newest or the relation returns whichever row
+     * the storage engine happens to hand back first.
+     */
     public function authority(): HasOne
     {
-        return $this->hasOne(CarrierAuthority::class, 'dot_number', 'dot_number');
+        return $this->hasOne(CarrierAuthority::class, 'dot_number', 'dot_number')
+            ->ofMany('id', 'max');
     }
 
     /** Out-of-service orders issued against this carrier */
@@ -139,17 +132,36 @@ class Carrier extends Model
 
     public function scopeHazmat($query)
     {
-        return $query->where('hm_flag', true);
+        return $query->where('hm_flag', 1);
     }
 
+    /** pc_flag lives on the census extract, not the main census file. */
     public function scopePassengerCarrier($query)
     {
-        return $query->where('pc_flag', true);
+        return $query->whereHas('census', fn ($q) => $q->where('pc_flag', 1));
     }
 
-    public function carrierDetail()
+    /**
+     * MCS-150 detail record.
+     *
+     * One row per DOT number now that this reads company_census_file, which the
+     * unique key on dot_number guarantees — no de-duplication needed.
+     */
+    public function carrierDetail(): HasOne
     {
         return $this->hasOne(CarrierDetail::class, 'dot_number', 'dot_number');
+    }
+
+    /**
+     * MCS-150 operation classification flags (authorized_for_hire, migrant, …).
+     *
+     * A separate record because they come from the SMS census extract, which
+     * covers ~761k of the 4.48M carriers. Null means "not in that extract",
+     * not "false".
+     */
+    public function census(): HasOne
+    {
+        return $this->hasOne(CarrierCensus::class, 'dot_number', 'dot_number');
     }
 
     public function brokerInsurance(): HasMany

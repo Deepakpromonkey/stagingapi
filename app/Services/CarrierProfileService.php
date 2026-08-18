@@ -7,6 +7,7 @@ use App\Models\Carriers\Crash;
 use App\Models\Carriers\CrashDetail;
 use App\Models\Carriers\Inspection;
 use App\Models\Carriers\ViolationDetail;
+use App\Support\Fmcsa;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -34,7 +35,15 @@ class CarrierProfileService
     /** Unsafe Driving BASIC alert threshold. */
     protected const BASIC_ALERT_THRESHOLD = 65;
 
-    protected const UNIT_TYPES_POWER = ['TRUCK', 'TRUCK TRACTOR', 'STRAIGHT TRUCK', 'SCHOOL BUS', 'BUS', 'TRACTOR'];
+    /**
+     * The vocabulary inspections actually uses. 'TRUCK' and 'TRACTOR' were in
+     * this list and are never emitted by the feed, while 'MOTOR COACH',
+     * 'PASSENGER VAN' and 'LIMOUSINE' were missing.
+     */
+    protected const UNIT_TYPES_POWER = [
+        'TRUCK TRACTOR', 'STRAIGHT TRUCK', 'BUS', 'SCHOOL BUS',
+        'MOTOR COACH', 'PASSENGER VAN', 'LIMOUSINE',
+    ];
 
     protected const FREE_EMAIL_PROVIDERS = [
         'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com',
@@ -155,7 +164,10 @@ class CarrierProfileService
         $vehicleOosTotal = (int) ($sms?->vehicle_oos_insp_total ?? 0);
         $driverInspTotal = (int) ($sms?->driver_insp_total ?? 0);
         $driverOosTotal = (int) ($sms?->driver_oos_insp_total ?? 0);
-        $hazmatInspTotal = (int) ($sms?->hazmat_insp_total ?? 0);
+        // sms_measures has never carried hazmat totals; they come off the
+        // inspection rows, which stats() now aggregates.
+        $hazmatInspTotal = (int) ($inspectionStats->hazmat_insp_total ?? 0);
+        $hazmatOosTotal = (int) ($inspectionStats->hazmat_oos_total ?? 0);
 
         $vehicleOosPct = $vehicleInspTotal > 0 ? round($vehicleOosTotal / $vehicleInspTotal * 100, 2) : null;
         $driverOosPct = $driverInspTotal > 0 ? round($driverOosTotal / $driverInspTotal * 100, 2) : null;
@@ -230,9 +242,9 @@ class CarrierProfileService
                 ],
                 'hazmat' => [
                     'inspections' => $hazmatInspTotal,
-                    'oos_inspections' => (int) ($sms?->hazmat_oos_total ?? 0),
+                    'oos_inspections' => $hazmatOosTotal,
                     'oos_pct' => $hazmatInspTotal > 0
-                        ? round((int) $sms->hazmat_oos_total / $hazmatInspTotal * 100, 2)
+                        ? round($hazmatOosTotal / $hazmatInspTotal * 100, 2)
                         : null,
                 ],
             ],
@@ -303,9 +315,9 @@ class CarrierProfileService
                     'I' => 'Inactive',
                     default => null,
                 },
-                'authority_age_common' => $this->authorityAge($carrier, 'MOTOR PROPERTY COMMON CARRIER'),
-                'authority_age_contract' => $this->authorityAge($carrier, 'MOTOR PROPERTY CONTRACT CARRIER'),
-                'authority_age_broker' => $this->authorityAge($carrier, 'PROPERTY BROKER'),
+                'authority_age_common' => $this->authorityAge($carrier, 'common'),
+                'authority_age_contract' => $this->authorityAge($carrier, 'contract'),
+                'authority_age_broker' => $this->authorityAge($carrier, 'broker'),
                 'web_presence' => $this->webPresence($carrier->email_address),
                 'email_domain' => $this->emailDomain($carrier->email_address),
                 'snapshot_date' => now()->toDateString(),
@@ -365,28 +377,38 @@ class CarrierProfileService
     protected function stats(string $dot, bool $heavy = false): object
     {
         $powerTypes = "'".implode("','", self::UNIT_TYPES_POWER)."'";
+        $towedTypes = 'TRAILER|CHASSIS|DOLLY';
         $since = now()->subDays(120)->toDateString();
 
+        // insp_date / report_date are varchars in the feed's own '24-APR-24'
+        // format, so MAX() over them compares text ('31-AUG-19' beats
+        // '01-JAN-25') and `>= '2026-04-20'` compares a date against a string
+        // that never sorts the way it looks. Both need parsing in SQL.
+        $inspDate = "STR_TO_DATE(insp_date, '%d-%b-%y')";
+        $reportDate = "STR_TO_DATE(report_date, '%d-%b-%y')";
+
         if (! $heavy) {
-            return DB::connection('external_db')->selectOne('
+            return DB::connection('external_db')->selectOne("
                 SELECT i.*, c.*
                 FROM
                     (SELECT
                         COUNT(*) AS insp_total,
-                        MAX(insp_date) AS insp_last_date,
-                        SUM(CASE WHEN insp_date >= ? THEN 1 ELSE 0 END) AS last_120_days,
+                        MAX({$inspDate}) AS insp_last_date,
+                        SUM(CASE WHEN {$inspDate} >= ? THEN 1 ELSE 0 END) AS last_120_days,
+                        COALESCE(SUM(total_hazmat_sent), 0) AS hazmat_insp_total,
+                        COALESCE(SUM(hazmat_oos_total), 0) AS hazmat_oos_total,
                         NULL AS states, NULL AS power_unit_vins, NULL AS trailer_vins,
                         NULL AS violation_total, NULL AS violation_last_date, NULL AS state_counts
                      FROM inspections WHERE dot_number = ?) i,
 
                     (SELECT
                         COUNT(*) AS crash_total,
-                        MAX(report_date) AS crash_last_date,
+                        MAX({$reportDate}) AS crash_last_date,
                         COALESCE(SUM(fatalities), 0) AS fatalities,
                         COALESCE(SUM(injuries), 0) AS injuries,
                         COALESCE(SUM(CASE WHEN tow_away THEN 1 ELSE 0 END), 0) AS tow_away
                      FROM crashes WHERE dot_number = ?) c
-            ', [$since, $dot, $dot]);
+            ", [$since, $dot, $dot]);
         }
 
         return DB::connection('external_db')->selectOne("
@@ -394,29 +416,34 @@ class CarrierProfileService
             FROM
                 (SELECT
                     COUNT(*) AS insp_total,
-                    MAX(insp_date) AS insp_last_date,
+                    MAX({$inspDate}) AS insp_last_date,
                     COUNT(DISTINCT county_code_state) AS states,
-                    SUM(CASE WHEN insp_date >= ? THEN 1 ELSE 0 END) AS last_120_days,
+                    SUM(CASE WHEN {$inspDate} >= ? THEN 1 ELSE 0 END) AS last_120_days,
+                    COALESCE(SUM(total_hazmat_sent), 0) AS hazmat_insp_total,
+                    COALESCE(SUM(hazmat_oos_total), 0) AS hazmat_oos_total,
                     COUNT(DISTINCT CASE WHEN UPPER(unit_type_desc) IN ({$powerTypes})
                                      AND vin NOT REGEXP '^0+$' THEN vin END) AS power_unit_vins,
                     (SELECT COUNT(*) FROM (
                         SELECT vin AS v FROM inspections
-                         WHERE dot_number = ? AND UPPER(unit_type_desc) LIKE '%TRAILER%' AND vin <> '' AND vin NOT REGEXP '^0+$'
+                         WHERE dot_number = ? AND UPPER(unit_type_desc) REGEXP '{$towedTypes}' AND vin <> '' AND vin NOT REGEXP '^0+$'
                         UNION
                         SELECT vin2 AS v FROM inspections
-                         WHERE dot_number = ? AND UPPER(unit_type_desc2) LIKE '%TRAILER%' AND vin2 <> '' AND vin2 NOT REGEXP '^0+$'
+                         WHERE dot_number = ? AND UPPER(unit_type_desc2) REGEXP '{$towedTypes}' AND vin2 <> '' AND vin2 NOT REGEXP '^0+$'
                     ) t) AS trailer_vins,
+                    -- These two matched 'truck' / 'tractor', which the feed
+                    -- never writes — it uses 'TRUCK TRACTOR', 'STRAIGHT TRUCK'
+                    -- and so on — so both always came back zero.
                     (SELECT COUNT(DISTINCT vin) FROM inspections
                       WHERE dot_number = ?
-                        AND LOWER(unit_type_desc) IN ('truck', 'tractor') AND vin <> '') AS ec2_power_units,
+                        AND UPPER(unit_type_desc) IN ({$powerTypes}) AND vin <> '') AS ec2_power_units,
                     (SELECT COUNT(DISTINCT vin) FROM inspections
                       WHERE dot_number = ?
-                        AND LOWER(unit_type_desc) LIKE '%trailer%' AND vin <> '') AS ec2_trailers
+                        AND UPPER(unit_type_desc) REGEXP '{$towedTypes}' AND vin <> '') AS ec2_trailers
                  FROM inspections WHERE dot_number = ?) i,
 
                 (SELECT
                     COUNT(*) AS crash_total,
-                    MAX(report_date) AS crash_last_date,
+                    MAX({$reportDate}) AS crash_last_date,
                     COALESCE(SUM(fatalities), 0) AS fatalities,
                     COALESCE(SUM(injuries), 0) AS injuries,
                     COALESCE(SUM(CASE WHEN tow_away THEN 1 ELSE 0 END), 0) AS tow_away
@@ -424,7 +451,7 @@ class CarrierProfileService
 
                 (SELECT
                     COUNT(*) AS violation_total,
-                    MAX(insp_date) AS violation_last_date
+                    MAX({$inspDate}) AS violation_last_date
                  FROM violation_details WHERE dot_number = ?) v,
 
                 -- Per-state breakdown folded in as JSON rather than paying
@@ -547,17 +574,28 @@ class CarrierProfileService
         ])->values();
     }
 
+    /**
+     * @param  string  $type  a key from Fmcsa::AUTHORITY_TYPES
+     *
+     * carrier_authority_history has no `mod_col_1` column — the authority type
+     * is `op_auth_type`, and it holds either the long FMCSA description or a
+     * short form depending on the row.
+     */
     protected function authorityAge(Carrier $carrier, string $type): ?int
     {
+        $types = Fmcsa::authorityType($type);
+
         $granted = $carrier->authorityHistory
-            ->where('mod_col_1', $type)
-            ->where('original_action_desc', 'GRANTED')
-            ->sortBy('orig_served_date')
+            ->filter(fn ($h) => in_array(strtoupper((string) $h->op_auth_type), $types, true)
+                && strtoupper((string) $h->original_action_desc) === 'GRANTED')
+            // These dates are '24-APR-24' strings; sorting them as text picks
+            // the wrong row.
+            ->sortBy(fn ($h) => Fmcsa::dateKey($h->orig_served_date) ?: PHP_INT_MAX)
             ->first();
 
-        return $granted?->orig_served_date
-            ? (int) Carbon::parse($granted->orig_served_date)->diffInYears(now())
-            : null;
+        $served = Fmcsa::date($granted?->orig_served_date);
+
+        return $served ? (int) $served->diffInYears(now()) : null;
     }
 
     /**

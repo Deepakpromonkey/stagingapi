@@ -19,8 +19,11 @@ use App\Models\CarrierShortlist;
 use App\Models\Connect\CarrierConnectRequestsModel;
 use App\Models\Customers\CustomersQuestionsModel;
 use App\Models\SearchHistory;
+use App\Support\Fmcsa;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -318,6 +321,46 @@ class CarrierController extends Controller
         ];
     }
 
+    /**
+     * Does a filing on insurance_filings match one of the coverage kinds?
+     *
+     * Form codes in the feed: 91 / 91X are BIPD (ins_type_desc 'BIPD/Primary',
+     * 'BIPD/Excess'), 34 is cargo, 84 surety bond, 85 trust fund. The
+     * description is checked too because form codes are blank on some rows.
+     */
+    private function insuranceFilingMatches($filing, string $kind): bool
+    {
+        $code = strtoupper(trim((string) ($filing->ins_form_code ?? '')));
+        $desc = strtoupper((string) ($filing->ins_type_desc ?? ''));
+
+        return match ($kind) {
+            'bipd' => in_array($code, ['91', '91X'], true) || str_starts_with($desc, 'BIPD'),
+            'cargo' => $code === '34' || str_contains($desc, 'CARGO'),
+            'bond' => in_array($code, ['84', '85'], true)
+                || str_contains($desc, 'SURETY')
+                || str_contains($desc, 'BOND')
+                || str_contains($desc, 'TRUST FUND'),
+            default => false,
+        };
+    }
+
+    /** Does the carrier hold an uncancelled filing of this coverage kind? */
+    private function hasInsuranceFiling($carrier, string $kind): bool
+    {
+        return $carrier->insuranceFilings->contains(function ($filing) use ($kind) {
+
+            if (! $this->insuranceFilingMatches($filing, $kind)) {
+                return false;
+            }
+
+            if (empty($filing->cancl_effective_date)) {
+                return true;
+            }
+
+            return Fmcsa::date($filing->cancl_effective_date)?->isFuture() ?? false;
+        });
+    }
+
     private function checkKnockout($carrier, $detail, $auth)
     {
         $triggered = false;
@@ -329,9 +372,12 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
+        // Status is 'A' / 'I' / 'N' since the Motus load — it was 'ACTIVE'
+        // before. Comparing against the old literal knocked out every carrier
+        // in the database and capped each one at 18 / grade F.
         if (
-            strtoupper($auth?->common_stat ?? '') !== 'ACTIVE' &&
-            strtoupper($auth?->contract_stat ?? '') !== 'ACTIVE'
+            ! Fmcsa::isActive($auth?->common_stat) &&
+            ! Fmcsa::isActive($auth?->contract_stat)
         ) {
 
             $triggered = true;
@@ -386,7 +432,13 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (empty($auth?->bipd_file)) {
+        // Two sources have to agree before knocking a carrier out. The
+        // authority record's `bipd_file` is a coverage amount in thousands and
+        // reads '00000' on the large majority of rows — most of which are the
+        // carrier's old, superseded authorities — so on its own it would reject
+        // nearly the whole database. An actual filing on insurance_filings is
+        // the stronger signal.
+        if (! Fmcsa::onFile($auth?->bipd_file) && ! $this->hasInsuranceFiling($carrier, 'bipd')) {
 
             $triggered = true;
 
@@ -403,8 +455,9 @@ class CarrierController extends Controller
         */
 
         if (
-            strtoupper($auth?->cargo_req ?? '') == 'Y' &&
-            empty($auth?->cargo_file)
+            Fmcsa::flag($auth?->cargo_req) &&
+            ! Fmcsa::onFile($auth?->cargo_file) &&
+            ! $this->hasInsuranceFiling($carrier, 'cargo')
         ) {
 
             $triggered = true;
@@ -422,8 +475,9 @@ class CarrierController extends Controller
         */
 
         if (
-            strtoupper($auth?->bond_req ?? '') == 'Y' &&
-            empty($auth?->bond_file)
+            Fmcsa::flag($auth?->bond_req) &&
+            ! Fmcsa::onFile($auth?->bond_file) &&
+            ! $this->hasInsuranceFiling($carrier, 'bond')
         ) {
 
             $triggered = true;
@@ -440,9 +494,11 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
+        // carrier_oos_orders still spells its status out in full ('ACTIVE' /
+        // 'INACTIVE'), unlike the authority columns. rescind_date is a varchar,
+        // so blanks have to count as "not rescinded" alongside NULL.
         $activeOOS = $carrier->oosOrders
-            ->whereNull('rescind_date')
-            ->where('status', 'ACTIVE')
+            ->filter(fn ($o) => strtoupper((string) $o->status) === 'ACTIVE' && empty($o->rescind_date))
             ->count();
 
         if ($activeOOS > 0) {
@@ -539,6 +595,137 @@ class CarrierController extends Controller
         ];
     }
 
+    /**
+     * The five BASICs, keyed by the column prefix they share across
+     * sms_measures and the cut-point table below.
+     */
+    private const SMS_BASICS = [
+        'unsafe_driv',
+        'hos_driv',
+        'driv_fit',
+        'contr_subst',
+        'veh_maint',
+    ];
+
+    /**
+     * National 50th / 75th / 90th cut-points for each BASIC measure.
+     *
+     * The Motus load reshaped sms_measures: `*_pct`, `*_basic_alert` and
+     * `*_rd_alert` are gone, and only the raw `*_measure` values survived. The
+     * pillar scoring is written against percentiles, so rebuild them from the
+     * measures that are still there.
+     *
+     * Sampled at one row in sixteen — the cut-points land within a few
+     * hundredths of the full-population values and the query drops from ~24s to
+     * ~2s — and cached for a day, since the source is a nightly batch load.
+     */
+    private function smsPercentiles(): array
+    {
+        return Cache::remember('dt_sms_percentiles', 86400, function () {
+
+            $cases = [];
+            $windows = [];
+
+            foreach (self::SMS_BASICS as $i => $basic) {
+                $windows[] = "PERCENT_RANK() OVER (ORDER BY {$basic}_measure) AS r{$i}";
+                $windows[] = "{$basic}_measure AS m{$i}";
+
+                foreach ([50, 75, 90] as $p) {
+                    $cases[] = "MAX(CASE WHEN r{$i} <= ".($p / 100)." THEN m{$i} END) AS p{$p}_{$i}";
+                }
+            }
+
+            try {
+                $row = DB::connection('external_db')
+                    ->selectOne(
+                        'SELECT '.implode(', ', $cases).
+                        ' FROM (SELECT '.implode(', ', $windows).
+                        ' FROM sms_measures WHERE insp_total > 0 AND (id % 16) = 0) t'
+                    );
+            } catch (\Throwable $e) {
+                Log::warning('SMS percentile cut-points unavailable, using fallback', [
+                    'error' => $e->getMessage(),
+                ]);
+
+                $row = null;
+            }
+
+            $cuts = [];
+
+            foreach (self::SMS_BASICS as $i => $basic) {
+                $cuts[$basic] = [
+                    50 => isset($row->{"p50_$i"}) ? (float) $row->{"p50_$i"} : self::SMS_FALLBACK_CUTS[$basic][50],
+                    75 => isset($row->{"p75_$i"}) ? (float) $row->{"p75_$i"} : self::SMS_FALLBACK_CUTS[$basic][75],
+                    90 => isset($row->{"p90_$i"}) ? (float) $row->{"p90_$i"} : self::SMS_FALLBACK_CUTS[$basic][90],
+                ];
+            }
+
+            return $cuts;
+        });
+    }
+
+    /**
+     * Observed national cut-points, used only when the live query fails, so a
+     * cold cache never leaves a profile with no safety scoring at all.
+     */
+    private const SMS_FALLBACK_CUTS = [
+        'unsafe_driv' => [50 => 0.0, 75 => 2.50, 90 => 8.00],
+        'hos_driv' => [50 => 0.0, 75 => 0.51, 90 => 2.80],
+        'driv_fit' => [50 => 0.0, 75 => 0.12, 90 => 1.79],
+        'contr_subst' => [50 => 0.0, 75 => 0.0, 90 => 0.0],
+        'veh_maint' => [50 => 3.60, 75 => 8.66, 90 => 15.00],
+    ];
+
+    /**
+     * The percentile band a BASIC measure falls into: 90, 75, 50 or 0.
+     *
+     * Stands in for the `*_pct` columns the feed no longer carries, so the
+     * threshold checks downstream read exactly as they did before.
+     *
+     * A zero measure is never banded: for BASICs where most carriers sit at
+     * zero the cut-points are zero too, and a plain `>=` would flag everybody.
+     */
+    private function measureBand($measure, array $cuts): float
+    {
+        $measure = (float) ($measure ?? 0);
+
+        if ($measure <= 0) {
+            return 0.0;
+        }
+
+        return match (true) {
+            $measure >= $cuts[90] => 90.0,
+            $measure >= $cuts[75] => 75.0,
+            $measure >= $cuts[50] => 50.0,
+            default => 0.0,
+        };
+    }
+
+    /** Is this BASIC at or above the national alert (90th percentile) line? */
+    private function basicAlert($measure, array $cuts): bool
+    {
+        return $this->measureBand($measure, $cuts) >= 90;
+    }
+
+    /**
+     * The `*_pct` and `*_basic_alert` fields the sms_measures payload used to
+     * carry, rebuilt from the measures so the response shape is unchanged.
+     */
+    private function smsPercentileFields($sms): array
+    {
+        $cuts = $this->smsPercentiles();
+        $fields = [];
+
+        foreach (self::SMS_BASICS as $basic) {
+            $measure = $sms?->{"{$basic}_measure"};
+
+            $fields["{$basic}_pct"] = $this->measureBand($measure, $cuts[$basic]);
+            $fields["{$basic}_basic_alert"] = $this->basicAlert($measure, $cuts[$basic]);
+        }
+
+        return $fields;
+    }
+
     private function calculateSafety(
         $sms,
         $detail,
@@ -549,6 +736,8 @@ class CarrierController extends Controller
         $score = 24;
 
         $deductions = [];
+
+        $cuts = $this->smsPercentiles();
 
         /*
         |--------------------------------------------------------------------------
@@ -585,7 +774,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $unsafe = (float) ($sms?->unsafe_driv_pct ?? 0);
+        $unsafe = $this->measureBand($sms?->unsafe_driv_measure, $cuts['unsafe_driv']);
 
         if ($unsafe >= 90) {
             $score -= 5;
@@ -604,7 +793,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $hos = (float) ($sms?->hos_driv_pct ?? 0);
+        $hos = $this->measureBand($sms?->hos_driv_measure, $cuts['hos_driv']);
 
         if ($hos >= 90) {
             $score -= 4;
@@ -623,7 +812,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $maintenance = (float) ($sms?->veh_maint_pct ?? 0);
+        $maintenance = $this->measureBand($sms?->veh_maint_measure, $cuts['veh_maint']);
 
         if ($maintenance >= 90) {
             $score -= 5;
@@ -642,7 +831,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $fitness = (float) ($sms?->driv_fit_pct ?? 0);
+        $fitness = $this->measureBand($sms?->driv_fit_measure, $cuts['driv_fit']);
 
         if ($fitness >= 90) {
             $score -= 3;
@@ -658,7 +847,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $substance = (float) ($sms?->contr_subst_pct ?? 0);
+        $substance = $this->measureBand($sms?->contr_subst_measure, $cuts['contr_subst']);
 
         if ($substance >= 90) {
             $score -= 5;
@@ -718,54 +907,63 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if ($sms?->unsafe_driv_basic_alert == 'Y') {
+        // The `*_basic_alert` columns went away with the Motus load. A BASIC
+        // alert is by definition the measure sitting at or above the national
+        // intervention percentile, which the cut-points give us directly.
+        if ($this->basicAlert($sms?->unsafe_driv_measure, $cuts['unsafe_driv'])) {
             $score -= 2;
             $deductions[] = 'Unsafe Driving BASIC Alert';
         }
 
-        if ($sms?->hos_driv_basic_alert == 'Y') {
+        if ($this->basicAlert($sms?->hos_driv_measure, $cuts['hos_driv'])) {
             $score -= 2;
             $deductions[] = 'HOS BASIC Alert';
         }
 
-        if ($sms?->veh_maint_basic_alert == 'Y') {
+        if ($this->basicAlert($sms?->veh_maint_measure, $cuts['veh_maint'])) {
             $score -= 2;
             $deductions[] = 'Vehicle Maintenance BASIC Alert';
         }
 
-        if ($sms?->driv_fit_basic_alert == 'Y') {
+        if ($this->basicAlert($sms?->driv_fit_measure, $cuts['driv_fit'])) {
             $score -= 2;
             $deductions[] = 'Driver Fitness BASIC Alert';
         }
 
-        if ($sms?->contr_subst_basic_alert == 'Y') {
+        if ($this->basicAlert($sms?->contr_subst_measure, $cuts['contr_subst'])) {
             $score -= 2;
             $deductions[] = 'Controlled Substance BASIC Alert';
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Roadside Alerts
+        | Acute / Critical Violations
         |--------------------------------------------------------------------------
+        |
+        | These read `*_rd_alert` before the Motus load. That column is gone;
+        | `*_ac` — the acute/critical indicator — is the one alert column that
+        | survived, so the deduction now hangs off it. The loader is not
+        | populating it yet, so this contributes nothing today and starts
+        | counting the moment it does.
         */
 
-        if ($sms?->unsafe_driv_rd_alert == 'Y') {
+        if (Fmcsa::flag($sms?->unsafe_driv_ac)) {
             $score--;
         }
 
-        if ($sms?->hos_driv_rd_alert == 'Y') {
+        if (Fmcsa::flag($sms?->hos_driv_ac)) {
             $score--;
         }
 
-        if ($sms?->veh_maint_rd_alert == 'Y') {
+        if (Fmcsa::flag($sms?->veh_maint_ac)) {
             $score--;
         }
 
-        if ($sms?->driv_fit_rd_alert == 'Y') {
+        if (Fmcsa::flag($sms?->driv_fit_ac)) {
             $score--;
         }
 
-        if ($sms?->contr_subst_rd_alert == 'Y') {
+        if (Fmcsa::flag($sms?->contr_subst_ac)) {
             $score--;
         }
 
@@ -837,15 +1035,27 @@ class CarrierController extends Controller
 
             'parameters' => [
 
-                'unsafe_driv_pct' => $sms?->unsafe_driv_pct,
+                // Percentile bands derived from the raw measures — the feed no
+                // longer ships the `*_pct` columns these used to read.
+                'unsafe_driv_pct' => $unsafe,
 
-                'hos_driv_pct' => $sms?->hos_driv_pct,
+                'hos_driv_pct' => $hos,
 
-                'veh_maint_pct' => $sms?->veh_maint_pct,
+                'veh_maint_pct' => $maintenance,
 
-                'driv_fit_pct' => $sms?->driv_fit_pct,
+                'driv_fit_pct' => $fitness,
 
-                'contr_subst_pct' => $sms?->contr_subst_pct,
+                'contr_subst_pct' => $substance,
+
+                'unsafe_driv_measure' => $sms?->unsafe_driv_measure,
+
+                'hos_driv_measure' => $sms?->hos_driv_measure,
+
+                'veh_maint_measure' => $sms?->veh_maint_measure,
+
+                'driv_fit_measure' => $sms?->driv_fit_measure,
+
+                'contr_subst_measure' => $sms?->contr_subst_measure,
 
                 'vehicle_oos_pct' => $vehicleOosPct,
 
@@ -1214,7 +1424,9 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (empty($auth?->bipd_file)) {
+        // As in checkKnockout(): '00000' on bipd_file and 'N' on the other two
+        // are both non-empty strings, so empty() read every carrier as covered.
+        if (! Fmcsa::onFile($auth?->bipd_file) && ! $this->hasInsuranceFiling($carrier, 'bipd')) {
 
             $score -= 5;
 
@@ -1229,8 +1441,9 @@ class CarrierController extends Controller
         */
 
         if (
-            strtoupper($auth?->cargo_req ?? '') == 'Y' &&
-            empty($auth?->cargo_file)
+            Fmcsa::flag($auth?->cargo_req) &&
+            ! Fmcsa::onFile($auth?->cargo_file) &&
+            ! $this->hasInsuranceFiling($carrier, 'cargo')
         ) {
 
             $score -= 5;
@@ -1246,8 +1459,9 @@ class CarrierController extends Controller
         */
 
         if (
-            strtoupper($auth?->bond_req ?? '') == 'Y' &&
-            empty($auth?->bond_file)
+            Fmcsa::flag($auth?->bond_req) &&
+            ! Fmcsa::onFile($auth?->bond_file) &&
+            ! $this->hasInsuranceFiling($carrier, 'bond')
         ) {
 
             $score -= 4;
@@ -1472,7 +1686,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (strtoupper($auth?->common_stat ?? '') == 'ACTIVE') {
+        if (Fmcsa::isActive($auth?->common_stat)) {
 
             $score += 1;
 
@@ -1490,7 +1704,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (strtoupper($auth?->contract_stat ?? '') == 'ACTIVE') {
+        if (Fmcsa::isActive($auth?->contract_stat)) {
 
             $score += 1;
 
@@ -1508,7 +1722,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (strtoupper($auth?->broker_stat ?? '') == 'ACTIVE') {
+        if (Fmcsa::isActive($auth?->broker_stat)) {
 
             $score += 1;
 
@@ -1518,9 +1732,12 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         | Pending Applications
         |--------------------------------------------------------------------------
+        | These six columns hold 'Y' or 'N', never a blank, so the empty() test
+        | they used to run was true for every carrier — a guaranteed -12 that
+        | pinned the whole pillar at 0/12.
         */
 
-        if (! empty($auth?->common_app_pend)) {
+        if (Fmcsa::flag($auth?->common_app_pend)) {
 
             $score -= 1;
 
@@ -1528,7 +1745,7 @@ class CarrierController extends Controller
 
         }
 
-        if (! empty($auth?->contract_app_pend)) {
+        if (Fmcsa::flag($auth?->contract_app_pend)) {
 
             $score -= 1;
 
@@ -1536,7 +1753,7 @@ class CarrierController extends Controller
 
         }
 
-        if (! empty($auth?->broker_app_pend)) {
+        if (Fmcsa::flag($auth?->broker_app_pend)) {
 
             $score -= 1;
 
@@ -1550,7 +1767,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (! empty($auth?->common_rev_pend)) {
+        if (Fmcsa::flag($auth?->common_rev_pend)) {
 
             $score -= 3;
 
@@ -1558,7 +1775,7 @@ class CarrierController extends Controller
 
         }
 
-        if (! empty($auth?->contract_rev_pend)) {
+        if (Fmcsa::flag($auth?->contract_rev_pend)) {
 
             $score -= 3;
 
@@ -1566,7 +1783,7 @@ class CarrierController extends Controller
 
         }
 
-        if (! empty($auth?->broker_rev_pend)) {
+        if (Fmcsa::flag($auth?->broker_rev_pend)) {
 
             $score -= 3;
 
@@ -1767,330 +1984,870 @@ class CarrierController extends Controller
         ];
     }
 
-    public function search(Request $request)
-    {
-        $search = trim($request->query('query', ''));
-        $searchedBy = $request->query('searched_by', 'dot_number');
-        $sort = $request->query('sort', '');
-        $sortDir = $sort === 'sortByNameDesc' ? 'desc' : 'asc';
-        $perPage = (int) $request->query('per_page', 10);
+    /*
+    |--------------------------------------------------------------------------
+    | Crash / Inspection / Operations pillars
+    |--------------------------------------------------------------------------
+    |
+    | calculateCarrierTrustScore() has always called these three plus
+    | getGrade(), and none of them existed. The call never got that far: the
+    | knockout check above compared authority status against 'ACTIVE', which no
+    | longer appears in the data, so every carrier short-circuited to a capped
+    | score of 18 / grade F and returned before reaching this point. Fixing the
+    | status comparison exposed the gap.
+    |
+    | The four weights already in the file come to 74 (safety 24, identity 20,
+    | insurance 18, authority 12) and the overall thresholds treat the score as
+    | out of 100, so the remaining 26 is split crash 10 / inspection 8 /
+    | operations 8. Those weights and the bands below are a starting point —
+    | they are the part of the scoring nobody has signed off on yet.
+    */
 
-        $dotNumber = null;
+    private function calculateCrash(
+        $carrier,
+        $crashesTotal,
+        $crashFatalities,
+        $crashInjuries,
+        $crashesTowAway
+    ) {
+        $score = 10;
 
-        $query = Carrier::query()
-            ->select([
-                'id',
-                'row_id',
-                'dot_number',
-                'legal_name',
-                'dba_name',
-                'telephone',
-                'email_address',
-                'phy_street',
-                'phy_city',
-                'phy_state',
-                'phy_zip',
-                'mcs150_mileage',
-                'nbr_power_unit',
-                'driver_total',
-                'carrier_operation',
-            ])
-            ->with([
-                'authority:dot_number,docket_number,common_stat,contract_stat,broker_stat',
-                'authorityHistory:dot_number,op_auth_type,original_action_desc,orig_served_date,disp_action_desc,disp_decided_date,disp_served_date',
-                'smsMeasures:dot_number,unsafe_driv_measure,hos_driv_measure,veh_maint_measure',
+        $deductions = [];
 
-                'carrierDetail:dot_number,fleetsize,status_code,safety_rating,dun_bradstreet_no',
+        /*
+        |--------------------------------------------------------------------------
+        | Fatalities
+        |--------------------------------------------------------------------------
+        */
 
-                'inspections' => function ($q) {
-                    $q->select('dot_number', 'vin')->limit(1);
-                },
-            ])
-            ->withExists('insuranceFilings');
-        if (! empty($search)) {
+        if ($crashFatalities >= 3) {
 
-            switch ($searchedBy) {
+            $score -= 8;
 
-                case 'mc_number':
+            $deductions[] = 'Multiple Fatal Crashes';
 
-                    $search = strtoupper($search);
+        } elseif ($crashFatalities >= 1) {
 
-                    if (! str_starts_with($search, 'MC')) {
-                        $search = 'MC'.$search;
-                    }
+            $score -= 5;
 
-                    $dotNumber = CarrierAuthority::where('docket_number', $search)
-                        ->value('dot_number');
+            $deductions[] = 'Fatal Crash On Record';
 
-                    if ($dotNumber) {
-                        $query->where('dot_number', $dotNumber);
-                    } else {
-                        $query->whereRaw('1 = 0');
-                    }
-
-                    break;
-
-                case 'dot_number':
-
-                    $query->where('dot_number', $search);
-                    break;
-
-                case 'legal_name':
-
-                    $query->where('legal_name', 'LIKE', "%{$search}%");
-                    break;
-
-                case 'phone':
-
-                    $query->where('telephone', $search);
-                    break;
-
-                case 'email':
-
-                    $query->where('email_address', $search);
-                    break;
-
-                default:
-
-                    $query->where('dot_number', $search);
-            }
         }
 
-        $data = $query
+        /*
+        |--------------------------------------------------------------------------
+        | Injuries
+        |--------------------------------------------------------------------------
+        */
+
+        if ($crashInjuries >= 10) {
+
+            $score -= 3;
+
+            $deductions[] = 'High Injury Crash Count';
+
+        } elseif ($crashInjuries >= 5) {
+
+            $score -= 2;
+
+        } elseif ($crashInjuries >= 1) {
+
+            $score -= 1;
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Tow-Away Crashes
+        |--------------------------------------------------------------------------
+        */
+
+        if ($crashesTowAway >= 10) {
+
+            $score -= 3;
+
+            $deductions[] = 'Frequent Tow-Away Crashes';
+
+        } elseif ($crashesTowAway >= 5) {
+
+            $score -= 2;
+
+        } elseif ($crashesTowAway >= 1) {
+
+            $score -= 1;
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Crash Volume
+        |--------------------------------------------------------------------------
+        */
+
+        if ($crashesTotal >= 20) {
+
+            $score -= 3;
+
+            $deductions[] = 'High Crash Volume';
+
+        } elseif ($crashesTotal >= 10) {
+
+            $score -= 2;
+
+        } elseif ($crashesTotal >= 5) {
+
+            $score -= 1;
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Crashes Per Power Unit
+        |--------------------------------------------------------------------------
+        | Volume alone punishes large fleets, so weigh it against fleet size
+        | where the carrier has reported one.
+        */
+
+        $powerUnits = (int) ($carrier->nbr_power_unit ?? 0);
+
+        $crashesPerUnit = $powerUnits > 0
+            ? round($crashesTotal / $powerUnits, 3)
+            : null;
+
+        if ($crashesPerUnit !== null) {
+
+            if ($crashesPerUnit >= 1.0) {
+
+                $score -= 3;
+
+                $deductions[] = 'Crash Rate Well Above Fleet Size';
+
+            } elseif ($crashesPerUnit >= 0.5) {
+
+                $score -= 2;
+
+            } elseif ($crashesPerUnit >= 0.25) {
+
+                $score -= 1;
+
+            }
+
+        }
+
+        $score = max(0, min(10, round($score)));
+
+        if ($score >= 9) {
+
+            $status = 'Excellent';
+
+        } elseif ($score >= 7) {
+
+            $status = 'Good';
+
+        } elseif ($score >= 5) {
+
+            $status = 'Average';
+
+        } elseif ($score >= 3) {
+
+            $status = 'Poor';
+
+        } else {
+
+            $status = 'Critical';
+
+        }
+
+        return [
+
+            'weight' => 10,
+
+            'score' => $score,
+
+            'status' => $status,
+
+            'deductions' => $deductions,
+
+            'parameters' => [
+
+                'crashes_total' => $crashesTotal,
+
+                'crash_fatalities' => $crashFatalities,
+
+                'crash_injuries' => $crashInjuries,
+
+                'crashes_tow_away' => $crashesTowAway,
+
+                'power_units' => $powerUnits ?: null,
+
+                'crashes_per_power_unit' => $crashesPerUnit,
+
+            ],
+
+        ];
+    }
+
+    private function calculateInspection(
+        $carrier,
+        $sms,
+        $vehicleOosPct,
+        $driverOosPct
+    ) {
+        $score = 8;
+
+        $deductions = [];
+
+        /*
+        |--------------------------------------------------------------------------
+        | Inspection Volume
+        |--------------------------------------------------------------------------
+        | sms_measures is the authority on totals; fall back to the inspection
+        | rows for carriers the SMS extract has not picked up.
+        */
+
+        $inspTotal = (int) ($sms?->insp_total ?? 0);
+
+        if ($inspTotal === 0) {
+            $inspTotal = $carrier->inspections->count();
+        }
+
+        if ($inspTotal === 0) {
+
+            $score -= 4;
+
+            $deductions[] = 'No Inspection History';
+
+        } elseif ($inspTotal < 5) {
+
+            $score -= 2;
+
+            $deductions[] = 'Thin Inspection History';
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Share Of Inspections Carrying A Violation
+        |--------------------------------------------------------------------------
+        */
+
+        $inspWithViolations = 0;
+
+        foreach (self::SMS_BASICS as $basic) {
+            $inspWithViolations += (int) ($sms?->{"{$basic}_insp_w_viol"} ?? 0);
+        }
+
+        $violationRate = $inspTotal > 0
+            ? round($inspWithViolations / $inspTotal, 3)
+            : null;
+
+        if ($violationRate !== null) {
+
+            if ($violationRate >= 0.75) {
+
+                $score -= 3;
+
+                $deductions[] = 'Violations On Most Inspections';
+
+            } elseif ($violationRate >= 0.50) {
+
+                $score -= 2;
+
+            } elseif ($violationRate >= 0.25) {
+
+                $score -= 1;
+
+            }
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Out Of Service Rates
+        |--------------------------------------------------------------------------
+        | FMCSA national averages: vehicle 10.8%, driver 4.5%.
+        */
+
+        if ($vehicleOosPct !== null && $vehicleOosPct >= 30) {
+
+            $score -= 2;
+
+            $deductions[] = 'Vehicle OOS Rate Well Above National Average';
+
+        } elseif ($vehicleOosPct !== null && $vehicleOosPct >= 20) {
+
+            $score -= 1;
+
+        }
+
+        if ($driverOosPct !== null && $driverOosPct >= 15) {
+
+            $score -= 2;
+
+            $deductions[] = 'Driver OOS Rate Well Above National Average';
+
+        } elseif ($driverOosPct !== null && $driverOosPct >= 10) {
+
+            $score -= 1;
+
+        }
+
+        $score = max(0, min(8, round($score)));
+
+        if ($score >= 7) {
+
+            $status = 'Excellent';
+
+        } elseif ($score >= 6) {
+
+            $status = 'Good';
+
+        } elseif ($score >= 4) {
+
+            $status = 'Average';
+
+        } elseif ($score >= 2) {
+
+            $status = 'Poor';
+
+        } else {
+
+            $status = 'Critical';
+
+        }
+
+        return [
+
+            'weight' => 8,
+
+            'score' => $score,
+
+            'status' => $status,
+
+            'deductions' => $deductions,
+
+            'parameters' => [
+
+                'inspection_count' => $inspTotal,
+
+                'inspections_with_violations' => $inspWithViolations,
+
+                'violation_rate' => $violationRate,
+
+                'vehicle_oos_pct' => $vehicleOosPct,
+
+                'driver_oos_pct' => $driverOosPct,
+
+            ],
+
+        ];
+    }
+
+    private function calculateOperations(
+        $carrier,
+        $detail,
+        $dotAge,
+        $mcs150Year,
+        $observedUnits,
+        $observedTrailers
+    ) {
+        $score = 8;
+
+        $deductions = [];
+
+        /*
+        |--------------------------------------------------------------------------
+        | Time Since DOT Registration
+        |--------------------------------------------------------------------------
+        */
+
+        if ($dotAge === null) {
+
+            $score -= 1;
+
+            $deductions[] = 'DOT Registration Date Unknown';
+
+        } elseif ($dotAge < 2) {
+
+            $score -= 3;
+
+            $deductions[] = 'New Operation';
+
+        } elseif ($dotAge < 5) {
+
+            $score -= 1;
+
+        } elseif ($dotAge >= 10) {
+
+            $score += 1;
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | MCS-150 Currency
+        |--------------------------------------------------------------------------
+        | Carriers must refile every two years.
+        */
+
+        $currentYear = (int) now()->year;
+
+        if ($mcs150Year === null) {
+
+            $score -= 2;
+
+            $deductions[] = 'No MCS-150 On File';
+
+        } elseif (($currentYear - $mcs150Year) > 2) {
+
+            $score -= 2;
+
+            $deductions[] = 'MCS-150 Filing Overdue';
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Reported Fleet Against Observed Equipment
+        |--------------------------------------------------------------------------
+        | A carrier that reports power units but has never had one inspected is
+        | worth flagging.
+        */
+
+        $reportedUnits = (int) ($carrier->nbr_power_unit ?? 0);
+
+        if ($reportedUnits > 0 && $observedUnits === 0) {
+
+            $score -= 2;
+
+            $deductions[] = 'No Equipment Observed Roadside';
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Self-Reported Operating Data
+        |--------------------------------------------------------------------------
+        */
+
+        if ((int) ($carrier->mcs150_mileage ?? 0) <= 0) {
+
+            $score -= 1;
+
+            $deductions[] = 'No Mileage Reported';
+
+        }
+
+        $driverCount = (int) ($detail?->total_drivers ?? $carrier->driver_total ?? 0);
+
+        if ($driverCount <= 0) {
+
+            $score -= 1;
+
+            $deductions[] = 'No Drivers Reported';
+
+        }
+
+        $score = max(0, min(8, round($score)));
+
+        if ($score >= 7) {
+
+            $status = 'Excellent';
+
+        } elseif ($score >= 6) {
+
+            $status = 'Good';
+
+        } elseif ($score >= 4) {
+
+            $status = 'Average';
+
+        } elseif ($score >= 2) {
+
+            $status = 'Poor';
+
+        } else {
+
+            $status = 'Critical';
+
+        }
+
+        return [
+
+            'weight' => 8,
+
+            'score' => $score,
+
+            'status' => $status,
+
+            'deductions' => $deductions,
+
+            'parameters' => [
+
+                'dot_age' => $dotAge,
+
+                'mcs150_year' => $mcs150Year,
+
+                'reported_power_units' => $reportedUnits,
+
+                'observed_units' => $observedUnits,
+
+                'observed_trailers' => $observedTrailers,
+
+                'mcs150_mileage' => $carrier->mcs150_mileage,
+
+                'driver_total' => $driverCount,
+
+            ],
+
+        ];
+    }
+
+    /** Letter grade for a 0-100 trust score. */
+    private function getGrade($score)
+    {
+        return match (true) {
+            $score >= 90 => 'A',
+            $score >= 80 => 'B',
+            $score >= 70 => 'C',
+            $score >= 60 => 'D',
+            default => 'F',
+        };
+    }
+
+    /**
+     * Columns read straight off `carriers` for a search row.
+     */
+    private const SEARCH_COLUMNS = [
+        'id',
+        'row_id',
+        'dot_number',
+        'legal_name',
+        'dba_name',
+        'telephone',
+        'email_address',
+        'phy_street',
+        'phy_city',
+        'phy_state',
+        'phy_zip',
+        'mcs150_mileage',
+        'nbr_power_unit',
+        'driver_total',
+        'carrier_operation',
+    ];
+
+    /**
+     * A search row's related fields, resolved in the same query as the row.
+     *
+     * These used to be five eager loads. The carrier database is on EC2, so
+     * every extra statement is a full network round trip (~300ms measured) —
+     * five of them dominated the response. As correlated subselects the server
+     * answers all of them in one trip off the existing dot_number indexes.
+     *
+     * `ORDER BY id DESC LIMIT 1` is also what collapses the duplicate rows the
+     * Motus load left in carrier_details and carrier_authorities.
+     *
+     * Two of the old eager loads (`authorityHistory`, `smsMeasures`) are gone
+     * outright: nothing in the response ever read them, and authorityHistory is
+     * a 9.9M-row table.
+     */
+    private function carrierSearchQuery(): EloquentBuilder
+    {
+        $latestAuthority = fn (string $column) => CarrierAuthority::query()
+            ->select($column)
+            ->whereColumn('carrier_authorities.dot_number', 'carriers.dot_number')
+            ->orderByDesc('carrier_authorities.id')
+            ->limit(1);
+
+        $latestDetail = fn (string $column) => CarrierDetail::query()
+            ->select($column)
+            ->whereColumn('carrier_details.dot_number', 'carriers.dot_number')
+            ->orderByDesc('carrier_details.id')
+            ->limit(1);
+
+        return Carrier::query()
+            ->select(self::SEARCH_COLUMNS)
+            ->addSelect([
+                'mc_number' => $latestAuthority('docket_number'),
+                'common_stat' => $latestAuthority('common_stat'),
+                'contract_stat' => $latestAuthority('contract_stat'),
+                'broker_stat' => $latestAuthority('broker_stat'),
+
+                'fleetsize' => $latestDetail('fleetsize'),
+                'status_code' => $latestDetail('status_code'),
+                'safety_rating' => $latestDetail('safety_rating'),
+                'duns' => $latestDetail('dun_bradstreet_no'),
+
+                // The old eager load asked for `inspections` with limit(1),
+                // which Laravel applies to the whole eager-load statement — so
+                // one VIN came back for the entire page and landed on whichever
+                // carrier matched first.
+                'vin' => Inspection::query()
+                    ->select('vin')
+                    ->whereColumn('inspections.dot_number', 'carriers.dot_number')
+                    ->whereNotNull('vin')
+                    ->orderByDesc('inspections.id')
+                    ->limit(1),
+            ])
+            ->withExists('insuranceFilings');
+    }
+
+    /**
+     * Narrow a carrier query by the field the broker chose to search on.
+     */
+    private function applyCarrierSearchFilter(EloquentBuilder $query, string $search, string $searchedBy): EloquentBuilder
+    {
+        if ($search === '') {
+            return $query;
+        }
+
+        switch ($searchedBy) {
+
+            case 'mc_number':
+
+                $docket = strtoupper($search);
+
+                if (! str_starts_with($docket, 'MC')) {
+                    $docket = 'MC'.$docket;
+                }
+
+                // As a subquery rather than a lookup-then-filter, so resolving
+                // the docket costs no extra round trip.
+                $query->whereIn('dot_number', CarrierAuthority::query()
+                    ->select('dot_number')
+                    ->where('docket_number', $docket));
+
+                break;
+
+            case 'legal_name':
+
+                $query->where('legal_name', 'LIKE', "%{$search}%");
+                break;
+
+            case 'phone':
+
+                // The census file stores phone numbers unformatted
+                // ('8006540055'), where the previous feed stored
+                // '(800) 654-0055'. Brokers type either, so compare on digits.
+                $query->where('telephone', preg_replace('/\D+/', '', $search) ?: $search);
+                break;
+
+            case 'email':
+
+                $query->where('email_address', $search);
+                break;
+
+            case 'dot_number':
+            default:
+
+                $query->where('dot_number', $search);
+        }
+
+        return $query;
+    }
+
+    /**
+     * Run a carrier search and return [rows, total].
+     *
+     * Deliberately two statements. `idx_carriers_legal_name` covers
+     * `SELECT id … ORDER BY legal_name`, so step one is answered from the index
+     * alone. Adding any other column to that statement — dot_number, telephone,
+     * anything — makes it a primary-key lookup per candidate row while scanning
+     * 2M rows in name order, which took 24s against 0.4s for the covered
+     * version. Step two fetches the full row for ten primary keys, which is
+     * free, and carries the subselects with it.
+     *
+     * `id` joins the sort so that pages do not overlap when several carriers
+     * share a legal name.
+     *
+     * @param  callable(EloquentBuilder): EloquentBuilder  $filter
+     * @return array{0: Collection, 1: int}
+     */
+    private function runCarrierSearch(callable $filter, int $page, int $perPage, string $sortDir, string $cacheKey): array
+    {
+        $ids = $filter(Carrier::query())
             ->orderBy('legal_name', $sortDir)
-            ->paginate($perPage);
+            ->orderBy('id')
+            ->forPage($page, $perPage)
+            ->pluck('id');
 
-        $transformed = $data->getCollection()->map(function ($carrier) {
+        $rows = $ids->isEmpty()
+            ? collect()
+            : $this->carrierSearchQuery()
+                ->whereIn('id', $ids)
+                ->orderBy('legal_name', $sortDir)
+                ->orderBy('id')
+                ->get();
 
-            $auth = $carrier->authority;
+        return [$rows, $this->carrierSearchTotal($filter, $page, $perPage, $ids->count(), $cacheKey)];
+    }
 
-            return [
+    /**
+     * Total row count for a search, without paying for it on every request.
+     *
+     * A short page is the last page, so the total falls out of the offset and
+     * no COUNT runs at all — which covers every DOT / MC / phone / email lookup.
+     * Name searches use LIKE '%term%', which MySQL can only answer with a full
+     * index scan (~5s over 2M rows), so that count is cached: the carrier
+     * database is refreshed by batch load, not live writes.
+     */
+    private function carrierSearchTotal(callable $filter, int $page, int $perPage, int $rowCount, string $cacheKey): int
+    {
+        if ($rowCount < $perPage) {
+            return ($page - 1) * $perPage + $rowCount;
+        }
 
-                'id' => $carrier->id,
-                'row_id' => $carrier->row_id,
-                'carrier_operation' => $carrier->carrier_operation,
-                'company_name' => $carrier->legal_name,
-                'dba_name' => $carrier->dba_name,
-                'dot_number' => $carrier->dot_number,
-                'mc_number' => $auth?->docket_number,
-                'phone' => $carrier->telephone,
-                'email' => $carrier->email_address,
-                'duns' => $carrier->carrierDetail?->dun_bradstreet_no,
+        return (int) Cache::remember(
+            'carrier_search_total:'.md5($cacheKey),
+            now()->addMinutes(10),
+            fn () => $filter(Carrier::query())->toBase()->getCountForPagination()
+        );
+    }
 
-                'address' => collect([
-                    $carrier->phy_street,
-                    $carrier->phy_city,
-                    $carrier->phy_state,
-                    $carrier->phy_zip,
-                ])->filter()->implode(', '),
+    /**
+     * Shape a carrier row for the search response.
+     */
+    private function transformSearchRow(Carrier $carrier): array
+    {
+        return [
 
-                'insurance_current' => $carrier->insurance_filings_exists,
+            'id' => $carrier->id,
+            'row_id' => $carrier->row_id,
+            'carrier_operation' => $carrier->carrier_operation,
+            'company_name' => $carrier->legal_name,
+            'dba_name' => $carrier->dba_name,
+            'dot_number' => $carrier->dot_number,
+            'mc_number' => $carrier->mc_number,
+            'phone' => $carrier->telephone,
+            'email' => $carrier->email_address,
+            'duns' => $carrier->duns,
 
-                'vin' => optional($carrier->inspections->first())->vin,
+            'address' => collect([
+                $carrier->phy_street,
+                $carrier->phy_city,
+                $carrier->phy_state,
+                $carrier->phy_zip,
+            ])->filter()->implode(', '),
 
-                'mileage' => $carrier->mcs150_mileage,
+            'insurance_current' => $carrier->insurance_filings_exists,
 
-                'fleet_size' => match ($carrier->carrierDetail?->fleetsize) {
-                    'A' => '1',
-                    'B' => '2-3',
-                    'C' => '4-6',
-                    'D' => '7-8',
-                    'E' => '9-11',
-                    'F' => '12-14',
-                    'G' => '15-17',
-                    'H' => '18-19',
-                    'I' => '20-23',
-                    'J' => '24-28',
-                    'K' => '29-32',
-                    'L' => '33-38',
-                    'M' => '39-44',
-                    'N' => '45-55',
-                    'O' => '56-75',
-                    'P' => '76-100',
-                    'Q' => '101-200',
-                    'R' => '201-300',
-                    'S' => '301-400',
-                    'T' => '401-550',
-                    'U' => '551-999',
-                    'V' => '1000-2000',
-                    'W' => '2001-3000',
-                    'X' => '3001-4000',
-                    'Y' => '4001-5000',
-                    'Z' => 'OVER 5000',
-                    default => null,
-                },
+            'vin' => $carrier->vin,
 
-                'drivers' => $carrier->driver_total,
+            'mileage' => $carrier->mcs150_mileage,
 
-                'is_broker' => $auth?->broker_stat === 'ACTIVE',
+            'fleet_size' => Fmcsa::fleetSize($carrier->fleetsize),
 
-                'active_authority' => $carrier->carrierDetail?->status_code,
+            'drivers' => $carrier->driver_total,
 
-                'authority_verified' => $auth?->common_stat === 'ACTIVE' ||
-                    $auth?->contract_stat === 'ACTIVE' ||
-                    $auth?->broker_stat === 'ACTIVE',
+            // Authority status is 'A' / 'I' / 'N' since the Motus load; it was
+            // 'ACTIVE' before, so every one of these read false.
+            'is_broker' => Fmcsa::isActive($carrier->broker_stat),
 
-                'risk_level' => match ($carrier->carrierDetail?->safety_rating) {
-                    'S' => 'Satisfactory',
-                    'C' => 'Conditional',
-                    'U' => 'Unsatisfactory',
-                    default => 'Not Rated',
-                },
-            ];
-        });
+            'active_authority' => $carrier->status_code,
+
+            'authority_verified' => Fmcsa::isActive($carrier->common_stat)
+                || Fmcsa::isActive($carrier->contract_stat)
+                || Fmcsa::isActive($carrier->broker_stat),
+
+            'risk_level' => Fmcsa::safetyRating($carrier->safety_rating),
+        ];
+    }
+
+    public function search(Request $request)
+    {
+        $search = trim((string) $request->query('query', ''));
+        $searchedBy = (string) $request->query('searched_by', 'dot_number');
+        $sort = $request->query('sort', '');
+        $sortDir = $sort === 'sortByNameDesc' ? 'desc' : 'asc';
+        $perPage = max(1, min(100, (int) $request->query('per_page', 10)));
+        $page = max(1, (int) $request->query('page', 1));
+
+        [$rows, $total] = $this->runCarrierSearch(
+            fn (EloquentBuilder $query) => $this->applyCarrierSearchFilter($query, $search, $searchedBy),
+            $page,
+            $perPage,
+            $sortDir,
+            "search|{$searchedBy}|".mb_strtolower($search),
+        );
 
         return response()->json([
-            'current_page' => $data->currentPage(),
-            'per_page' => $data->perPage(),
-            'total' => $data->total(),
-            'last_page' => $data->lastPage(),
-            'has_more_pages' => $data->hasMorePages(),
-            'data' => $transformed,
+            'current_page' => $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'last_page' => max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => ($page * $perPage) < $total,
+            'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow($carrier))->values(),
         ]);
     }
 
+    /**
+     * Free-text variant of search(): the broker types one box and we work out
+     * whether it is an identifier or a name.
+     */
     public function search2(Request $request)
     {
-        $search = trim($request->query('query', ''));
+        $search = trim((string) $request->query('query', ''));
         $sort = $request->query('sort', '');
         $sortDir = $sort === 'sortByNameDesc' ? 'desc' : 'asc';
+        $perPage = max(1, min(100, (int) $request->query('per_page', 10)));
+        $page = max(1, (int) $request->query('page', 1));
 
-        $data = Carrier::query()
+        // A bare number is either the DOT number or a docket that maps to one.
+        // Resolve the docket up front: as an `OR dot_number IN (subquery)` the
+        // planner abandons the dot_number index and walks `carriers` in
+        // legal_name order instead, which on 2M rows does not come back.
+        $dotNumbers = null;
 
-            ->select([
-                'id',
-                'row_id',
-                'dot_number',
-                'legal_name',
-                'dba_name',
-                'telephone',
-                'email_address',
-                'phy_street',
-                'phy_city',
-                'phy_state',
-                'phy_zip',
-                'mcs150_mileage',
-                'nbr_power_unit',
-                'driver_total',
-                'carrier_operation',
-            ])
-            ->with([
-                'authority:dot_number,docket_number,common_stat,contract_stat,broker_stat',
+        if ($search !== '' && is_numeric($search)) {
+            $dotNumbers = CarrierAuthority::query()
+                ->where('docket_number', $search)
+                ->pluck('dot_number')
+                ->push($search)
+                ->unique()
+                ->all();
+        }
 
-                'smsMeasures:dot_number,unsafe_driv_measure,hos_driv_measure,veh_maint_measure',
+        $filter = function (EloquentBuilder $query) use ($search, $dotNumbers): EloquentBuilder {
 
-                'carrierDetail:dot_number,fleetsize,status_code,safety_rating,dun_bradstreet_no',
+            if ($search === '') {
+                return $query;
+            }
 
-                'inspections' => fn ($q) => $q
-                    ->select('dot_number', 'vin')
-                    ->limit(1),
-            ])->withExists('insuranceFilings')
+            if ($dotNumbers !== null) {
+                return $query->whereIn('dot_number', $dotNumbers);
+            }
 
-            ->when(! empty($search), function ($q) use ($search) {
+            // legal_name only, matching what searched_by=legal_name does on the
+            // routed endpoint. Adding `OR dba_name LIKE ?` cannot use either
+            // index (4.5M-row scan, ~5 minutes), and ordering through idx_dba
+            // is no better because dba_name is null on most rows — the index
+            // walk spends its time in the null region. Restoring dba matching
+            // wants a FULLTEXT index; see docs/carrier-database-notes.md.
+            return $query->where('legal_name', 'LIKE', "%{$search}%");
+        };
 
-                if (is_numeric($search)) {
-
-                    $q->where(function ($q) use ($search) {
-
-                        $dotNumber = CarrierAuthority::where('docket_number', $search)
-                            ->value('dot_number');
-
-                        $q->where(function ($query) use ($search, $dotNumber) {
-                            $query->where('dot_number', $search);
-
-                            if ($dotNumber) {
-                                $query->orWhere('dot_number', $dotNumber);
-                            }
-                        });
-                    });
-
-                } else {
-
-                    $q->where(function ($q) use ($search) {
-
-                        $q->where('legal_name', 'LIKE', "%{$search}%")
-                            ->orWhere('dba_name', 'LIKE', "%{$search}%");
-                    });
-                }
-            })
-
-            ->orderBy('legal_name', $sortDir)
-
-            ->paginate($request->query('per_page', 10));
-
-        $transformed = collect($data->items())->map(function ($carrier) {
-
-            $auth = $carrier->authority;
-            $sms = $carrier->smsMeasures;
-
-            return [
-
-                'id' => $carrier->id,
-                'row_id' => $carrier->row_id,
-                'carrier_operation' => $carrier->carrier_operation,
-                'company_name' => $carrier->legal_name,
-                'dba_name' => $carrier->dba_name,
-                'dot_number' => $carrier->dot_number,
-                'mc_number' => $auth?->docket_number,
-                'phone' => $carrier->telephone,
-                'email' => $carrier->email_address,
-                'duns' => $carrier->dun_bradstreet_nol ?? $carrier->carrierDetail?->dun_bradstreet_no,
-                'address' => collect([
-                    $carrier->phy_street,
-                    $carrier->phy_city,
-                    $carrier->phy_state,
-                    $carrier->phy_zip,
-                ])->filter()->implode(', '),
-                'insurance_current' => $carrier->insurance_filings_exists,
-                'vin' => $carrier->inspections->first()?->vin,
-                'mileage' => $carrier->mcs150_mileage,
-                'fleet_size' => match ($carrier->carrierDetail?->fleetsize) {
-                    'A' => '1',
-                    'B' => '2-3',
-                    'C' => '4-6',
-                    'D' => '7-8',
-                    'E' => '9-11',
-                    'F' => '12-14',
-                    'G' => '15-17',
-                    'H' => '18-19',
-                    'I' => '20-23',
-                    'J' => '24-28',
-                    'K' => '29-32',
-                    'L' => '33-38',
-                    'M' => '39-44',
-                    'N' => '45-55',
-                    'O' => '56-75',
-                    'P' => '76-100',
-                    'Q' => '101-200',
-                    'R' => '201-300',
-                    'S' => '301-400',
-                    'T' => '401-550',
-                    'U' => '551-999',
-                    'V' => '1000-2000',
-                    'W' => '2001-3000',
-                    'X' => '3001-4000',
-                    'Y' => '4001-5000',
-                    'Z' => 'OVER 5000',
-                    default => null,
-                },
-                'drivers' => $carrier->driver_total,
-
-                'is_broker' => $auth?->broker_stat === 'ACTIVE',
-                'active_authority' => $carrier->carrierDetail?->status_code,
-                'authority_verified' => $auth?->common_stat === 'ACTIVE' ||
-                    $auth?->contract_stat === 'ACTIVE' ||
-                    $auth?->broker_stat === 'ACTIVE',
-                'risk_level' => $carrier->carrierDetail?->safety_rating,
-            ];
-        });
+        [$rows, $total] = $this->runCarrierSearch(
+            $filter,
+            $page,
+            $perPage,
+            $sortDir,
+            'search2|'.mb_strtolower($search),
+        );
 
         return response()->json([
-            'current_page' => $data->currentPage(),
-            'per_page' => $data->perPage(),
-            'total' => $data->total(),
-            'last_page' => $data->lastPage(),
-            'has_more_pages' => $data->hasMorePages(),
-            'data' => $transformed,
+            'current_page' => $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'last_page' => max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => ($page * $perPage) < $total,
+            'data' => $rows->map(function (Carrier $carrier) {
+                // search2 has always returned the raw FMCSA rating code here
+                // rather than the label search() uses.
+                return array_merge(
+                    $this->transformSearchRow($carrier),
+                    ['risk_level' => $carrier->safety_rating],
+                );
+            })->values(),
         ]);
     }
 
@@ -2131,8 +2888,11 @@ class CarrierController extends Controller
 
     public function detail($rowid)
     {
+        // row_id is the DOT number rendered as a string, so filter on
+        // dot_number itself — matching on row_id would be a CAST per row and
+        // could not use the unique key.
         $carrier = Carrier::query()
-            ->where('row_id', $rowid)
+            ->where('dot_number', $rowid)
             ->with([
                 'authority',
                 'smsMeasures',
@@ -2150,6 +2910,7 @@ class CarrierController extends Controller
                 'insuranceFilingsHistory',
                 'violationDetails',
                 'carrierDetail',          // ← required for computed fields
+                'census',                 // ← MCS-150 operation flags
             ])
             ->first();
 
@@ -2177,6 +2938,7 @@ class CarrierController extends Controller
         $sms = $carrier->smsMeasures;
         $detail = $carrier->carrierDetail;
         $auth = $carrier->authority;
+        $census = $carrier->census;
 
         // ── Risk score ────────────────────────────────────────────────────
         $riskScore =
@@ -2334,54 +3096,62 @@ class CarrierController extends Controller
             default => 'terminal_leased',
         };
 
+        // The feed's own vocabulary: 'TRUCK TRACTOR', 'STRAIGHT TRUCK', 'BUS',
+        // 'SCHOOL BUS', 'MOTOR COACH', 'PASSENGER VAN', 'LIMOUSINE' drive
+        // themselves; 'SEMI-TRAILER', 'FULL TRAILER', 'POLE TRAILER',
+        // 'CRIB LOG TRAILER', 'INTERMODAL CHASSIS', 'DOLLY CONVERTER' are
+        // towed. The old list checked for bare 'TRUCK' and 'TRACTOR', which
+        // the feed never emits, so most units were counted as neither.
+        $isTowedUnit = function (?string $type): bool {
+            $type = strtoupper((string) $type);
+
+            return str_contains($type, 'TRAILER')
+                || str_contains($type, 'CHASSIS')
+                || str_contains($type, 'DOLLY');
+        };
+
+        $isPowerUnit = fn (?string $type): bool => in_array(strtoupper((string) $type), [
+            'TRUCK TRACTOR',
+            'STRAIGHT TRUCK',
+            'BUS',
+            'SCHOOL BUS',
+            'MOTOR COACH',
+            'PASSENGER VAN',
+            'LIMOUSINE',
+        ], true);
+
         $observedUnits = $carrier->inspections
-            ->flatMap(function ($inspection) {
+            ->flatMap(function ($inspection) use ($isPowerUnit) {
 
                 $units = [];
 
                 // Primary unit
-                if (
-                    $inspection->vin &&
-                    in_array(strtoupper($inspection->unit_type_desc ?? ''), [
-                        'TRUCK',
-                        'TRUCK TRACTOR',
-                        'STRAIGHT TRUCK',
-                        'SCHOOL BUS',
-                        'BUS',
-                        'TRACTOR',
-                    ])
-                ) {
+                if ($inspection->vin && $isPowerUnit($inspection->unit_type_desc)) {
                     $units[] = $inspection->vin;
+                }
+
+                // Some inspections record the power unit second
+                if ($inspection->vin2 && $isPowerUnit($inspection->unit_type_desc2)) {
+                    $units[] = $inspection->vin2;
                 }
 
                 return $units;
             })
             ->unique()
             ->count();
+
         $observedTrailers = $carrier->inspections
-            ->flatMap(function ($inspection) {
+            ->flatMap(function ($inspection) use ($isTowedUnit) {
 
                 $trailers = [];
 
                 // Secondary unit
-                if (
-                    $inspection->vin2 &&
-                    str_contains(
-                        strtoupper($inspection->unit_type_desc2 ?? ''),
-                        'TRAILER'
-                    )
-                ) {
+                if ($inspection->vin2 && $isTowedUnit($inspection->unit_type_desc2)) {
                     $trailers[] = $inspection->vin2;
                 }
 
                 // Some inspections may store trailer as primary unit
-                if (
-                    $inspection->vin &&
-                    str_contains(
-                        strtoupper($inspection->unit_type_desc ?? ''),
-                        'TRAILER'
-                    )
-                ) {
+                if ($inspection->vin && $isTowedUnit($inspection->unit_type_desc)) {
                     $trailers[] = $inspection->vin;
                 }
 
@@ -2432,18 +3202,34 @@ class CarrierController extends Controller
         $vehicleOosPct = $vehicleInspTotal > 0 ? round($vehicleOosTotal / $vehicleInspTotal * 100, 2) : null;
         $driverOosPct = $driverInspTotal > 0 ? round($driverOosTotal / $driverInspTotal * 100, 2) : null;
 
+        // Hazmat totals live on the inspection rows, not sms_measures.
+        $hazmatInspTotal = (int) $carrier->inspections->sum(fn ($i) => (int) $i->total_hazmat_sent);
+        $hazmatOosTotal = (int) $carrier->inspections->sum(fn ($i) => (int) $i->hazmat_oos_total);
+
         $vehicleOosRate = $vehicleInspTotal > 0 ? $vehicleOosTotal / $vehicleInspTotal : null;
         $driverOosRate = $driverInspTotal > 0 ? $driverOosTotal / $driverInspTotal : null;
         $oosAlertVehicle = $vehicleOosRate !== null && $vehicleOosRate > 0.108;
         $oosAlertDriver = $driverOosRate !== null && $driverOosRate > 0.045;
 
         // Roadside alert — Unsafe Driving BASIC (FMCSA threshold: 65)
-        $basicRoadsideAlertUnsafeDriving = (float) ($sms?->unsafe_driv_measure ?? 0) > 65;
+        // The old `> 65` was a percentile threshold applied to a value that is
+        // now a raw measure (they run 0-1844, not 0-100), so it fired on almost
+        // nothing. Compare against the national alert cut-point instead.
+        $basicRoadsideAlertUnsafeDriving = $this->basicAlert(
+            $sms?->unsafe_driv_measure,
+            $this->smsPercentiles()['unsafe_driv'],
+        );
 
         // Last activity dates
-        $lastInspectionDate = $carrier->inspections->max('insp_date');
-        $lastViolationDate = $carrier->violationDetails->max('insp_date');
-        $lastCrashDate = $carrier->crashes->max('report_date');
+        // These columns are '24-APR-24' strings, so max() over them compares
+        // text — '31-AUG-19' sorts above '01-JAN-25'. Rank on the parsed date.
+        $latestBy = fn ($collection, string $column) => $collection
+            ->sortByDesc(fn ($row) => Fmcsa::dateKey($row->$column))
+            ->first()?->$column;
+
+        $lastInspectionDate = $latestBy($carrier->inspections, 'insp_date');
+        $lastViolationDate = $latestBy($carrier->violationDetails, 'insp_date');
+        $lastCrashDate = $latestBy($carrier->crashes, 'report_date');
 
         // Crash aggregates
         $crashesTotal = $carrier->crashes->count();
@@ -2458,12 +3244,14 @@ class CarrierController extends Controller
         $inspectedStates = $carrier->inspections->pluck('county_code_state')->filter()->unique()->count();
 
         // Inspected power units vs trailers (unique VINs)
+        // Same vocabulary problem as observed_units above: 'truck' / 'tractor'
+        // match nothing, so this always reported zero inspected power units.
         $inspectedPowerUnits = $carrier->inspections
-            ->filter(fn ($i) => in_array(strtolower($i->unit_type_desc ?? ''), ['truck', 'tractor']))
+            ->filter(fn ($i) => $isPowerUnit($i->unit_type_desc))
             ->pluck('vin')->filter()->unique()->count();
 
         $inspectedTrailers = $carrier->inspections
-            ->filter(fn ($i) => str_contains(strtolower($i->unit_type_desc ?? ''), 'trailer'))
+            ->filter(fn ($i) => $isTowedUnit($i->unit_type_desc))
             ->pluck('vin')->filter()->unique()->count();
 
         // Preferred lanes — top 5 states by inspection count
@@ -2491,22 +3279,31 @@ class CarrierController extends Controller
         // Per-state inspection counts
         $stateInspectionCounts = $carrier->inspections
             ->pluck('county_code_state')->filter()->countBy()->sortDesc()->toArray();
-        $getAuthorityAge = function ($type) use ($carrier) {
+        // carrier_authority_history no longer has a `mod_col_1` column — the
+        // authority type is `op_auth_type`, and it carries both the long FMCSA
+        // description and a short form depending on the row's vintage
+        // ('PROPERTY BROKER' and 'BROKER' both occur). Matching the old column
+        // meant these three ages were always null.
+        $getAuthorityAge = function (string $key) use ($carrier) {
 
-            $history = $carrier->authorityHistory
-                ->where('mod_col_1', $type)
-                ->where('original_action_desc', 'GRANTED')
-                ->sortBy('orig_served_date')
+            $types = Fmcsa::authorityType($key);
+
+            $granted = $carrier->authorityHistory
+                ->filter(fn ($h) => in_array(strtoupper((string) $h->op_auth_type), $types, true)
+                    && strtoupper((string) $h->original_action_desc) === 'GRANTED')
+                // orig_served_date is a '24-APR-24' string, so sorting it as
+                // text puts the wrong row first.
+                ->sortBy(fn ($h) => Fmcsa::dateKey($h->orig_served_date) ?: PHP_INT_MAX)
                 ->first();
 
-            return $history?->orig_served_date
-                ? Carbon::parse($history->orig_served_date)->diffInYears(now())
-                : null;
+            $served = Fmcsa::date($granted?->orig_served_date);
+
+            return $served ? (int) $served->diffInYears(now()) : null;
         };
 
-        $authorityAgeCommon = $getAuthorityAge('MOTOR PROPERTY COMMON CARRIER');
-        $authorityAgeContract = $getAuthorityAge('MOTOR PROPERTY CONTRACT CARRIER');
-        $authorityAgeBroker = $getAuthorityAge('PROPERTY BROKER');
+        $authorityAgeCommon = $getAuthorityAge('common');
+        $authorityAgeContract = $getAuthorityAge('contract');
+        $authorityAgeBroker = $getAuthorityAge('broker');
 
         $today = now();
 
@@ -2572,7 +3369,7 @@ class CarrierController extends Controller
                 'fax' => $carrier->fax,
                 'email' => $carrier->email_address,
                 'crash_rate' => $detail?->recordable_crash_rate ?? 0,
-                'duns' => $carrier->dun_bradstreet_nol ?? $carrier->carrierDetail?->dun_bradstreet_no,
+                'duns' => $detail?->dun_bradstreet_no,
                 // ── Fleet & drivers ───────────────────────────────────
                 'power_unit' => $detail?->power_units ?? 0,
                 'driver_total' => $detail?->total_drivers ?? 0,
@@ -2613,11 +3410,14 @@ class CarrierController extends Controller
                         'oos_pct' => $driverOosPct,
                     ],
 
+                    // sms_measures carries no hazmat totals — it never did, so
+                    // these three were always null. The counts do exist on the
+                    // inspection rows, which are already loaded.
                     'hazmat' => [
-                        'inspections' => $sms?->hazmat_insp_total,
-                        'oos_inspections' => $sms?->hazmat_oos_total,
-                        'oos_pct' => $sms?->hazmat_insp_total > 0
-                            ? round(($sms->hazmat_oos_total / $sms->hazmat_insp_total) * 100, 2)
+                        'inspections' => $hazmatInspTotal,
+                        'oos_inspections' => $hazmatOosTotal,
+                        'oos_pct' => $hazmatInspTotal > 0
+                            ? round(($hazmatOosTotal / $hazmatInspTotal) * 100, 2)
                             : null,
                     ],
                 ],
@@ -2633,14 +3433,15 @@ class CarrierController extends Controller
                 // ── SMS / risk ────────────────────────────────────────
                 'sms_measures' => [
                     ...(($sms?->toArray()) ?? []),
+                    // The feed dropped the `*_pct` columns; these are the bands
+                    // derived from the measures, so the shape stays the same.
+                    ...$this->smsPercentileFields($sms),
                     'risk_score' => round($riskScore, 2),
                 ],
-                'risk_level' => match ($detail->safety_rating) {
-                    'S' => 'Satisfactory',
-                    'C' => 'Conditional',
-                    'U' => 'Unsatisfactory',
-                    default => 'Not Rated',
-                },
+                // `$detail` is null for the handful of carriers with no
+                // carrier_details row, and this was the one place that reached
+                // through it without a null check — a 500 on those profiles.
+                'risk_level' => Fmcsa::safetyRating($detail?->safety_rating),
                 // ── Inspections ───────────────────────────────────────
                 'inspections' => $carrier->inspections->map(function ($inspection) {
                     $data = $inspection->toArray();
@@ -2704,13 +3505,16 @@ class CarrierController extends Controller
                 'insurance_filings_history' => $carrier->insuranceFilingsHistory,
 
                 // ── Company snapshot ──────────────────────────────────
+                // The MCS-150 operation flags come from the SMS census
+                // extract, which covers ~761k of the 4.48M carriers — null here
+                // means the carrier is not in that extract, not "false".
                 'company_snapshot' => [
-                    'authorized_for_hire' => $carrier->authorized_for_hire,
-                    'exempt_for_hire' => $carrier->exempt_for_hire,
-                    'private_property' => $carrier->private_property,
-                    'private_passenger_business' => $carrier->private_passenger_business,
-                    'private_passenger_nonbusiness' => $carrier->private_passenger_nonbusiness,
-                    'migrant' => $carrier->migrant,
+                    'authorized_for_hire' => $census?->authorized_for_hire,
+                    'exempt_for_hire' => $census?->exempt_for_hire,
+                    'private_property' => $census?->private_property,
+                    'private_passenger_business' => $census?->private_passenger_business,
+                    'private_passenger_nonbusiness' => $census?->private_passenger_nonbusiness,
+                    'migrant' => $census?->migrant,
                 ],
 
                 // ── Raw carrier detail record ─────────────────────────
@@ -2749,11 +3553,16 @@ class CarrierController extends Controller
                         ? 'Tracked'
                         : 'Not Tracked',
                     // S2 — SMS derived
-                    'inspections_vehicle_out_of_service_pct' => $sms->vehicle_oos_insp_total,
+                    // Was returning the raw OOS count under a `_pct` key, and
+                    // reaching through $sms without a null check while it was
+                    // at it.
+                    'inspections_vehicle_out_of_service_pct' => $vehicleOosPct,
                     'inspections_driver_out_of_service_pct' => $driverOosPct,
                     'oos_alert_vehicle' => $oosAlertVehicle,
                     'oos_alert_driver' => $oosAlertDriver,
-                    'oos_alert_hazmat' => false, // needs hazmat_oos_rate column
+                    // FMCSA national hazmat OOS average is 4.5%.
+                    'oos_alert_hazmat' => $hazmatInspTotal > 0
+                        && ($hazmatOosTotal / $hazmatInspTotal) > 0.045,
                     'basic_roadside_alert_unsafe_driving' => $basicRoadsideAlertUnsafeDriving,
                     'last_inspection_date' => $lastInspectionDate
                         ? Carbon::parse($lastInspectionDate)->format('d-m-y')
@@ -2904,19 +3713,15 @@ class CarrierController extends Controller
                 ->selectRaw('AVG(vehicle_oos_insp_total / NULLIF(vehicle_insp_total,0)) AS avg_v_oos')
                 ->value('avg_v_oos') ?? 0.208);
 
-            foreach (['unsafe_driv_measure', 'hos_driv_measure', 'driv_fit_measure',
-                'contr_subst_measure', 'veh_maint_measure'] as $m) {
-                $cnt = SmsMeasure::query()->whereNotNull($m)->count();
-                if ($cnt > 100) {
-                    $offset = (int) floor($cnt * 0.90);
-                    $b["p90_$m"] = (float) SmsMeasure::query()
-                        ->whereNotNull($m)
-                        ->orderBy($m)
-                        ->skip($offset)
-                        ->value($m);
-                } else {
-                    $b["p90_$m"] = null;
-                }
+            // The 90th percentile of each BASIC measure. This used to be ten
+            // statements — a COUNT plus an OFFSET walk over 694k unindexed rows
+            // for each of the five — against a database that is a ~300ms round
+            // trip away. smsPercentiles() answers all five in one sampled query
+            // and holds them for a day.
+            $cuts = $this->smsPercentiles();
+
+            foreach (self::SMS_BASICS as $basic) {
+                $b["p90_{$basic}_measure"] = $cuts[$basic][90] > 0 ? $cuts[$basic][90] : null;
             }
 
             $ratioQueries = [
@@ -2963,8 +3768,11 @@ class CarrierController extends Controller
             return null;
         }
 
+        // Newest row: the Motus load left duplicate carrier_details rows per
+        // DOT number, and an unordered first() picks an arbitrary one.
         $cd = CarrierDetail::query()->where('dot_number', $dot)->first();
         $sms = SmsMeasure::query()->where('dot_number', $dot)->first();
+        $census = $carrier->census;
 
         // ---- authority ----
         $authorities = CarrierAuthority::query()->where('dot_number', $dot)->get();
@@ -3000,14 +3808,18 @@ class CarrierController extends Controller
             return $date && $date->isFuture();
         };
 
+        // The filters here had BIPD and cargo the wrong way round: BIPD
+        // explicitly excluded form 91X, which is the code virtually every BIPD
+        // filing carries, so bipd_insurance_below_requirement fired on everyone
+        // while cargo_insurance_on_file was reading BIPD filings.
         $bipdOnFile = $insuranceFilings
-            ->filter(fn ($f) => str_contains($f->ins_form_code ?? '', '91') && ! str_contains($f->ins_form_code ?? '', '91X'))
+            ->filter(fn ($f) => $this->insuranceFilingMatches($f, 'bipd'))
             ->filter($notCancelledOrFuture)
             ->max('max_cov_amount');
         $bipdOnFile = $bipdOnFile !== null ? (float) $bipdOnFile : null;
 
         $cargoInsuranceOnFile = $insuranceFilings
-            ->filter(fn ($f) => str_contains($f->ins_form_code ?? '', '91X'))
+            ->filter(fn ($f) => $this->insuranceFilingMatches($f, 'cargo'))
             ->contains($notCancelledOrFuture);
 
         $pendingInsuranceCancellation = $insuranceFilings->contains(function ($f) {
@@ -3218,13 +4030,17 @@ class CarrierController extends Controller
             'ins_rrg_active' => $insRrgActive,
             'ins_rrg_hist' => $insRrgHist,
             'no_active_authority' => ! $hasActiveAuth,
-            'not_authorized_for_hire' => ! in_array($carrier->authorized_for_hire, ['Y', 'X', '1'], true),
+            // Only known for carriers in the SMS census extract; null there
+            // means unknown, so do not assert the negative.
+            'not_authorized_for_hire' => $census === null
+                ? null
+                : ! Fmcsa::flag($census->authorized_for_hire),
             'mcs150_filed_last_24_months' => $mcs150Date ? $mcs150Date->gt(now()->subMonths(24)) : null,
             'oos_below_industry_average' => $oosBelow,
             'smartway_flag' => null,
             'carbtru_flag' => null,
             'phmsa_flag' => null,
-            'hazardous_material' => ($carrier->hm_flag === 'Y') || ($cd?->hm_ind === 'Y'),
+            'hazardous_material' => Fmcsa::flag($carrier->hm_flag) || Fmcsa::flag($cd?->hm_ind),
             'virtual_physical_mailing_address' => $virtual,
             'phone_number_area_codes_match_address_state' => $areaMatch,
             'stability_name_history' => null,

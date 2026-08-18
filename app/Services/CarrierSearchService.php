@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
+use App\Support\Fmcsa;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -15,38 +16,6 @@ use Illuminate\Database\Eloquent\Builder;
  */
 class CarrierSearchService
 {
-    /**
-     * FMCSA fleet-size codes, as used by the carrier platform.
-     */
-    protected const FLEET_SIZE = [
-        'A' => '1',
-        'B' => '2-3',
-        'C' => '4-6',
-        'D' => '7-8',
-        'E' => '9-11',
-        'F' => '12-14',
-        'G' => '15-17',
-        'H' => '18-19',
-        'I' => '20-23',
-        'J' => '24-28',
-        'K' => '29-32',
-        'L' => '33-38',
-        'M' => '39-44',
-        'N' => '45-55',
-        'O' => '56-75',
-        'P' => '76-100',
-        'Q' => '101-200',
-        'R' => '201-300',
-        'S' => '301-400',
-        'T' => '401-550',
-        'U' => '551-999',
-        'V' => '1000-2000',
-        'W' => '2001-3000',
-        'X' => '3001-4000',
-        'Y' => '4001-5000',
-        'Z' => 'OVER 5000',
-    ];
-
     public function search(array $filters): LengthAwarePaginator
     {
         $query = $this->baseQuery();
@@ -179,17 +148,19 @@ class CarrierSearchService
 
             'mileage' => $carrier->mcs150_mileage,
 
-            'fleet_size' => self::FLEET_SIZE[$detail?->fleetsize] ?? null,
+            'fleet_size' => Fmcsa::fleetSize($detail?->fleetsize),
 
             'drivers' => $carrier->driver_total,
 
-            'is_broker' => $authority?->broker_stat === 'ACTIVE',
+            // Authority status is 'A' / 'I' / 'N' since the Motus load; it was
+            // 'ACTIVE' before, so all three of these read false for everyone.
+            'is_broker' => Fmcsa::isActive($authority?->broker_stat),
 
             'active_authority' => $detail?->status_code,
 
-            'authority_verified' => $authority?->common_stat === 'ACTIVE'
-                || $authority?->contract_stat === 'ACTIVE'
-                || $authority?->broker_stat === 'ACTIVE',
+            'authority_verified' => Fmcsa::isActive($authority?->common_stat)
+                || Fmcsa::isActive($authority?->contract_stat)
+                || Fmcsa::isActive($authority?->broker_stat),
 
             'risk_level' => $detail?->safety_rating,
         ];

@@ -5,6 +5,7 @@ namespace App\Services\Carrier;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierDetail;
 use App\Models\Carriers\SmsMeasure;
+use App\Support\Fmcsa;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -181,7 +182,9 @@ class CarrierRiskService
             // authority
             'active_usdot_status' => $detail ? ($detail->status_code === 'A') : null,
             'no_active_authority' => ! $authority['has_active'],
-            'not_authorized_for_hire' => ! in_array($carrier->authorized_for_hire, ['Y', 'X', '1'], true),
+            // Stored as the strings 'true' / 'false' since the Motus load, so
+            // the old 'Y'/'X'/'1' check flagged every carrier.
+            'not_authorized_for_hire' => ! Fmcsa::flag($carrier->authorized_for_hire),
             'dot_out_of_service' => $authority['out_of_service'],
             'consecutive_authority' => $authority['consecutive'],
             'revocation_last_thirtysix_mo' => $authority['revocation_last_36mo'],
@@ -211,7 +214,7 @@ class CarrierRiskService
             'indicator_benchmark_inspection_mileage_ratio' => $inspectionMileageRatio,
             'indicator_benchmark_power_unit_mileage_ratio' => $powerUnitMileageRatio,
             'multi_cargo_classification' => $cargoCount > 3,
-            'hazardous_material' => ($carrier->hm_flag === 'Y') || ($detail?->hm_ind === 'Y'),
+            'hazardous_material' => Fmcsa::flag($carrier->hm_flag) || Fmcsa::flag($detail?->hm_ind),
             'phmsa_flag' => null,
             'smartway_flag' => null,
             'carbtru_flag' => null,
@@ -411,15 +414,33 @@ class CarrierRiskService
             return $date && $date->isFuture();
         };
 
+        // Form codes in the feed: 91 / 91X are BIPD (ins_type_desc
+        // 'BIPD/Primary', 'BIPD/Excess'), 34 is cargo. These two had it
+        // backwards — BIPD explicitly excluded 91X, the code nearly every BIPD
+        // filing carries, while cargo matched 91X and so read BIPD filings.
+        $isBipd = function ($f) {
+            $code = strtoupper(trim((string) ($f->ins_form_code ?? '')));
+
+            return in_array($code, ['91', '91X'], true)
+                || str_starts_with(strtoupper((string) ($f->ins_type_desc ?? '')), 'BIPD');
+        };
+
+        $isCargo = function ($f) {
+            $code = strtoupper(trim((string) ($f->ins_form_code ?? '')));
+
+            return $code === '34'
+                || str_contains(strtoupper((string) ($f->ins_type_desc ?? '')), 'CARGO');
+        };
+
         $bipd = $filings
-            ->filter(fn ($f) => str_contains($f->ins_form_code ?? '', '91') && ! str_contains($f->ins_form_code ?? '', '91X'))
+            ->filter($isBipd)
             ->filter($liveOrFuture)
             ->max('max_cov_amount');
 
         return [
             'bipd_on_file' => $bipd !== null ? (float) $bipd : null,
             'cargo_on_file' => $filings
-                ->filter(fn ($f) => str_contains($f->ins_form_code ?? '', '91X'))
+                ->filter($isCargo)
                 ->contains($liveOrFuture),
             'pending_cancellation' => $filings->contains(function ($f) {
                 if (empty($f->cancl_effective_date)) {
@@ -566,19 +587,37 @@ class CarrierRiskService
                 ->selectRaw('AVG(vehicle_oos_insp_total / NULLIF(vehicle_insp_total,0)) AS avg_v_oos')
                 ->value('avg_v_oos') ?? 0.208);
 
+            // Ten statements — a COUNT plus an OFFSET walk over 694k unindexed
+            // rows for each of the five measures — against a database a
+            // ~300ms round trip away. One sampled window query gives the same
+            // cut-points.
+            $p90 = DB::connection('external_db')->selectOne('
+                SELECT
+                    MAX(CASE WHEN r0 <= 0.9 THEN m0 END) AS unsafe_driv_measure,
+                    MAX(CASE WHEN r1 <= 0.9 THEN m1 END) AS hos_driv_measure,
+                    MAX(CASE WHEN r2 <= 0.9 THEN m2 END) AS driv_fit_measure,
+                    MAX(CASE WHEN r3 <= 0.9 THEN m3 END) AS contr_subst_measure,
+                    MAX(CASE WHEN r4 <= 0.9 THEN m4 END) AS veh_maint_measure
+                FROM (
+                    SELECT
+                        unsafe_driv_measure  AS m0, PERCENT_RANK() OVER (ORDER BY unsafe_driv_measure)  AS r0,
+                        hos_driv_measure     AS m1, PERCENT_RANK() OVER (ORDER BY hos_driv_measure)     AS r1,
+                        driv_fit_measure     AS m2, PERCENT_RANK() OVER (ORDER BY driv_fit_measure)     AS r2,
+                        contr_subst_measure  AS m3, PERCENT_RANK() OVER (ORDER BY contr_subst_measure)  AS r3,
+                        veh_maint_measure    AS m4, PERCENT_RANK() OVER (ORDER BY veh_maint_measure)    AS r4
+                    FROM sms_measures WHERE insp_total > 0 AND (id % 16) = 0
+                ) t
+            ');
+
             foreach ([
                 'unsafe_driv_measure', 'hos_driv_measure', 'driv_fit_measure',
                 'contr_subst_measure', 'veh_maint_measure',
             ] as $measure) {
-                $count = SmsMeasure::query()->whereNotNull($measure)->count();
+                $cut = (float) ($p90->$measure ?? 0);
 
-                $benchmarks["p90_{$measure}"] = $count > 100
-                    ? (float) SmsMeasure::query()
-                        ->whereNotNull($measure)
-                        ->orderBy($measure)
-                        ->skip((int) floor($count * 0.90))
-                        ->value($measure)
-                    : null;
+                // A cut-point of zero means most carriers sit at zero for this
+                // BASIC; treating it as a threshold would alert on everyone.
+                $benchmarks["p90_{$measure}"] = $cut > 0 ? $cut : null;
             }
 
             $ratios = [

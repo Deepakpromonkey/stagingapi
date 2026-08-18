@@ -86,7 +86,15 @@ return [
                 // blocks the connection.
                 PDO::ATTR_TIMEOUT => (int) env('EXTERNAL_DB_TIMEOUT', 5),
                 Mysql::ATTR_SSL_CA => env('EXTERNAL_DB_SSL_CA'),
-            ]) : [],
+
+                // Opening this connection costs ~800ms — it is a remote host,
+                // and that handshake is paid on every request that touches a
+                // carrier. Reusing the socket removes it. Off by default:
+                // persistent handles are held per PHP-FPM worker, so raise
+                // max_connections on the EC2 instance to at least the worker
+                // count before turning this on.
+                PDO::ATTR_PERSISTENT => env('EXTERNAL_DB_PERSISTENT', false) ? true : null,
+            ], fn ($value) => $value !== null) : [],
         ],
 
         'mariadb' => [
