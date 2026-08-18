@@ -69,23 +69,28 @@ class GuestPayController extends Controller
         return response()->json(['status' => false, 'message' => "There was an error while processing your request."], 400);
     }
 
-    public function loadTransaction(Request $request, DtPayGuestPayModel $dt_pay_guest_pay_model, CarriersModel $carriers_model){
+    public function loadTransaction(Request $request, DtPayGuestPayModel $dt_pay_guest_pay_model){
 
         $transaction_id = $request->post('transaction_id');
 
         if($transaction_id){
 
-            $transaction = $dt_pay_guest_pay_model->find($transaction_id);
+            try{
+            
+                $transaction = $dt_pay_guest_pay_model->with('carrier')->find($transaction_id);
 
-            $transaction = $dt_pay_guest_pay_model
-                            ->select("dt_guest_pay.*", "carriers.legal_name")
-                            ->where('dt_guest_pay.row_id', $transaction_id)
-                            ->join($carriers_model->getTable(), "dt_guest_pay.carrier_id", "=", "carriers.row_id")
-                            ->first();
+                if($transaction){
 
-            if($transaction){
+                    return response()->json(['status' => true, 'transaction' => $transaction], 200);
+                }
 
-                return response()->json(['status' => true, 'transaction' => $transaction], 200);
+                return response()->json(['status' => false, 'message' => 'There was an error while processing your request.'], 200);
+                
+            }catch(\Exception $e){
+
+                Log::error('DTPay Guest pay error: ' . $e->getMessage());
+
+                return response()->json(['status' => false, 'message' => 'There was an error while processing your request.'], 200);
             }
         }
 
@@ -212,6 +217,138 @@ class GuestPayController extends Controller
             }catch(\Exception $e){
 
                 return response()->json(['status' => false, 'message' => $e->getMessage()], 400);
+            }
+        }
+
+        return response()->json(['status' => false, 'message' => 'There was an error while processing your request.'], 400);
+    }
+
+    public function paymentIntent(Request $request, StripeModel $stripe_model, DtPayGuestPayModel $dt_pay_guest_pay_model){
+
+        $transaction_id = $request->post('transaction_id');
+
+        $transaction = $dt_pay_guest_pay_model->find($transaction_id);
+
+        if($transaction && $transaction->amount > 0){
+
+            try{
+
+                list($api_secret_id, $api_secret_key) = $stripe_model->get_credentials();
+
+                $stripe = new StripeClient($api_secret_key);
+
+                $intent = null;
+
+                /*
+                Reuse the existing PaymentIntent if one is already open for this
+                transaction, so a re-fired request (retry, StrictMode double-effect,
+                page refresh) can't orphan the intent the card form is bound to.
+                */
+                if($transaction->payment_id){
+
+                    try{
+
+                        $existing = $stripe->paymentIntents->retrieve($transaction->payment_id);
+
+                        if(in_array($existing->status, ['requires_payment_method', 'requires_confirmation', 'requires_action'], true)){
+
+                            $intent = $existing;
+                        }
+                    }catch(\Exception $e){
+
+                        $intent = null;
+                    }
+                }
+
+                if(!$intent){
+
+                    $intent = $stripe->paymentIntents->create([
+                        'amount' => (int) round($transaction->amount * 100),
+                        'currency' => 'usd',
+
+                        'payment_method_types' => ['card'],
+
+                        'metadata' => [
+                            'guest_transaction_id' => $transaction->uuid,
+                        ],
+                    ]);
+
+                    $transaction->update(['payment_id' => $intent->id]);
+                }
+
+                return response()->json(['status' => true, 'client_secret' => $intent->client_secret], 200);
+
+            }catch(\Exception $e){
+
+                Log::error('DTPay Guest pay payment intent error: ' . $e->getMessage());
+
+                return response()->json(['status' => false, 'message' => 'There was an error while setting up payment.'], 400);
+            }
+        }
+
+        return response()->json(['status' => false, 'message' => 'There was an error while processing your request.'], 400);
+    }
+
+    public function confirmPayment(Request $request, StripeModel $stripe_model, DtPayGuestPayModel $dt_pay_guest_pay_model){
+
+        $transaction_id = $request->post('transaction_id');
+        $payment_intent_id = $request->post('payment_intent_id');
+
+        $transaction = $dt_pay_guest_pay_model->find($transaction_id);
+
+        if($transaction && $payment_intent_id && $transaction->payment_id === $payment_intent_id){
+
+            try{
+
+                list($api_secret_id, $api_secret_key) = $stripe_model->get_credentials();
+
+                $stripe = new StripeClient($api_secret_key);
+
+                $intent = $stripe->paymentIntents->retrieve($payment_intent_id);
+
+                if($intent->status === 'succeeded'){
+
+                    $payment_method_label = 'Card';
+
+                    if($intent->latest_charge){
+
+                        $charge = $stripe->charges->retrieve($intent->latest_charge);
+
+                        if($charge && $charge->payment_method_details && $charge->payment_method_details->card){
+
+                            $card = $charge->payment_method_details->card;
+
+                            $payment_method_label = strtoupper($card->brand) . ' ····' . $card->last4;
+                        }
+                    }
+
+                    $transaction->update([
+                        'payment_method' => 'card',
+                        'payment_method_label' => $payment_method_label,
+                        'payment_id' => $intent->id,
+                        'payment_date' => now(),
+                        'status' => DtPayGuestPayModel::STATUS_HOLD,
+                    ]);
+
+                    DtPayLogsModel::create([
+                        'guest_payment_id' => $transaction->uuid,
+                        'transaction_label' => "Card payment captured (guest pay)",
+                        'added_by_type' => 'guest',
+                        'transaction_date' => now(),
+                        'stripe_transaction_id' => $intent->id,
+                        'stripe_payment_status' => $intent->status,
+                    ]);
+
+                    return response()->json(['status' => true, 'message' => 'Payment successful. Funds are held until delivery is confirmed.'], 200);
+                }
+
+                return response()->json(['status' => false, 'message' => 'Payment was not completed.'], 200);
+
+            }catch(\Exception $e){
+
+                Log::error('DTPay Guest pay confirm payment error: ' . $e->getMessage());
+
+                return response()->json(['status' => false, 'message' => 'There was an error while confirming your payment.'], 400);
             }
         }
 
