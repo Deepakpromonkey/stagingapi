@@ -270,6 +270,16 @@ Route::prefix('v1')->group(function () {
         Route::post('/change-password', [AuthController::class, 'changePassword']);
         Route::post('/update-profile', [AuthController::class, 'updateProfile']);
 
+        // csv import + export carriers
+       Route::post('/carriers/bulk-import', [\App\Http\Controllers\Api\V1\CarrierImportController::class, 'bulkImport']);
+       
+       Route::get('/carriers/export', [\App\Http\Controllers\Api\V1\CarrierExportController::class, 'export']);
+
+       // Blocked carriers
+        Route::get('/blocked', [\App\Http\Controllers\Api\V1\CarrierBlockedController::class, 'index']);
+        Route::post('/blocked', [\App\Http\Controllers\Api\V1\CarrierBlockedController::class, 'store']);
+        Route::delete('/blocked', [\App\Http\Controllers\Api\V1\CarrierBlockedController::class, 'destroy']);
+
         // Company
         Route::get('/company', [CompanyController::class, 'show']);
         Route::put('/company', [CompanyController::class, 'update'])

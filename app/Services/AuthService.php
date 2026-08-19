@@ -245,7 +245,7 @@ class AuthService
         }
 
         $user->fill(
-            collect($data)->only(['first_name', 'last_name', 'phone', 'profile_image'])->toArray()
+            collect($data)->only(['first_name', 'last_name', 'phone','country_code', 'profile_image'])->toArray()
         )->save();
 
         return $user->fresh()->load('company.subscription', 'roles.permissions', 'permissions');
