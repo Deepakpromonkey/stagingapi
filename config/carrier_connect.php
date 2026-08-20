@@ -36,7 +36,6 @@ return [
     | end is a separate application. Falls back to a /carrier-portal path on the
     | broker front end so the link in the email is never empty.
     */
-    'portal_url' => env('CARRIER_PORTAL_URL')
-        ?: rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/').'/carrier-portal',
+    'portal_url' => env('CARRIER_PORTAL_URL', 'https://carrier.dollartraq.com'),
 
 ];
