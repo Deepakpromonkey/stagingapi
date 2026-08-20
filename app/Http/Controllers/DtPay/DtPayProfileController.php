@@ -59,34 +59,27 @@ class DtPayProfileController extends Controller
 
                 $sources = [];
 
-                try {
-                
-                    $cards = $stripe->paymentMethods->all([
-                        'customer' => $stripe_customer_id,
-                        'type' => 'card',
-                    ]);
+                $cards = $stripe->paymentMethods->all([
+                    'customer' => $stripe_customer_id,
+                    'type' => 'card',
+                ]);
 
-                    foreach($cards->data as $method){
+                foreach($cards->data as $method){
 
-                        $sources[] = ['type' => 'card', 'key' => $method->id, 'label' => strtoupper($method->card->display_brand) . "...-" . $method->card->last4, 'sub_label' => '2.9% funding fee · instant clearing'];
-                    }
-
-                    $paymentMethods = $stripe->paymentMethods->all([
-                        'customer' => $stripe_customer_id,
-                        'type' => 'us_bank_account', 
-                    ]);
-
-                    foreach($paymentMethods->data as $method){
-
-                        $sources[] = ['type' => 'bank', 'key' => $method->id, 'label' => $method->us_bank_account->bank_name . "...-" . $method->us_bank_account->last4, 'sub_label' => 'Free · ACH debit enabled'];
-                    }
-                    return ['status' => true, 'sources' => $sources];
-
-                }catch (\Stripe\Exception\ApiErrorException $e) {
-        
-                    Log::error('Action: Stripe customer registration. Stripe integration gateway error: ' . $e->getMessage());
-                    return ['status' => true, 'message' => "There was an error while processing your request.", 'sources' => []];
+                    $sources[] = ['type' => 'card', 'key' => $method->id, 'label' => strtoupper($method->card->display_brand) . "...-" . $method->card->last4, 'sub_label' => '2.9% funding fee · instant clearing'];
                 }
+
+                $paymentMethods = $stripe->paymentMethods->all([
+                    'customer' => $stripe_customer_id,
+                    'type' => 'us_bank_account', 
+                ]);
+
+                foreach($paymentMethods->data as $method){
+
+                    $sources[] = ['type' => 'bank', 'key' => $method->id, 'label' => $method->us_bank_account->bank_name . "...-" . $method->us_bank_account->last4, 'sub_label' => 'Free · ACH debit enabled'];
+                }
+                
+                return ['status' => true, 'sources' => $sources];
             }
         }
 
@@ -136,42 +129,26 @@ class DtPayProfileController extends Controller
 
             if($type == 'card'){
             
-                try {
-                
-                    $setupIntent = $stripe->setupIntents->create([
-                        'customer' => $stripe_customer_id,
-                        'payment_method_types' => ['card'],
-                        'usage' => 'off_session'
-                    ]);
-                }catch (\Stripe\Exception\ApiErrorException $e) {
-
-                    Log::error('Action: Stripe customer registration. Stripe integration gateway error: ' . $e->getMessage());
-
-                    return response()->json(['status' => false, 'clientSecret' => null, 'message' => 'There was an error while processing your request.'], 200);
-                }
+                $setupIntent = $stripe->setupIntents->create([
+                    'customer' => $stripe_customer_id,
+                    'payment_method_types' => ['card'],
+                    'usage' => 'off_session'
+                ]);
             }else{
 
-                try {
-                
-                    $setupIntent = $stripe->setupIntents->create([
-                        'customer' => $stripe_customer_id,
-                        'payment_method_types' => ['us_bank_account'],
-                        'payment_method_options' => [
-                            'us_bank_account' => [
-                                'financial_connections' => [
-                                    'permissions' => [
-                                        'payment_method'
-                                    ]
+                $setupIntent = $stripe->setupIntents->create([
+                    'customer' => $stripe_customer_id,
+                    'payment_method_types' => ['us_bank_account'],
+                    'payment_method_options' => [
+                        'us_bank_account' => [
+                            'financial_connections' => [
+                                'permissions' => [
+                                    'payment_method'
                                 ]
                             ]
                         ]
-                    ]);
-                }catch (\Stripe\Exception\ApiErrorException $e) {
-
-                    Log::error('Action: Stripe customer registration. Stripe integration gateway error: ' . $e->getMessage());
-
-                    return response()->json(['status' => false, 'clientSecret' => null, 'message' => 'There was an error while processing your request.'], 200);
-                }
+                    ]
+                ]);
             }
 
             return response()->json(['status' => true, 'clientSecret' => $setupIntent->client_secret], 200);

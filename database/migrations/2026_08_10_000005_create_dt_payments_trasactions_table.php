@@ -10,12 +10,9 @@ return new class extends Migration
     {
         Schema::create('dt_payments_trasactions', function (Blueprint $table) {
             $table->id();
-            
-            $table->foreignUuid('payment_id')
-                ->nullable()
-                ->constrained('dt_payments', 'uuid')
-                ->restrictOnDelete();
 
+            $table->foreignUuid('payment_id')
+                ->nullable();
             $table->foreignUuid('guest_payment_id')
                 ->nullable()
                 ->after('payment_id')

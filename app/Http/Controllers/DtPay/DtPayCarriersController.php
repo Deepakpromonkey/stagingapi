@@ -8,22 +8,27 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Number;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Facades\Validator;
-
-use App\Models\Shipment;
-
-use App\Services\ShipmentService;
 
 use App\Models\DtPay\DtPayModel;
 use App\Models\DtPay\DtPayLogsModel;
+use App\Models\DtPay\DtPayPaymentLoadsModel;
+use App\Models\Carriers\CarriersModel;
+use App\Models\Customers\CustomersModel;
+
+use App\Models\Shipments\ShipmentsModel;
+use App\Models\Shipments\ShipmentsTrackingMethodsModel;
+
+use Illuminate\Support\Facades\Log;
+
+use App\Models\Payments\StripeModel;
+use Stripe\StripeClient;
 
 class DtPayCarriersController extends Controller
 {
-    public function __construct(
-        protected ShipmentService $shipmentService
-    ) {}
 
-    public function transactionalLoads(Request $request, DtPayModel $dt_pay_model, Shipment $shipments_model){
+    public function transactionalLoads(Request $request, DtPayModel $dt_pay_model, ShipmentsModel $shipments_model, CustomersModel $customers_model){
 
         $user = $request->user();
 
@@ -31,48 +36,41 @@ class DtPayCarriersController extends Controller
 
         if($user){
 
-            // $_shipments = Shipment::where('carrier_dot', $user->carrier_dot)
-            //                 ->with(['stops', 'trackingUpdates'])
-            //                 ->latest('id') 
-            //                 ->paginate(15); 
-
             $_shipments = $shipments_model
-                            ->select("shipments.*", "dt_payments.uuid as payment_id", "dt_payments.status as payment_status")
-                            // ->select("shipments.*")
-                            ->where('shipments.carrier_dot', $user->dot_number)
-                            ->join($dt_pay_model->getTable(), "shipments.uuid", "=", "dt_payments.load_id")
+                            ->select("shipments.*", "customers.first_name", "customers.last_name", "dt_payments.row_id as payment_id", "dt_payments.status as payment_status")
+                            ->where('shipments.shippment_carrier', $user->row_id)
+                            ->join($customers_model->getTable(), "shipments.customer", "=", "customers.row_id")
+                            ->join($dt_pay_model->getTable(), "shipments.row_id", "=", "dt_payments.load_id")
                             ->get();
 
-            echo $_shipments->count();
+            if($_shipments->count()){
 
-            // if($_shipments->count()){
+                foreach($_shipments as $_shipment){
 
-            //     foreach($_shipments as $_shipment){
+                    $_shipment->amount_formatted = Number::currency($_shipment->amount);
 
-            //         $_shipment->amount_formatted = Number::currency($_shipment->amount);
+                    $state_label = "Cleared · in hold";
 
-            //         $state_label = "Cleared · in hold";
+                    if($_shipment->payment_status == 'init'){
 
-            //         if($_shipment->payment_status == 'init'){
+                        $state_label = "Cleared · in hold";
+                    }
 
-            //             $state_label = "Cleared · in hold";
-            //         }
+                    if($_shipment->payment_status == 'review'){
 
-            //         if($_shipment->payment_status == 'review'){
+                        $state_label = "Under review";
+                    }
 
-            //             $state_label = "Under review";
-            //         }
+                    if($_shipment->payment_status == 'hold'){
 
-            //         if($_shipment->payment_status == 'hold'){
+                        $state_label = "Manual hold";
+                    }
 
-            //             $state_label = "Manual hold";
-            //         }
+                    $_shipment->state_label = $state_label;
 
-            //         $_shipment->state_label = $state_label;
-
-            //         $shipments[] = $_shipment;
-            //     }
-            // }
+                    $shipments[] = $_shipment;
+                }
+            }
 
             return response()->json(['status' => true, 'loads' => $shipments], 200);
         }

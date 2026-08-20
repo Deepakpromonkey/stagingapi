@@ -92,6 +92,13 @@ Route::prefix('v1')->group(function () {
         Route::get('/agreement/{token}', [CarrierConnectController::class, 'agreement'])
             ->middleware('throttle:60,1');
 
+        // A file the carrier uploaded, streamed back to them. A GET with the
+        // token in the path, like the agreement above, so the browser can open
+        // it directly — the broker-side download is company-scoped and behind a
+        // session, which a carrier does not have.
+        Route::get('/documents/{token}/{type}', [CarrierConnectController::class, 'viewDocument'])
+            ->middleware('throttle:60,1');
+
         // Reading state and stepping through the wizard. Generous, because a
         // carrier working through four steps makes a fair few of these.
         Route::middleware('throttle:60,1')->group(function () {
@@ -446,7 +453,4 @@ Route::prefix('v1')->group(function () {
     Route::post('/guest-pay/payment/init', [GuestPayController::class, 'initGuestPay']);
     Route::post('/guest-pay/load/submit', [GuestPayController::class, 'loadSubmission']);
     Route::post('/guest-pay/info/submit', [GuestPayController::class, 'handlePersonalSubmit']);
-
-    Route::post('/guest-pay/payment/intent', [GuestPayController::class, 'paymentIntent']);
-    Route::post('/guest-pay/payment/confirm', [GuestPayController::class, 'confirmPayment']);
 });

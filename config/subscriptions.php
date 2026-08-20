@@ -16,16 +16,26 @@ return [
     */
 
     'business_types' => [
+        // What the signup form actually offers.
+        '3pl_freight_broker' => '3PL / Freight Broker',
+        'freight_forwarder_shipper' => 'Freight Forwarder / Shipper',
+        'technology_vendor' => 'Technology Vendor',
+        'insurance_agency' => 'Insurance Agency',
+        'other' => 'Other',
+
+        // The original, finer-grained set. No longer offered at signup, but
+        // kept accepted so companies already carrying one of these keys still
+        // pass validation when their profile is updated.
         'broker' => 'Freight broker',
         'carrier' => 'Motor carrier',
         'broker_carrier' => 'Broker & carrier',
         'freight_forwarder' => 'Freight forwarder',
         'third_party_logistics' => 'Third party logistics (3PL)',
         'shipper' => 'Shipper',
-        'other' => 'Other',
     ],
 
     'dot_number_types' => [
+        '3pl_freight_broker',
         'broker',
         'carrier',
         'broker_carrier',

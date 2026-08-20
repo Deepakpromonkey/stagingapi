@@ -46,9 +46,12 @@ class CarrierShortlistController extends Controller
             'row_id' => 'required|string',
         ]);
 
-        $carrier = Carrier::where('row_id', $request->row_id)->first();
+        // Only the key is needed here, and resolving it is cached — the
+        // shortlist itself is local, so the remote carrier lookup was the whole
+        // of the delay on this endpoint.
+        $carrierId = Carrier::resolveIdFromRowId($request->row_id);
 
-        if (! $carrier) {
+        if (! $carrierId) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Carrier not found in system.',
@@ -58,7 +61,7 @@ class CarrierShortlistController extends Controller
         CarrierShortlist::updateOrCreate(
             [
                 'company_id' => $request->user()->company_id,
-                'carrier_id' => $carrier->id,
+                'carrier_id' => $carrierId,
             ],
             [
                 'user_id' => $request->user()->id,
@@ -77,9 +80,12 @@ class CarrierShortlistController extends Controller
             'row_id' => 'required|string',
         ]);
 
-        $carrier = Carrier::where('row_id', $request->row_id)->first();
+        // Only the key is needed here, and resolving it is cached — the
+        // shortlist itself is local, so the remote carrier lookup was the whole
+        // of the delay on this endpoint.
+        $carrierId = Carrier::resolveIdFromRowId($request->row_id);
 
-        if (! $carrier) {
+        if (! $carrierId) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Carrier not found in system.',
@@ -87,7 +93,7 @@ class CarrierShortlistController extends Controller
         }
 
         CarrierShortlist::where('company_id', $request->user()->company_id)
-            ->where('carrier_id', $carrier->id)
+            ->where('carrier_id', $carrierId)
             ->delete();
 
         return response()->json([

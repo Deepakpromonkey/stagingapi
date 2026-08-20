@@ -22,17 +22,13 @@ class StripeModel extends Model
 
 	const online = true;
 
-	const mode = 'live'; // sandbox / live
+	const mode = 'sandbox'; // sandbox / live
 
 	const SANDBOX_API_KEY = 'pk_test_51TP2bME8lGA6s4DIvkKRuCU1crMqEo0NgiAfoWYTlyuLUNAlvIh6Zhqj8a3iRqLwWRlj0JO7Vfq8lXUzcEh021yQ00E3ArEngX';
 	const SANDBOX_API_SECRET = 'sk_test_51TP2bME8lGA6s4DIUXXrfQ9IRjTEyanVRRdRZcloe7RC7T8UUJOI79REPnWn3tSANINSEBmP9TALcgRbMYQoT6xs00UqtLcZ5l';
 
-	const LIVE_API_KEY = 'pk_live_51TP2bME8lGA6s4DI1Qrd3hBPKD6jZEZFP43NN0tJT0eV9aFU4V4kfaCybqtfmxWAntEnEkkMOU5N8TzLq6VBuvrS009KsgSeic';
-
-	/*
-	Restricted key
-	*/
-	const LIVE_API_SECRET = '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';
+	const LIVE_API_KEY = '';
+	const LIVE_API_SECRET = '';
 
     protected $table = 'queries';
 

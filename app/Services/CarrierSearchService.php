@@ -59,7 +59,7 @@ class CarrierSearchService
                 'carrier_operation',
             ])
             ->with([
-                'authority:dot_number,docket_number,common_stat,contract_stat,broker_stat',
+                'authority:carrier_authorities.dot_number,carrier_authorities.docket_number,carrier_authorities.common_stat,carrier_authorities.contract_stat,carrier_authorities.broker_stat',
                 'carrierDetail:dot_number,fleetsize,status_code,safety_rating,dun_bradstreet_no',
                 'inspections' => fn ($query) => $query->select('dot_number', 'vin')->limit(1),
             ])

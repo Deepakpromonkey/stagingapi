@@ -207,12 +207,31 @@ class CarrierConnectController extends BaseController
             return $this->error('Enter a valid email address.', null, 422);
         }
 
-        // The document the carrier will be asked to sign at the last step. Null
-        // is fine — the carrier can still onboard, they just cannot e-sign yet.
+        /*
+        | The document the carrier will be asked to sign at the last step.
+        |
+        | This is snapshotted onto the request, so sending an invitation before
+        | the company has an agreement on file produced a request that could
+        | never be signed: the carrier worked through all six steps only to be
+        | told at the end that the broker had not uploaded anything, and
+        | uploading one afterwards did not repair the requests already sent.
+        |
+        | Refusing here is the honest place to fail — before the carrier is
+        | emailed and starts work that cannot be completed.
+        */
         $agreement = BrokerAgreementDocument::forCompany($user->company_id)
             ->active()
             ->latest()
             ->first();
+
+        if (! $agreement) {
+            return $this->error(
+                'Upload your broker agreement before sending onboarding invitations. '
+                .'Without one the carrier cannot sign at the final step.',
+                null,
+                422
+            );
+        }
 
         $connectRequest = DB::transaction(function () use (
             $user, $carrier, $email, $agreement, $wantsAlternate, $alternate
@@ -464,6 +483,26 @@ class CarrierConnectController extends BaseController
             $connectRequest->forceFill(['onboarding_ip' => $request->ip()])->save();
         }
 
+        /*
+        | Repair a request sent before the broker had an agreement on file.
+        |
+        | store() now refuses to send in that state, but invitations already out
+        | there carry a null agreement and would strand the carrier at the last
+        | step forever. If the company has since uploaded one, attach it — there
+        | is nothing to overwrite, and the alternative is a carrier who can
+        | never finish.
+        */
+        if ($connectRequest->agreement_document_id === null) {
+            $agreement = BrokerAgreementDocument::forCompany($connectRequest->company_id)
+                ->active()
+                ->latest()
+                ->first();
+
+            if ($agreement) {
+                $connectRequest->forceFill(['agreement_document_id' => $agreement->id])->save();
+            }
+        }
+
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
         $connectRequest->load('agreementDocument');
@@ -536,6 +575,57 @@ class CarrierConnectController extends BaseController
                 // inline, so the viewer renders it instead of downloading it.
                 'Content-Disposition' => 'inline; filename="'.addslashes($document->file_name).'"',
 
+                'Cache-Control' => 'private, no-store',
+            ]
+        );
+    }
+
+    /**
+     * Stream a file the carrier uploaded, back to the carrier.
+     *
+     * The broker-side equivalent, downloadFile(), is scoped to the broker's
+     * company and sits behind a session — a carrier working through the wizard
+     * has neither, so they had no way to check what they had actually attached.
+     * Authorised the same way as every other carrier-facing endpoint: by the
+     * invitation token, which is what proves whose onboarding this is.
+     *
+     * Served inline so a PDF or an image opens in the browser rather than
+     * downloading, and marked no-store because these are compliance documents.
+     */
+    public function viewDocument(string $token, string $type)
+    {
+        $connectRequest = $this->resolveRequest($token);
+
+        if (! $connectRequest) {
+            abort(404);
+        }
+
+        [$disk, $path, $name] = $this->resolveFile($connectRequest, $type);
+
+        if (! $disk || ! $path || ! Storage::disk($disk)->exists($path)) {
+            abort(404);
+        }
+
+        $storage = Storage::disk($disk);
+
+        // Trust the stored file rather than the request: the type comes off the
+        // URL, so deriving the content type from the object on disk keeps a
+        // crafted request from dictating how the browser treats the response.
+        $mime = $storage->mimeType($path) ?: 'application/octet-stream';
+
+        return response()->stream(
+            function () use ($storage, $path) {
+                $stream = $storage->readStream($path);
+
+                if ($stream) {
+                    fpassthru($stream);
+                    fclose($stream);
+                }
+            },
+            200,
+            [
+                'Content-Type' => $mime,
+                'Content-Disposition' => 'inline; filename="'.addslashes($name ?: 'document').'"',
                 'Cache-Control' => 'private, no-store',
             ]
         );
@@ -1365,7 +1455,7 @@ class CarrierConnectController extends BaseController
     private function findCarrier(string $rowId): ?Carrier
     {
         $carrier = Carrier::query()
-            ->with('authority:dot_number,docket_number')
+            ->with('authority:carrier_authorities.dot_number,carrier_authorities.docket_number')
             ->where('row_id', $rowId)
             ->first();
 

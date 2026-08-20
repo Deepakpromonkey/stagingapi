@@ -77,26 +77,13 @@ class DtPayController extends Controller
                         /*
                         Stripe
                         */
-                        try{
-                        
-                            $stripe_sources = $dt_pay_model->stripePaymentSources($user);
+                        $stripe_sources = $dt_pay_model->stripePaymentSources($user);
 
-                            $amount = $transaction->amount;
+                        $amount = $transaction->amount;
 
-                            $amounts = $dt_pay_model->calculations($amount);
+                        $amounts = $dt_pay_model->calculations($amount);
 
-                            return response()->json(['status' => true, 'load' => $load, 'sources' => $stripe_sources, 'amounts' => $amounts], 200);
-
-                        }catch (\Stripe\Exception\ApiErrorException $e) {
-
-                            Log::error('Action: Stripe customer registration. Stripe integration gateway error: ' . $e->getMessage());
-
-                            $amount = $transaction->amount;
-
-                            $amounts = $dt_pay_model->calculations($amount);
-
-                            return response()->json(['status' => true, 'load' => $load, 'message' => 'There was an error while processing your request.', 'sources' => [], 'amounts' => $amounts], 200);
-                        }
+                        return response()->json(['status' => true, 'load' => $load, 'sources' => $stripe_sources, 'amounts' => $amounts], 200);
                     }
                 }
             }
@@ -820,25 +807,13 @@ class DtPayController extends Controller
                     /*
                     Stripe sources
                     */
-                    try{
-                    
-                        $stripe_sources = $dt_pay_model->stripePaymentSources($user);
+                    $stripe_sources = $dt_pay_model->stripePaymentSources($user);
 
-                        $amount = $transaction->amount;
+                    $amount = $transaction->amount;
 
-                        $amounts = $dt_pay_model->calculations($amount);
+                    $amounts = $dt_pay_model->calculations($amount);
 
-                        return response()->json(['status' => true, 'transaction' => $transaction, 'sources' => $stripe_sources, 'amounts' => $amounts], 200);
-                    }catch (\Stripe\Exception\ApiErrorException $e) {
-
-                        Log::error('Action: Stripe customer registration. Stripe integration gateway error: ' . $e->getMessage());
-
-                        $amount = $transaction->amount;
-
-                        $amounts = $dt_pay_model->calculations($amount);
-
-                        return response()->json(['status' => true, 'transaction' => $transaction, 'message' => 'There was an error while processing your request.', 'sources' => [], 'amounts' => $amounts], 200);
-                    }
+                    return response()->json(['status' => true, 'transaction' => $transaction, 'sources' => $stripe_sources, 'amounts' => $amounts], 200);
                 }
 
                 return response()->json(['status' => false, 'message' => 'Transaction not found.'], 200);
