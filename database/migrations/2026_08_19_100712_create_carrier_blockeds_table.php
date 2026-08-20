@@ -14,7 +14,17 @@ return new class extends Migration
     Schema::create('carrier_blockeds', function (Blueprint $table) {
         $table->id();
         $table->foreignId('company_id')->constrained()->cascadeOnDelete();
-        $table->foreignId('carrier_id')->constrained('carriers')->cascadeOnDelete();
+        /*
+        | Deliberately NOT a foreign key, matching carrier_shortlists.
+        |
+        | Carriers are not local: App\Models\Carriers\Carrier reads the
+        | `external_db` connection, where `carriers` is a view over
+        | company_census_file in the separate `carrier` database. `constrained()`
+        | resolved against the LOCAL newbrokerapi.carriers instead — an unrelated,
+        | empty table — so every insert died with a 1452 constraint violation.
+        | MySQL cannot enforce a key across databases, let alone against a view.
+        */
+        $table->unsignedBigInteger('carrier_id');
         $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete(); 
         $table->timestamps();
         

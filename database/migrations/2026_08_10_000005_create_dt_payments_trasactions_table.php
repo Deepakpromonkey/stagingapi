@@ -13,9 +13,13 @@ return new class extends Migration
 
             $table->foreignUuid('payment_id')
                 ->nullable();
+            // No ->after() here: it compiles into the CREATE TABLE column
+            // definition, where AFTER is not valid syntax (MariaDB rejects the
+            // whole statement with a 1064). It only means anything on ALTER
+            // TABLE, and the column is already declared in the position it
+            // asked for, so positioning it explicitly bought nothing.
             $table->foreignUuid('guest_payment_id')
                 ->nullable()
-                ->after('payment_id')
                 ->constrained('dt_pay_guest', 'uuid')
                 ->restrictOnDelete();
 
