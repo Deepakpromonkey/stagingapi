@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\ScoringWeightController;
 use App\Http\Controllers\Api\V1\Agreement\AgreementDocumentController;
 use App\Http\Controllers\Api\V1\Auth\AuthController;
+use App\Http\Controllers\Api\V1\Auth\SignupOtpController;
 use App\Http\Controllers\Api\V1\Auth\PasswordResetController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierAuthController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierBrokerController;
@@ -71,6 +72,21 @@ Route::prefix('v1')->group(function () {
 
     // Stripe's own callback. Authorised by the signed payload, not a token.
     Route::post('/stripe/webhook', [StripeWebhookController::class, 'handle']);
+
+    /*
+    | Signup verification. Public by necessity — there is no account to
+    | authenticate against yet — so the limits carry the weight instead.
+    |
+    | Sending is the tighter of the two because every phone send is an SMS
+    | somebody pays for. Verifying is looser: a user mistyping a code should
+    | not be locked out by the same budget that guards the gateway, and wrong
+    | guesses are already bounded per code by otp_max_attempts.
+    */
+    Route::post('/signup/otp/send', [SignupOtpController::class, 'send'])
+        ->middleware('throttle:6,1');
+
+    Route::post('/signup/otp/verify', [SignupOtpController::class, 'verify'])
+        ->middleware('throttle:20,1');
 
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);

@@ -6,6 +6,7 @@ use App\Models\Company;
 use App\Models\LoginDevice;
 use App\Models\Role;
 use App\Models\TrustedDevice;
+use App\Models\SignupOtp;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -17,12 +18,52 @@ use Illuminate\Validation\ValidationException;
 class AuthService
 {
     public function __construct(
-        protected TwoFactorAuthService $twoFactorAuthService
+        protected TwoFactorAuthService $twoFactorAuthService,
+        protected SignupOtpService $signupOtpService
     ) {}
+
+    /*
+    | The form sends the dial code separately from the digits the user typed,
+    | so neither field on its own is the number a code was sent to. Joined
+    | here; the service normalises the result to E.164 before comparing.
+    */
+    private function fullPhone(array $data): string
+    {
+        $phone = trim((string) ($data['phone'] ?? ''));
+
+        if (str_starts_with($phone, '+')) {
+            return $phone;
+        }
+
+        $dial = trim((string) ($data['phone_country_code'] ?? ''));
+
+        return $dial === '' ? $phone : $dial.$phone;
+    }
 
     public function register(array $data)
     {
-        return DB::transaction(function () use ($data) {
+        /*
+        | Both proofs are resolved before the transaction opens, so a token
+        | that is expired, already spent, or issued for a different address
+        | fails the request before a company and a user have been created.
+        |
+        | They are only marked consumed once everything else has succeeded —
+        | a signup that falls over on some later field must leave the visitor
+        | able to press the button again without re-verifying.
+        */
+        $emailProof = $this->signupOtpService->resolveProof(
+            SignupOtp::CHANNEL_EMAIL,
+            $data['email_verification_token'],
+            $data['email']
+        );
+
+        $phoneProof = $this->signupOtpService->resolveProof(
+            SignupOtp::CHANNEL_PHONE,
+            $data['phone_verification_token'],
+            $this->fullPhone($data)
+        );
+
+        return DB::transaction(function () use ($data, $emailProof, $phoneProof) {
 
             // Create Company
             $company = Company::create([
@@ -56,6 +97,10 @@ class AuthService
             $user->assignRole(
                 Role::where('slug', config('rbac.owner_role'))->firstOrFail()
             );
+
+            // Spent, so neither proof can open a second account.
+            $emailProof->forceFill(['consumed_at' => now()])->save();
+            $phoneProof->forceFill(['consumed_at' => now()])->save();
 
             // Generate Sanctum Token
             $token = $user->createToken('broker-api')->plainTextToken;

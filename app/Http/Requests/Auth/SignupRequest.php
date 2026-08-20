@@ -18,8 +18,27 @@ class SignupRequest extends FormRequest
             'first_name' => 'required|string|max:100',
             'last_name' => 'nullable|string|max:100',
             'email' => 'required|email|unique:users,email',
-            'phone' => 'nullable|string|max:20',
+
+            /*
+            | No longer nullable. Both contact details are verified by OTP
+            | before the form can be submitted, and a number that is optional
+            | cannot be required to be proved.
+            */
+            'phone' => 'required|string|max:20',
+            'phone_country_code' => 'nullable|string|max:8',
+
             'password' => 'required|min:8|confirmed',
+
+            /*
+            | Proof that the address and the number were verified, issued by
+            | /signup/otp/verify.
+            |
+            | Checked again in the service against the email and phone actually
+            | submitted — the token names a destination, and a browser is free
+            | to change the field after earning one.
+            */
+            'email_verification_token' => ['required', 'string', 'size:64'],
+            'phone_verification_token' => ['required', 'string', 'size:64'],
 
             'company_name' => 'required|string|max:255',
 
@@ -63,6 +82,9 @@ class SignupRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'phone.required' => 'Enter the phone number you verified.',
+            'email_verification_token.required' => 'Verify your email address before creating the account.',
+            'phone_verification_token.required' => 'Verify your phone number before creating the account.',
             'business_type.required' => 'Tell us what your business does.',
             'business_type.in' => 'Choose one of the listed business types.',
             'dot_number.regex' => 'A DOT number is digits only.',
