@@ -1491,10 +1491,40 @@ class CarrierConnectController extends BaseController
      */
     private function findCarrier(string $rowId): ?Carrier
     {
-        $carrier = Carrier::query()
-            ->with('authority:carrier_authorities.dot_number,carrier_authorities.docket_number')
-            ->where('row_id', $rowId)
-            ->first();
+        $rowId = trim($rowId);
+
+        if ($rowId === '') {
+            return null;
+        }
+
+        /*
+        | Matched on dot_number, not row_id.
+        |
+        | `carriers` is a view over company_census_file which defines row_id as
+        | CAST(dot_number AS CHAR) — an expression, not a column. `where row_id
+        | = ?` therefore wraps the indexed column in a function, MySQL cannot
+        | answer it from uk_dot, and it scans and casts the whole census file:
+        | ~21 seconds per lookup against the live database, against ~0.6s for
+        | the same carrier found by dot_number.
+        |
+        | row_id is only the dot number rendered as a string, so this returns
+        | exactly the same row. Anything non-numeric falls back to the original
+        | column, so no caller can break on it.
+        |
+        | This is what was left of "sending the invitation takes forever" after
+        | the mail itself was moved off the request path — store() and load()
+        | both pay this lookup, so the carrier felt it twice: once when the
+        | broker pressed send, and again when they opened the wizard.
+        |
+        | Carrier::findByRowId() applies the same rule but cannot be used here,
+        | because the authority eager-load is what supplies the MC number.
+        */
+        $query = Carrier::query()
+            ->with('authority:carrier_authorities.dot_number,carrier_authorities.docket_number');
+
+        $carrier = ctype_digit($rowId)
+            ? $query->where('dot_number', (int) $rowId)->first()
+            : $query->where('row_id', $rowId)->first();
 
         if ($carrier) {
             $carrier->mc_number = $carrier->authority?->docket_number;
