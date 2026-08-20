@@ -514,7 +514,7 @@ class CarrierConnectController extends BaseController
 
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
-        $connectRequest->load('agreementDocument');
+        $connectRequest->load(['agreementDocument', 'documents']);
 
         return $this->success([
             'connect_request' => new CarrierConnectRequestResource($connectRequest),
@@ -1467,11 +1467,16 @@ class CarrierConnectController extends BaseController
     /**
      * Single exit point for every response that carries a connect request.
      *
-     * The agreement relation is loaded here rather than at each call site
-     * because CarrierConnectRequestResource exposes `agreement_url` via
-     * whenLoaded — without this, the key would silently disappear from the
-     * step-completion responses and the wizard would lose the document it is
-     * asking the carrier to sign.
+     * The relations are loaded here rather than at each call site because
+     * CarrierConnectRequestResource exposes `agreement_url` and `documents`
+     * via whenLoaded — without this the keys silently disappear from the
+     * step-completion responses.
+     *
+     * `documents` matters as much as the agreement: the wizard decides whether
+     * a compliance slot is filled by looking for an entry in that array, so an
+     * omitted key made every slot look empty. A carrier who had just uploaded
+     * their W-9 was shown the empty dropzone again, with no name, no size and
+     * no way to view what they had sent — the upload had in fact worked.
      */
     private function respondWithRequest(
         CarrierConnectRequest $connectRequest,
@@ -1479,7 +1484,9 @@ class CarrierConnectController extends BaseController
         int $code = 200
     ) {
         return $this->success(
-            new CarrierConnectRequestResource($connectRequest->load('agreementDocument')),
+            new CarrierConnectRequestResource(
+                $connectRequest->load(['agreementDocument', 'documents'])
+            ),
             $message,
             $code
         );
