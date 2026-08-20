@@ -311,7 +311,9 @@ class CarrierConnectController extends BaseController
         });
 
         if ($wantsAlternate) {
-            $this->sendAlternateEmailApprovalMail($connectRequest, $email, $user);
+            $this->afterResponse(
+                fn () => $this->sendAlternateEmailApprovalMail($connectRequest, $email, $user)
+            );
 
             return $this->respondWithRequest(
                 $connectRequest,
@@ -320,7 +322,7 @@ class CarrierConnectController extends BaseController
             );
         }
 
-        $this->sendInvitationMail($connectRequest, $user);
+        $this->afterResponse(fn () => $this->sendInvitationMail($connectRequest, $user));
 
         return $this->respondWithRequest(
             $connectRequest,
@@ -366,7 +368,14 @@ class CarrierConnectController extends BaseController
             'sent_on' => now(),
         ])->save();
 
-        $this->sendInvitationMail($connectRequest->fresh(['company']), $connectRequest->user);
+        // Resolved here rather than inside the callback so the deferred send
+        // works from a model that is known-good at this point.
+        $invitation = $connectRequest->fresh(['company']);
+        $sender = $connectRequest->user;
+
+        // The carrier is sitting on a redirect: making them watch an SMTP
+        // handshake before their browser moves is the same stall store() had.
+        $this->afterResponse(fn () => $this->sendInvitationMail($invitation, $sender));
 
         return redirect()->away($this->frontendUrl(
             '/carrier/email-approval?status=approved&email='.urlencode($approvedEmail)
@@ -1429,6 +1438,31 @@ class CarrierConnectController extends BaseController
     // ─────────────────────────────────────────────────────────────────────────
     // Internals
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Run something once the response is already on its way to the browser.
+     *
+     * Mail is the reason this exists. QUEUE_CONNECTION is `sync` and there is
+     * no worker, so Mail::send() opens an SMTP connection to SendGrid inside
+     * the request: the broker sat waiting on a handshake that has nothing to
+     * do with the answer they asked for, and on a slow one the frontend gave
+     * up first and reported a timeout for an invitation that had in fact been
+     * saved and sent.
+     *
+     * terminating() rather than a queued job because it needs no worker and no
+     * serialisation — the callback runs in this same process after
+     * Response::send() has flushed, so it stays correct on `sync` and keeps
+     * working unchanged if a real queue is introduced later.
+     *
+     * Anything deferred here must handle its own failures: by the time it runs
+     * the status code is already sent and cannot be changed. Both mail helpers
+     * catch and log, which is the behaviour we want — a delivery failure
+     * must not discard the request that was just created.
+     */
+    private function afterResponse(callable $callback): void
+    {
+        app()->terminating($callback);
+    }
 
     /**
      * Single exit point for every response that carries a connect request.

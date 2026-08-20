@@ -45,7 +45,13 @@ return [
             'port' => env('MAIL_PORT', 2525),
             'username' => env('MAIL_USERNAME'),
             'password' => env('MAIL_PASSWORD'),
-            'timeout' => null,
+
+            // Was null, which hands the socket to PHP's default_socket_timeout
+            // (60s). A SendGrid connection that stalls then blocked a request
+            // for the full minute, which is longer than the frontend waits --
+            // the broker saw "request timed out" on an invitation that was
+            // already saved. Fail fast instead; delivery is retried by hand.
+            'timeout' => (int) env('MAIL_TIMEOUT', 10),
             'local_domain' => env('MAIL_EHLO_DOMAIN', parse_url((string) env('APP_URL', 'http://localhost'), PHP_URL_HOST)),
         ],
 
