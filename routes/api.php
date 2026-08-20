@@ -344,6 +344,10 @@ Route::prefix('v1')->group(function () {
         Route::get('/carrier-reports/incidents', [CarrierReportController::class, 'incidents']);
         Route::get('/carrier-reports', [CarrierReportController::class, 'index']);
         Route::post('/carrier-reports', [CarrierReportController::class, 'store']);
+
+        // Evidence attached to a report. Streamed by the API rather than linked
+        // to, because the disk is private and entitlement is per report.
+        Route::get('/carrier-reports/documents/{uuid}', [CarrierReportController::class, 'download']);
         // history logs
         Route::get('/search-history', [SearchHistoryController::class, 'index']);
         Route::post('/search-history', [SearchHistoryController::class, 'store']);

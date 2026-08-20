@@ -5,10 +5,13 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Requests\Carrier\StoreCarrierReportRequest;
 use App\Mail\CarrierReportMail;
 use App\Models\CarrierReport;
+use App\Models\CarrierReportDocument;
 use App\Models\Carriers\Carrier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 /**
  * Incident reports a broker files against a carrier.
@@ -46,16 +49,40 @@ class CarrierReportController extends BaseController
             'row_id' => ['required', 'string', 'max:50'],
         ]);
 
-        $carrier = Carrier::where('row_id', $request->input('row_id'))->first();
-
-        if (! $carrier) {
-            return $this->error('Carrier not found in system.', null, 404);
-        }
+        $rowId = trim((string) $request->input('row_id'));
 
         $companyId = $request->user()->company_id;
 
-        $reports = CarrierReport::where('carrier_id', $carrier->id)
-            ->with(['user:id,first_name,last_name', 'company:id,company_name'])
+        /*
+        | Answered entirely from the local table.
+        |
+        | This used to resolve the row_id against the carrier database on EC2
+        | first, purely to turn it into the carrier_id to filter on. That cost
+        | the profile screen a remote round trip it did not need — and worse, a
+        | `where row_id = ?` against the `carriers` view is a full scan of the
+        | census file, so the reports panel waited on a ~21 second query and
+        | frequently timed out before it could render anything.
+        |
+        | The identifiers are denormalised onto every report for exactly this
+        | reason, and both columns are indexed. row_id and dot_number are the
+        | same value in different types — the view defines row_id as
+        | CAST(dot_number AS CHAR) — so either column answers the question, and
+        | matching both keeps older rows that only filled one of them readable.
+        |
+        | An unknown carrier now yields an empty list rather than a 404: the
+        | panel wants "no reports", and the external lookup that could once
+        | tell the two apart is the thing being removed.
+        */
+        $reports = CarrierReport::query()
+            ->where(function ($query) use ($rowId) {
+                $query->where('carrier_row_id', $rowId)
+                    ->orWhere('carrier_dot_number', $rowId);
+            })
+            ->with([
+                'user:id,first_name,last_name',
+                'company:id,company_name',
+                'documents',
+            ])
             ->latest()
             ->get()
             ->map(function (CarrierReport $report) use ($companyId) {
@@ -95,6 +122,24 @@ class CarrierReportController extends BaseController
                         ? $report->company?->company_name
                         : null,
 
+                    /*
+                    | Evidence. The metadata is always listed, so a reader can
+                    | see the report is substantiated, but the file itself
+                    | follows the same rule as the reporter's identity: an
+                    | attachment is usually a rate confirmation or an email
+                    | thread, and those carry the very details `is_private`
+                    | exists to keep inside the filing company.
+                    */
+                    'documents' => $report->documents->map(fn (CarrierReportDocument $document) => [
+                        'uuid' => $document->uuid,
+                        'name' => $document->name,
+                        'size' => $document->size,
+                        'mime' => $document->mime,
+                        'download_url' => $showsReporter
+                            ? url('/api/v1/carrier-reports/documents/'.$document->uuid)
+                            : null,
+                    ])->values(),
+
                     // Delivery detail is the reporter's business, not the wider
                     // audience's.
                     'carrier_email' => $isOwn ? $report->carrier_email : null,
@@ -109,7 +154,16 @@ class CarrierReportController extends BaseController
 
     public function store(StoreCarrierReportRequest $request)
     {
-        $carrier = Carrier::where('row_id', $request->row_id)->first();
+        /*
+        | findByRowId, not where('row_id', ...).
+        |
+        | `carriers` defines row_id as CAST(dot_number AS CHAR), so filtering on
+        | it wraps the indexed column in a function and MySQL scans the whole
+        | census file — around 21 seconds against the live database, which is
+        | most of what made filing a report feel like it had hung. The helper
+        | matches on dot_number instead and returns the same row from the index.
+        */
+        $carrier = Carrier::findByRowId($request->row_id);
 
         if (! $carrier) {
             return $this->error('Carrier not found in system.', null, 404);
@@ -117,7 +171,37 @@ class CarrierReportController extends BaseController
 
         $user = $request->user();
 
+        /*
+        | The uuid is settled before anything is written so the attachments can
+        | be filed under it, which keeps one report's evidence together on disk
+        | and off the guessable path a sequential id would give.
+        */
+        $uuid = (string) Str::uuid();
+
+        /*
+        | Files first. A report whose evidence failed to save is worse than no
+        | report at all — the broker would believe the attachment was filed and
+        | never send it again — so nothing is written to the database until
+        | every file is safely on the disk.
+        */
+        try {
+            $stored = $this->storeDocuments($request->file('documents', []), $user->company_id, $uuid);
+        } catch (\Throwable $e) {
+            Log::error('Carrier report attachment failed', [
+                'company_id' => $user->company_id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $this->error(
+                'Could not save the attachments. Please try again.',
+                null,
+                500
+            );
+        }
+
         $report = CarrierReport::create([
+            'uuid' => $uuid,
+
             'company_id' => $user->company_id,
             'user_id' => $user->id,
 
@@ -144,6 +228,12 @@ class CarrierReportController extends BaseController
 
             'carrier_email' => $request->carrier_email,
         ]);
+
+        foreach ($stored as $document) {
+            $report->documents()->create($document);
+        }
+
+        $report->load('documents');
 
         $emailed = false;
         $emailError = null;
@@ -183,7 +273,117 @@ class CarrierReportController extends BaseController
             'carrier_email' => $report->carrier_email,
             'emailed' => $emailed,
             'email_error' => $emailError,
+
+            // Echoed back so the client can show what was filed rather than
+            // assume the upload worked.
+            'documents' => $report->documents->map(fn (CarrierReportDocument $document) => [
+                'uuid' => $document->uuid,
+                'name' => $document->name,
+                'size' => $document->size,
+                'mime' => $document->mime,
+                'download_url' => url('/api/v1/carrier-reports/documents/'.$document->uuid),
+            ])->values(),
         ], $this->storeMessage($report, $emailed, $emailError), 201);
+    }
+
+    /**
+     * Stream one attachment back to a broker entitled to see it.
+     *
+     * Files are held on a private disk and served through here rather than
+     * linked to directly, so entitlement is checked on every fetch.
+     */
+    public function download(Request $request, string $uuid)
+    {
+        $document = CarrierReportDocument::with('report')->where('uuid', $uuid)->first();
+
+        if (! $document || ! $document->report) {
+            return $this->error('Attachment not found.', null, 404);
+        }
+
+        $report = $document->report;
+
+        /*
+        | The same rule the listing applies: the filing company always, and
+        | everyone else only while the report is not private. A 404 rather than
+        | a 403 — confirming a private report's attachment exists would leak
+        | the very thing the flag protects.
+        */
+        $isOwn = $report->company_id === $request->user()->company_id;
+
+        if (! $isOwn && $report->is_private) {
+            return $this->error('Attachment not found.', null, 404);
+        }
+
+        $disk = Storage::disk($document->disk);
+
+        if (! $disk->exists($document->path)) {
+            Log::warning('Carrier report attachment missing from disk', [
+                'document_uuid' => $document->uuid,
+                'disk' => $document->disk,
+                'path' => $document->path,
+            ]);
+
+            return $this->error('Attachment is no longer available.', null, 404);
+        }
+
+        return $disk->download($document->path, $document->name);
+    }
+
+    /**
+     * Put every attachment on the disk, returning the rows to record.
+     *
+     * All or nothing: if one file fails, those already written are removed
+     * again so a half-filed report cannot reach the database.
+     *
+     * @param  array<int, \Illuminate\Http\UploadedFile>  $files
+     * @return list<array{disk: string, path: string, name: string, size: ?int, mime: ?string}>
+     */
+    private function storeDocuments(array $files, int $companyId, string $reportUuid): array
+    {
+        if (! $files) {
+            return [];
+        }
+
+        $disk = config('filesystems.default');
+
+        // Under the company, then the report: the same shape the onboarding
+        // documents use, so one company's evidence never mixes with another's.
+        $directory = 'carrier-reports/'.$companyId.'/'.$reportUuid;
+
+        $stored = [];
+
+        try {
+            foreach ($files as $file) {
+                $extension = $file->getClientOriginalExtension();
+
+                $name = Str::random(20).($extension ? '.'.$extension : '');
+
+                $path = Storage::disk($disk)->putFileAs($directory, $file, $name);
+
+                if (! $path) {
+                    throw new \RuntimeException('Storage rejected '.$file->getClientOriginalName());
+                }
+
+                $stored[] = [
+                    'disk' => $disk,
+                    'path' => $path,
+
+                    // The broker's own filename is kept for display and for the
+                    // download, but never used as the path — it is user input.
+                    'name' => $file->getClientOriginalName(),
+                    'size' => $file->getSize(),
+                    'mime' => $file->getClientMimeType(),
+                ];
+            }
+        } catch (\Throwable $e) {
+            foreach ($stored as $document) {
+                Storage::disk($document['disk'])->delete($document['path']);
+            }
+
+            throw $e;
+        }
+
+        return $stored;
     }
 
     private function storeMessage(CarrierReport $report, bool $emailed, ?string $emailError): string

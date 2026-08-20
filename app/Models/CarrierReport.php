@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Models\Carriers\Carrier;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
 /**
@@ -87,5 +88,11 @@ class CarrierReport extends Model
     public function carrier()
     {
         return $this->belongsTo(Carrier::class);
+    }
+
+    /** Evidence the broker attached when filing. */
+    public function documents(): HasMany
+    {
+        return $this->hasMany(CarrierReportDocument::class, 'carrier_report_id');
     }
 }
