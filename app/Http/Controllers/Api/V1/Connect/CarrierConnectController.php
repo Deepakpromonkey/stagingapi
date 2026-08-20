@@ -1266,8 +1266,11 @@ class CarrierConnectController extends BaseController
         return $this->respondWithRequest($connectRequest, 'Answers saved.');
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 5 — documents (W-9, COI)
+    // ─────────────────────────────────────────────────────────────────────────
 
- public function uploadDocument(CarrierDocumentRequest $request)
+    public function uploadDocument(CarrierDocumentRequest $request)
     {
         $data = $request->validated();
 
@@ -1356,7 +1359,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 5 — e-sign
+    // Step 6 — e-sign
     // ─────────────────────────────────────────────────────────────────────────
 
     public function esign(CarrierEsignRequest $request)

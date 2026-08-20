@@ -14,9 +14,39 @@ use Illuminate\Http\Resources\Json\JsonResource;
  */
 class CarrierConnectRequestResource extends JsonResource
 {
+    /*
+    | The onboarding steps, in the order the wizard walks them.
+    |
+    | Declared here so the API owns the list. The wizard used to keep its own
+    | copy, which is how the document upload came to be missing from it: the
+    | step was added on this side and the front end was never renumbered.
+    */
+    private const STEPS = [
+        'phone' => 'Phone number',
+        'identity' => 'Government ID',
+        'bank' => 'Bank account',
+        'questionnaire' => 'Broker questions',
+        'documents' => 'Documents',
+        'agreement' => 'Carrier agreement',
+    ];
+
+    /*
+    | The two a carrier may move past without completing. The phone check, the
+    | questionnaire and the agreement are not skippable: the first is what
+    | proves we are talking to the carrier, and the other two are the broker's
+    | own requirements.
+    */
+    private const SKIPPABLE = ['identity', 'bank'];
+
     public function toArray(Request $request): array
     {
         [$stage, $stageLabel] = $this->stage();
+
+        $steps = $this->steps();
+
+        // Counted over the steps that apply to this carrier, so one paid by a
+        // factoring company — who has no bank step — can still reach the end.
+        $applicable = collect($steps)->where('applicable', true);
 
         return [
             'uuid' => $this->uuid,
@@ -28,8 +58,23 @@ class CarrierConnectRequestResource extends JsonResource
             // check, which the raw column cannot express.
             'stage' => $stage,
             'stage_label' => $stageLabel,
-            'steps_completed' => $this->stepsCompleted(),
-            'steps_total' => 6,
+            /*
+            | The ordered step list the wizard renders. Sent by the API rather
+            | than hardcoded in the front end, because a second copy of this
+            | list is what let the document upload go missing from the wizard
+            | while the counts here still said six.
+            */
+            'steps' => $steps,
+
+            // Genuinely done. A skip is deliberately not counted here, for the
+            // same reason it is kept out of the *_verified flags below.
+            'steps_completed' => $applicable->where('completed', true)->count(),
+
+            // Done or deliberately passed over — what a progress bar wants, so
+            // that skipping the ID check still moves the carrier forward.
+            'steps_settled' => $applicable->where('settled', true)->count(),
+
+            'steps_total' => $applicable->count(),
 
             'carrier' => [
                 'row_id' => $this->carrier_row_id,
@@ -242,15 +287,66 @@ class CarrierConnectRequestResource extends JsonResource
         return ['in_progress', 'In progress'];
     }
 
-    private function stepsCompleted(): int
+    /**
+     * Every step, in order, with enough state for the wizard to render it
+     * without deciding for itself what the steps are.
+     *
+     * @return list<array{key: string, label: string, number: ?int, applicable: bool, skippable: bool, completed: bool, skipped: bool, settled: bool}>
+     */
+    private function steps(): array
     {
-        return collect([
-            $this->mobile_verified_at !== null,
-            $this->didit_status === 'Approved',
-            $this->stripe_verified_at !== null,
-            $this->questionnaire_completed_at !== null,
-            $this->documents_completed_at !== null,
-            $this->signed_at !== null,
-        ])->filter()->count();
+        $completed = [
+            'phone' => $this->mobile_verified_at !== null,
+            'identity' => $this->didit_status === 'Approved',
+            'bank' => $this->stripe_verified_at !== null,
+            'questionnaire' => $this->questionnaire_completed_at !== null,
+            'documents' => $this->documents_completed_at !== null,
+            'agreement' => $this->signed_at !== null,
+        ];
+
+        $skipped = [
+            'identity' => $this->identity_skipped_at !== null,
+            'bank' => $this->bank_skipped_at !== null,
+        ];
+
+        $number = 0;
+
+        return collect(self::STEPS)
+            ->map(function (string $label, string $key) use ($completed, $skipped, &$number) {
+                $applicable = $this->stepApplies($key);
+                $isSkipped = $skipped[$key] ?? false;
+
+                return [
+                    'key' => $key,
+                    'label' => $label,
+
+                    // Only applicable steps are numbered, so a factoring
+                    // carrier is walked through 1..5 with no gap where the
+                    // bank step would otherwise have been.
+                    'number' => $applicable ? ++$number : null,
+
+                    'applicable' => $applicable,
+                    'skippable' => in_array($key, self::SKIPPABLE, true),
+                    'completed' => $completed[$key],
+                    'skipped' => $isSkipped,
+
+                    // What the wizard gates on: done, or deliberately passed
+                    // over. Kept apart from `completed` so the broker is never
+                    // told something was checked when it was not.
+                    'settled' => $completed[$key] || $isSkipped,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * A carrier paid by a factoring company is paid by them and not by the
+     * broker, so there is no payout account to collect and the bank step does
+     * not apply at all — which is a different thing from having skipped it.
+     */
+    private function stepApplies(string $key): bool
+    {
+        return ! ($key === 'bank' && (bool) $this->uses_factoring_company);
     }
 }

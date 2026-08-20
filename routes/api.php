@@ -100,7 +100,7 @@ Route::prefix('v1')->group(function () {
             ->middleware('throttle:60,1');
 
         // Reading state and stepping through the wizard. Generous, because a
-        // carrier working through four steps makes a fair few of these.
+        // carrier working through six steps makes a fair few of these.
         Route::middleware('throttle:60,1')->group(function () {
             Route::post('/load', [CarrierConnectController::class, 'load']);
             Route::post('/identity/start', [CarrierConnectController::class, 'startIdentityVerification']);
