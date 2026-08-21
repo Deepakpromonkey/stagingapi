@@ -38,6 +38,10 @@ ALTER TABLE sms_ab_passproperty  ADD UNIQUE INDEX uk_dot (dot_number),          
 ALTER TABLE sms_input_inspection ADD INDEX idx_dot_date (dot_number, insp_date),       ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_input_inspection ADD INDEX idx_uniqueid (unique_id),                   ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_input_inspection ADD INDEX idx_vin      (vin),                         ALGORITHM=INPLACE, LOCK=NONE;
+-- Equipment insights also match the trailing unit. Without this, joining on
+-- vin2 reads every inspection row per lookup, so the app leaves it off: set
+-- CARRIER_VIN2_MATCHING=true once this has been built.
+ALTER TABLE sms_input_inspection ADD INDEX idx_vin2     (vin2),                        ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_input_violation  ADD INDEX idx_dot      (dot_number),                  ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_input_violation  ADD INDEX idx_uniqueid (unique_id),                   ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_input_crash      ADD INDEX idx_dot      (dot_number),                  ALGORITHM=INPLACE, LOCK=NONE;

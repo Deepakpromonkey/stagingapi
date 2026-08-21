@@ -42,6 +42,13 @@ class CarrierController extends Controller
     private const ASSOCIATION_MAX_MATCHES = 200;
 
     /**
+     * Carrier-and-VIN pairs the equipment lookup may return. A carrier running
+     * a large fleet through a busy scale house shares vehicles with a lot of
+     * people, and the profile pages them five at a time.
+     */
+    private const VIN_MAX_PAIRS = 1000;
+
+    /**
      * Former identifiers worth matching on, as column => [label, value shown].
      *
      * Every column is the leading column of an index on company_census_file,
@@ -4916,70 +4923,133 @@ SQL;
         $bindings[] = $dot;
     }
 
+    /**
+     * Carriers inspected on the same vehicles as this one — shared equipment.
+     *
+     * The target's own VINs come from both unit columns, which is cheap:
+     * idx_dot_date makes that an index lookup. Matching them against everyone
+     * else only uses `vin`, because that is the column carrying idx_vin —
+     * joining on `vin2` reads all of sms_input_inspection per lookup, so the
+     * trailing-unit side stays off until idx_vin2 exists.
+     *
+     * Distinct carrier-and-VIN pairs rather than one row per inspection: the
+     * profile lists the VINs a carrier shares, so a vehicle inspected forty
+     * times was forty identical rows over the wire and one line on the page.
+     */
     public function vinAssociation($dot)
     {
-        $sql = <<<'SQL'
-WITH target_vins AS (
-    SELECT vin
-    FROM inspections
-    WHERE dot_number = ? AND vin IS NOT NULL AND vin <> ''
+        return response()->json(Cache::remember(
+            'carrier:vin-associations:'.$dot,
+            (int) config('carriers.profile_cache_ttl', 900),
+            fn () => $this->buildVinAssociations($dot)
+        ));
+    }
 
-    UNION
+    /**
+     * Distinct carrier-and-VIN pairs sharing a vehicle with this carrier.
+     *
+     * @return array{0: string, 1: array<int, mixed>}
+     */
+    private function vinPairQuery($dot): array
+    {
+        $matchTrailingUnit = (bool) config('carriers.vin2_matching', false);
 
-    SELECT vin2
-    FROM inspections
-    WHERE dot_number = ? AND vin2 IS NOT NULL AND vin2 <> ''
-)
+        // Both of the target's own unit columns are cheap to read — dot_number
+        // leads idx_dot_date. Only the matching side is index-bound.
+        $trailingUnitBlock = $matchTrailingUnit ? '
+            UNION
 
-SELECT
-    'VIN' AS match_type,
-    tv.vin AS matched_vin,
-    i.dot_number,
-    c2.legal_name,
-    c2.dba_name,
-    c2.telephone,
-    c2.fax,
-    c2.email_address
-FROM target_vins tv
-JOIN inspections i
-    ON i.vin = tv.vin
-JOIN carriers c2
-    ON c2.dot_number = i.dot_number
-WHERE i.dot_number <> ?
+            SELECT DISTINCT i.vin2 AS matched_vin, i.dot_number
+            FROM target_vins tv
+            JOIN inspections i ON i.vin2 = tv.vin
+            WHERE i.dot_number <> ?
+        ' : '';
 
-UNION ALL
+        $bindings = $matchTrailingUnit
+            ? [$dot, $dot, $dot, $dot]
+            : [$dot, $dot, $dot];
 
-SELECT
-    'VIN' AS match_type,
-    tv.vin AS matched_vin,
-    i.dot_number,
-    c2.legal_name,
-    c2.dba_name,
-    c2.telephone,
-    c2.fax,
-    c2.email_address
-FROM target_vins tv
-JOIN inspections i
-    ON i.vin2 = tv.vin
-JOIN carriers c2
-    ON c2.dot_number = i.dot_number
-WHERE i.dot_number <> ?
+        $sql = '
+            WITH target_vins AS (
+                SELECT vin
+                FROM inspections
+                WHERE dot_number = ? AND vin IS NOT NULL AND vin <> ""
 
-ORDER BY legal_name, dot_number
-SQL;
+                UNION
 
-        $results = DB::connection('external_db')->select($sql, [
-            $dot,
-            $dot,
-            $dot,
-            $dot,
-        ]);
+                SELECT vin2
+                FROM inspections
+                WHERE dot_number = ? AND vin2 IS NOT NULL AND vin2 <> ""
+            )
 
-        return response()->json([
+            SELECT DISTINCT i.vin AS matched_vin, i.dot_number
+            FROM target_vins tv
+            JOIN inspections i ON i.vin = tv.vin
+            WHERE i.dot_number <> ?
+            '.$trailingUnitBlock.'
+            LIMIT '.self::VIN_MAX_PAIRS;
+
+        return [$sql, $bindings];
+    }
+
+    private function buildVinAssociations($dot): array
+    {
+        [$sql, $bindings] = $this->vinPairQuery($dot);
+
+        $pairs = DB::connection('external_db')->select($sql, $bindings);
+
+        if (empty($pairs)) {
+            return [
+                'success' => true,
+                'count' => 0,
+                'data' => [],
+            ];
+        }
+
+        $dots = array_slice(
+            array_values(array_unique(array_map(fn ($pair) => $pair->dot_number, $pairs))),
+            0,
+            self::ASSOCIATION_MAX_MATCHES
+        );
+
+        $placeholders = implode(',', array_fill(0, count($dots), '?'));
+
+        $details = DB::connection('external_db')->select("
+            SELECT dot_number, legal_name, dba_name, telephone, fax, email_address
+            FROM carriers
+            WHERE dot_number IN ({$placeholders})
+        ", $dots);
+
+        $byDot = [];
+
+        foreach ($details as $row) {
+            $byDot[$row->dot_number] = $row;
+        }
+
+        $rows = [];
+
+        foreach ($pairs as $pair) {
+            if (! isset($byDot[$pair->dot_number])) {
+                continue;
+            }
+
+            $rows[] = (object) array_merge((array) $byDot[$pair->dot_number], [
+                'match_type' => 'VIN',
+                'matched_vin' => $pair->matched_vin,
+            ]);
+        }
+
+        usort(
+            $rows,
+            fn ($a, $b) => [$a->legal_name, $a->dot_number] <=> [$b->legal_name, $b->dot_number]
+        );
+
+        return [
             'success' => true,
-            'count' => count($results),
-            'data' => $results,
-        ]);
+            'count' => count($rows),
+            'truncated' => count($pairs) >= self::VIN_MAX_PAIRS || count($pairs) > count($rows),
+            'data' => $rows,
+        ];
     }
 
     public function brokerQuestions()

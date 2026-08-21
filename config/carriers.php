@@ -75,6 +75,21 @@ return [
 
     'former_physical_address_matching' => env('CARRIER_FORMER_PHY_ADDRESS_MATCHING', false),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Trailing-unit VIN matching
+    |--------------------------------------------------------------------------
+    |
+    | Equipment insights match this carrier's vehicles against other carriers'
+    | inspections. The leading unit is matched either way; the trailing one is
+    | off by default because idx_vin on sms_input_inspection covers `vin` and
+    | not `vin2`, so that join reads the whole inspection table. Turn it on once
+    | idx_vin2 exists — the statement is in database/sql/carrier_indexes.sql.
+    |
+    */
+
+    'vin2_matching' => env('CARRIER_VIN2_MATCHING', false),
+
     'change_log' => [
 
         'disk' => env('CARRIER_CHANGE_LOG_DISK', 's3'),
