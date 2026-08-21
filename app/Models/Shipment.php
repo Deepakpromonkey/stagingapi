@@ -46,6 +46,8 @@ class Shipment extends Model
         'tracking_interval_seconds' => 'integer',
         // TELL LARAVEL TO HANDLE THIS AS AN ARRAY
         'email_updates_to' => 'array',
+        'last_ping_at' => 'datetime',
+        'last_alert_sent_at' => 'datetime',
     ];
 
     public function company()
