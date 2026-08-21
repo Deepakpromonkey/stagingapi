@@ -345,6 +345,11 @@ Route::prefix('v1')->group(function () {
             Route::get('/carriers/{dot}/risk', [CarrierController::class, 'show'])
                 ->where('dot', '[0-9]+');
             Route::get('/carriers/{dot}/associations', [CarrierController::class, 'association']);
+
+            // FMCSA's field-level change history for this carrier, read out of
+            // the S3 export by byte range rather than from a table.
+            Route::get('/carriers/{dot}/contact-history', [CarrierController::class, 'contactHistory'])
+                ->where('dot', '[0-9]+');
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
 

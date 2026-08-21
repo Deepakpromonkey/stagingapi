@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Carrier;
 
+use App\Console\Commands\BuildCarrierChangeLogIndex;
 use App\Http\Controllers\Controller;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
@@ -19,6 +20,7 @@ use App\Models\CarrierShortlist;
 use App\Models\Connect\CarrierConnectRequestsModel;
 use App\Models\Customers\CustomersQuestionsModel;
 use App\Models\SearchHistory;
+use App\Services\Carrier\CarrierChangeLogService;
 use App\Support\CarrierBenchmarks;
 use App\Support\Fmcsa;
 use Carbon\Carbon;
@@ -4519,7 +4521,8 @@ SQL;
                 'LEGAL NAME',
                 'legal_name = ?',
                 [trim($carrier->legal_name)],
-                $dot
+                $dot,
+                trim($carrier->legal_name)
             );
         }
 
@@ -4531,7 +4534,8 @@ SQL;
                 'DBA NAME',
                 'dba_name = ?',
                 [trim($carrier->dba_name)],
-                $dot
+                $dot,
+                trim($carrier->dba_name)
             );
         }
 
@@ -4553,7 +4557,13 @@ SQL;
                     $carrier->phy_state,
                     $carrier->phy_zip,
                 ],
-                $dot
+                $dot,
+                implode(', ', [
+                    $carrier->phy_street,
+                    $carrier->phy_city,
+                    $carrier->phy_state,
+                    $carrier->phy_zip,
+                ])
             );
         }
 
@@ -4575,9 +4585,17 @@ SQL;
                     $carrier->mailing_state,
                     $carrier->mailing_zip,
                 ],
-                $dot
+                $dot,
+                implode(', ', [
+                    $carrier->mailing_street,
+                    $carrier->mailing_city,
+                    $carrier->mailing_state,
+                    $carrier->mailing_zip,
+                ])
             );
         }
+
+        $this->addFormerMatches($blocks, $bindings, $carrier, $dot);
 
         if (empty($blocks)) {
             return response()->json([
@@ -4600,6 +4618,47 @@ SQL;
             'success' => true,
             'count' => count($associations),
             'data' => $associations,
+        ]);
+    }
+
+    /**
+     * Contact history: every change FMCSA has recorded to how this carrier can
+     * be reached — addresses, phone and fax numbers, email, the people named as
+     * company representatives, and the names it trades under.
+     *
+     * Read from the change log export on S3 by byte range, so a carrier with a
+     * twenty year paper trail costs the same as one registered last week.
+     */
+    public function contactHistory(CarrierChangeLogService $changeLog, $dot)
+    {
+        if (! ctype_digit((string) $dot)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'A DOT number is required',
+            ], 422);
+        }
+
+        // Not an error: the export is indexed by a separate command, and a
+        // profile viewed before that has run should say so rather than break.
+        if (! $changeLog->isIndexed()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'dot_number' => (string) $dot,
+                    'indexed' => false,
+                    'summary' => [],
+                    'entries' => [],
+                    'contact_changes' => 0,
+                    'total_changes' => 0,
+                    'last_changed_at' => null,
+                    'truncated' => false,
+                ],
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $changeLog->contactHistory((string) $dot),
         ]);
     }
 
@@ -4627,6 +4686,77 @@ SQL;
         ', [$dot]);
     }
 
+    /**
+     * Match this carrier's *former* contact details against whoever uses them
+     * today, from the FMCSA change log export.
+     *
+     * Matching on current values alone only finds carriers who are still
+     * openly sharing a phone number or an address. The interesting case is the
+     * one that moved on: a carrier that changed its number last spring and the
+     * company still answering that number now. Those former values come out of
+     * the change log, which is read straight from S3 — nothing is imported.
+     *
+     * Silently contributes nothing when the change log has not been indexed on
+     * this machine, so associations keep working either way.
+     *
+     * @see CarrierChangeLogService
+     * @see BuildCarrierChangeLogIndex
+     */
+    private function addFormerMatches(&$blocks, &$bindings, $carrier, $dot)
+    {
+        $changeLog = app(CarrierChangeLogService::class);
+
+        if (! $changeLog->isIndexed()) {
+            return;
+        }
+
+        try {
+            $former = $changeLog->formerValues((string) $dot, [
+                'email_address' => $carrier->email_address ?? null,
+                'telephone' => $carrier->telephone ?? null,
+                'fax' => $carrier->fax ?? null,
+                'legal_name' => $carrier->legal_name ?? null,
+                'dba_name' => $carrier->dba_name ?? null,
+                'phy_street' => $carrier->phy_street ?? null,
+                'mailing_street' => $carrier->mailing_street ?? null,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Former-value associations unavailable', [
+                'dot' => $dot,
+                'message' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        $labels = [
+            'email_address' => 'FORMER EMAIL',
+            'telephone' => 'FORMER PHONE',
+            'fax' => 'FORMER FAX',
+            'legal_name' => 'FORMER LEGAL NAME',
+            'dba_name' => 'FORMER DBA NAME',
+            'phy_street' => 'FORMER PHYSICAL ADDRESS',
+            'mailing_street' => 'FORMER MAILING ADDRESS',
+        ];
+
+        foreach ($labels as $column => $label) {
+            foreach ($former[$column] ?? [] as $value) {
+                // One block per value rather than an IN list: the block is what
+                // carries `matched_value`, and knowing which former number or
+                // address produced the hit is the whole point of the finding.
+                $this->addMatch(
+                    $blocks,
+                    $bindings,
+                    $label,
+                    "{$column} = ?",
+                    [$value],
+                    $dot,
+                    $value
+                );
+            }
+        }
+    }
+
     private function addSimpleMatch(&$blocks, &$bindings, $label, $column, $value, $dot)
     {
         if (empty($value)) {
@@ -4639,15 +4769,25 @@ SQL;
             $label,
             "{$column} = ?",
             [$value],
-            $dot
+            $dot,
+            $value
         );
     }
 
-    private function addMatch(&$blocks, &$bindings, $label, $where, array $values, $dot)
+    /**
+     * One SELECT per identifier, UNION ALL'd together by the caller.
+     *
+     * `matched_value` is bound rather than interpolated and carries the value
+     * the block matched on, so the profile can say what two carriers share
+     * instead of only that they share something. It is a column on every block
+     * because a UNION insists on that, NULL where the caller has nothing to say.
+     */
+    private function addMatch(&$blocks, &$bindings, $label, $where, array $values, $dot, $matchedValue = null)
     {
         $blocks[] = "
         SELECT
             '{$label}' AS match_type,
+            ? AS matched_value,
             dot_number,
             legal_name,
             dba_name,
@@ -4705,6 +4845,8 @@ SQL;
         WHERE {$where}
           AND dot_number <> ?
     ";
+
+        $bindings[] = $matchedValue;
 
         foreach ($values as $value) {
             $bindings[] = $value;
