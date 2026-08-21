@@ -9,29 +9,33 @@ return new class extends Migration
 {
    public function up(): void
     {
-        Schema::table('dt_payments', function (Blueprint $table) {
-            // $table->dropIndex('dt_payments_broker_id_index'); 
-        });
+        if (Schema::hasTable('dt_payments')) {
+            Schema::table('dt_payments', function (Blueprint $table) {
+                // $table->dropIndex('dt_payments_broker_id_index'); 
+            });
 
-        DB::statement('ALTER TABLE dt_payments MODIFY broker_id CHAR(36) NOT NULL');
+            DB::statement('ALTER TABLE dt_payments MODIFY broker_id CHAR(36) NOT NULL');
 
-        Schema::table('dt_payments', function (Blueprint $table) {
-            $table->foreign('broker_id', 'dt_payments_broker_id_foreign_custom')
-                  ->references('uuid')->on('users')
-                  ->restrictOnDelete();
-        });
+            Schema::table('dt_payments', function (Blueprint $table) {
+                $table->foreign('broker_id', 'dt_payments_broker_id_foreign_custom')
+                      ->references('uuid')->on('users')
+                      ->restrictOnDelete();
+            });
+        }
     }
 
     public function down(): void
     {
-        Schema::table('dt_payments', function (Blueprint $table) {
-            $table->dropForeign('dt_payments_broker_id_foreign');
-        });
+        if (Schema::hasTable('dt_payments')) {
+            Schema::table('dt_payments', function (Blueprint $table) {
+                $table->dropForeign('dt_payments_broker_id_foreign');
+            });
 
-        DB::statement('ALTER TABLE dt_payments MODIFY broker_id VARCHAR(50) NOT NULL');
+            DB::statement('ALTER TABLE dt_payments MODIFY broker_id VARCHAR(50) NOT NULL');
 
-        Schema::table('dt_payments', function (Blueprint $table) {
-            $table->index('broker_id', 'dt_payments_broker_id_index');
-        });
+            Schema::table('dt_payments', function (Blueprint $table) {
+                $table->index('broker_id', 'dt_payments_broker_id_index');
+            });
+        }
     }
 };

@@ -12,7 +12,10 @@ class ShipmentStop extends Model
     protected $guarded = []; 
 
     protected $casts = [
-        'events' => 'array',  
+        'events' => 'array',
+        
+        'requires_otp' => 'boolean',
+        'otp_verified_at' => 'datetime',
     ];
 
     public function shipment()

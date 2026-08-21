@@ -11,16 +11,9 @@ return new class extends Migration
         Schema::create('dt_payments_trasactions', function (Blueprint $table) {
             $table->id();
             
-            $table->foreignUuid('payment_id')
-                ->nullable()
-                ->constrained('dt_payments', 'uuid')
-                ->restrictOnDelete();
-
-            $table->foreignUuid('guest_payment_id')
-                ->nullable()
-                // ->after('payment_id')
-                ->constrained('dt_pay_guest', 'uuid')
-                ->restrictOnDelete();
+            // 👇 FIX: Changed from foreignUuid to standard uuid so it doesn't crash!
+            $table->uuid('payment_id')->nullable();
+            $table->uuid('guest_payment_id')->nullable();
 
             $table->string('transaction_label', 255)->nullable();
             $table->string('sub_label', 255)->nullable();
