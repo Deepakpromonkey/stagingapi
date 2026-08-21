@@ -58,6 +58,23 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Former physical address matching
+    |--------------------------------------------------------------------------
+    |
+    | Company associations match this carrier's former physical street against
+    | other carriers' current one. It is off by default because idx_phy on
+    | company_census_file leads with phy_state, and a former street arrives
+    | without the state and city that would complete the key — so the match is
+    | a full scan of 4.48M rows. Turn it on once idx_phy_street exists; the
+    | statement is in database/sql/carrier_indexes.sql. Former mailing streets
+    | are matched either way, because idx_mail already leads with the street.
+    |
+    */
+
+    'former_physical_address_matching' => env('CARRIER_FORMER_PHY_ADDRESS_MATCHING', false),
+
     'change_log' => [
 
         'disk' => env('CARRIER_CHANGE_LOG_DISK', 's3'),
