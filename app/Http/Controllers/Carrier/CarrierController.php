@@ -34,6 +34,30 @@ use Illuminate\Support\Facades\Log;
 
 class CarrierController extends Controller
 {
+    /**
+     * Rows one identifier may contribute, and distinct carriers the whole
+     * endpoint may return. A carrier on a shared mail drop or a Gmail address
+     * otherwise returns thousands, and the profile shows five at a time.
+     */
+    private const ASSOCIATION_MAX_MATCHES = 200;
+
+    /**
+     * Former identifiers worth matching on, as column => [label, value shown].
+     *
+     * Every column is the leading column of an index on company_census_file,
+     * so each block stays a lookup. phy_street is the exception and is gated —
+     * see addFormerMatches().
+     */
+    private const FORMER_MATCH_COLUMNS = [
+        'email_address' => ['FORMER EMAIL', 'email_address'],
+        'telephone' => ['FORMER PHONE', 'telephone'],
+        'fax' => ['FORMER FAX', 'fax'],
+        'legal_name' => ['FORMER LEGAL NAME', 'legal_name'],
+        'dba_name' => ['FORMER DBA NAME', 'dba_name'],
+        'mailing_street' => ['FORMER MAILING ADDRESS', "CONCAT_WS(', ', mailing_street, mailing_city, mailing_state, mailing_zip)"],
+        'phy_street' => ['FORMER PHYSICAL ADDRESS', "CONCAT_WS(', ', phy_street, phy_city, phy_state, phy_zip)"],
+    ];
+
     private function getCompanyAssociations(Carrier $carrier)
     {
         $matches = collect();
@@ -4463,12 +4487,19 @@ SQL;
         ]);
     }
 
+    /**
+     * Carriers sharing contact details, a name or an address with this one.
+     *
+     * Deliberately two queries rather than one. The match itself only needs to
+     * know which DOT numbers share what, so the UNION selects three columns and
+     * stops at ASSOCIATION_MAX_MATCHES per identifier; the per-carrier detail —
+     * docket number, DUNS, fleet size, each its own correlated subquery — is
+     * then looked up once per distinct carrier instead of once per match row.
+     * A carrier on a shared mail drop used to pay for those subqueries
+     * thousands of times over, and sort the lot in a filesort afterwards.
+     */
     public function association($dot)
     {
-        DB::connection('external_db')->enableQueryLog();
-
-        $start = microtime(true);
-        Log::info('Starting riskFactors for DOT: '.$start);
         $carrier = $this->getCarrier($dot);
 
         if (! $carrier) {
@@ -4479,67 +4510,48 @@ SQL;
             ]);
         }
 
+        return response()->json(Cache::remember(
+            'carrier:associations:'.$dot,
+            (int) config('carriers.profile_cache_ttl', 900),
+            fn () => $this->buildAssociations($carrier, $dot)
+        ));
+    }
+
+    private function buildAssociations($carrier, $dot): array
+    {
         $blocks = [];
         $bindings = [];
 
-        // Email
-        $this->addSimpleMatch(
-            $blocks,
-            $bindings,
-            'EMAIL',
-            'email_address',
-            $carrier->email_address,
-            $dot
-        );
+        $this->addSimpleMatch($blocks, $bindings, 'EMAIL', 'email_address', $carrier->email_address, $dot);
+        $this->addSimpleMatch($blocks, $bindings, 'PHONE', 'telephone', $carrier->telephone, $dot);
+        $this->addSimpleMatch($blocks, $bindings, 'FAX', 'fax', $carrier->fax, $dot);
 
-        // Phone
-        $this->addSimpleMatch(
-            $blocks,
-            $bindings,
-            'PHONE',
-            'telephone',
-            $carrier->telephone,
-            $dot
-        );
-
-        // Fax
-        $this->addSimpleMatch(
-            $blocks,
-            $bindings,
-            'FAX',
-            'fax',
-            $carrier->fax,
-            $dot
-        );
-
-        // Legal Name
-        // Legal Name
         if (! empty($carrier->legal_name)) {
             $this->addMatch(
                 $blocks,
                 $bindings,
                 'LEGAL NAME',
+                'legal_name',
                 'legal_name = ?',
                 [trim($carrier->legal_name)],
-                $dot,
-                trim($carrier->legal_name)
+                $dot
             );
         }
 
-        // DBA Name
         if (! empty($carrier->dba_name)) {
             $this->addMatch(
                 $blocks,
                 $bindings,
                 'DBA NAME',
+                'dba_name',
                 'dba_name = ?',
                 [trim($carrier->dba_name)],
-                $dot,
-                trim($carrier->dba_name)
+                $dot
             );
         }
 
-        // Physical Address
+        // Both address matches lead with the columns idx_phy and idx_mail lead
+        // with, so they stay index lookups rather than scans of the census.
         if (
             ! empty($carrier->phy_street) &&
             ! empty($carrier->phy_city) &&
@@ -4550,6 +4562,7 @@ SQL;
                 $blocks,
                 $bindings,
                 'PHYSICAL ADDRESS',
+                "CONCAT_WS(', ', phy_street, phy_city, phy_state, phy_zip)",
                 'phy_street=? AND phy_city=? AND phy_state=? AND phy_zip=?',
                 [
                     $carrier->phy_street,
@@ -4557,17 +4570,10 @@ SQL;
                     $carrier->phy_state,
                     $carrier->phy_zip,
                 ],
-                $dot,
-                implode(', ', [
-                    $carrier->phy_street,
-                    $carrier->phy_city,
-                    $carrier->phy_state,
-                    $carrier->phy_zip,
-                ])
+                $dot
             );
         }
 
-        // Mailing Address
         if (
             ! empty($carrier->mailing_street) &&
             ! empty($carrier->mailing_city) &&
@@ -4578,6 +4584,7 @@ SQL;
                 $blocks,
                 $bindings,
                 'MAILING ADDRESS',
+                "CONCAT_WS(', ', mailing_street, mailing_city, mailing_state, mailing_zip)",
                 'mailing_street=? AND mailing_city=? AND mailing_state=? AND mailing_zip=?',
                 [
                     $carrier->mailing_street,
@@ -4585,40 +4592,138 @@ SQL;
                     $carrier->mailing_state,
                     $carrier->mailing_zip,
                 ],
-                $dot,
-                implode(', ', [
-                    $carrier->mailing_street,
-                    $carrier->mailing_city,
-                    $carrier->mailing_state,
-                    $carrier->mailing_zip,
-                ])
+                $dot
             );
         }
 
         $this->addFormerMatches($blocks, $bindings, $carrier, $dot);
 
         if (empty($blocks)) {
-            return response()->json([
+            return [
                 'success' => true,
                 'count' => 0,
                 'data' => [],
+            ];
+        }
+
+        // Parenthesised so each part keeps its own LIMIT.
+        $matches = DB::connection('external_db')->select(
+            '('.implode(') UNION ALL (', $blocks).')',
+            $bindings
+        );
+
+        $rows = $this->enrichAssociations($matches);
+
+        return [
+            'success' => true,
+            'count' => count($rows),
+            'truncated' => count($matches) > count($rows),
+            'data' => $rows,
+        ];
+    }
+
+    /**
+     * Put the per-carrier detail back on the match rows, one lookup per
+     * carrier however many identifiers they turned up under.
+     */
+    private function enrichAssociations(array $matches): array
+    {
+        if (empty($matches)) {
+            return [];
+        }
+
+        $dots = array_slice(
+            array_values(array_unique(array_map(fn ($match) => $match->dot_number, $matches))),
+            0,
+            self::ASSOCIATION_MAX_MATCHES
+        );
+
+        $placeholders = implode(',', array_fill(0, count($dots), '?'));
+
+        $details = DB::connection('external_db')->select("
+            SELECT
+                dot_number,
+                legal_name,
+                dba_name,
+                telephone,
+                fax,
+                email_address,
+                mcs150_mileage AS annual_mileage,
+                (
+                    SELECT docket_number
+                    FROM carrier_authorities ca
+                    WHERE ca.dot_number = carriers.dot_number
+                    LIMIT 1
+                ) AS mc_number,
+                (
+                    SELECT dun_bradstreet_no
+                    FROM carrier_details cd
+                    WHERE cd.dot_number = carriers.dot_number
+                    LIMIT 1
+                ) AS duns_number,
+                (
+                    SELECT CASE fleetsize
+                        WHEN 'A' THEN '1'
+                        WHEN 'B' THEN '2-3'
+                        WHEN 'C' THEN '4-6'
+                        WHEN 'D' THEN '7-8'
+                        WHEN 'E' THEN '9-11'
+                        WHEN 'F' THEN '12-14'
+                        WHEN 'G' THEN '15-17'
+                        WHEN 'H' THEN '18-19'
+                        WHEN 'I' THEN '20-23'
+                        WHEN 'J' THEN '24-28'
+                        WHEN 'K' THEN '29-32'
+                        WHEN 'L' THEN '33-38'
+                        WHEN 'M' THEN '39-44'
+                        WHEN 'N' THEN '45-55'
+                        WHEN 'O' THEN '56-75'
+                        WHEN 'P' THEN '76-100'
+                        WHEN 'Q' THEN '101-200'
+                        WHEN 'R' THEN '201-300'
+                        WHEN 'S' THEN '301-400'
+                        WHEN 'T' THEN '401-550'
+                        WHEN 'U' THEN '551-999'
+                        WHEN 'V' THEN '1000-2000'
+                        WHEN 'W' THEN '2001-3000'
+                        WHEN 'X' THEN '3001-4000'
+                        WHEN 'Y' THEN '4001-5000'
+                        WHEN 'Z' THEN 'OVER 5000'
+                        ELSE NULL
+                    END
+                    FROM carrier_details cd
+                    WHERE cd.dot_number = carriers.dot_number
+                    LIMIT 1
+                ) AS fleet_size
+            FROM carriers
+            WHERE dot_number IN ({$placeholders})
+        ", $dots);
+
+        $byDot = [];
+
+        foreach ($details as $row) {
+            $byDot[$row->dot_number] = $row;
+        }
+
+        $rows = [];
+
+        foreach ($matches as $match) {
+            if (! isset($byDot[$match->dot_number])) {
+                continue;
+            }
+
+            $rows[] = (object) array_merge((array) $byDot[$match->dot_number], [
+                'match_type' => $match->match_type,
+                'matched_value' => $match->matched_value,
             ]);
         }
 
-        $sql = implode(' UNION ALL ', $blocks).' ORDER BY legal_name, dot_number';
+        usort(
+            $rows,
+            fn ($a, $b) => [$a->legal_name, $a->dot_number] <=> [$b->legal_name, $b->dot_number]
+        );
 
-        $associations = DB::connection('external_db')->select($sql, $bindings);
-        $time = microtime(true) - $start;
-
-        Log::info('Starting riskFactors for DOT: '.$time);
-
-        Log::info(DB::connection('external_db')->getQueryLog());
-
-        return response()->json([
-            'success' => true,
-            'count' => count($associations),
-            'data' => $associations,
-        ]);
+        return $rows;
     }
 
     /**
@@ -4696,6 +4801,10 @@ SQL;
      * company still answering that number now. Those former values come out of
      * the change log, which is read straight from S3 — nothing is imported.
      *
+     * One block per identifier, not per value: every column here is the leading
+     * column of an index on company_census_file, and an IN list keeps it that
+     * way while `matched_value` still names the detail that produced the hit.
+     *
      * Silently contributes nothing when the change log has not been indexed on
      * this machine, so associations keep working either way.
      *
@@ -4729,31 +4838,35 @@ SQL;
             return;
         }
 
-        $labels = [
-            'email_address' => 'FORMER EMAIL',
-            'telephone' => 'FORMER PHONE',
-            'fax' => 'FORMER FAX',
-            'legal_name' => 'FORMER LEGAL NAME',
-            'dba_name' => 'FORMER DBA NAME',
-            'phy_street' => 'FORMER PHYSICAL ADDRESS',
-            'mailing_street' => 'FORMER MAILING ADDRESS',
-        ];
-
-        foreach ($labels as $column => $label) {
-            foreach ($former[$column] ?? [] as $value) {
-                // One block per value rather than an IN list: the block is what
-                // carries `matched_value`, and knowing which former number or
-                // address produced the hit is the whole point of the finding.
-                $this->addMatch(
-                    $blocks,
-                    $bindings,
-                    $label,
-                    "{$column} = ?",
-                    [$value],
-                    $dot,
-                    $value
-                );
+        foreach (self::FORMER_MATCH_COLUMNS as $column => [$label, $valueExpression]) {
+            /*
+            | phy_street is the one former value with no index to stand on:
+            | idx_phy leads with phy_state, and a former street arrives without
+            | the city and state that would complete it. Matching it alone is a
+            | full scan of the census per lookup, so it stays off until
+            | idx_phy_street exists — see database/sql/carrier_indexes.sql.
+            */
+            if ($column === 'phy_street' && ! config('carriers.former_physical_address_matching', false)) {
+                continue;
             }
+
+            $values = $former[$column] ?? [];
+
+            if (empty($values)) {
+                continue;
+            }
+
+            $placeholders = implode(',', array_fill(0, count($values), '?'));
+
+            $this->addMatch(
+                $blocks,
+                $bindings,
+                $label,
+                $valueExpression,
+                "{$column} IN ({$placeholders})",
+                $values,
+                $dot
+            );
         }
     }
 
@@ -4767,86 +4880,34 @@ SQL;
             $blocks,
             $bindings,
             $label,
+            $column,
             "{$column} = ?",
             [$value],
-            $dot,
-            $value
+            $dot
         );
     }
 
     /**
      * One SELECT per identifier, UNION ALL'd together by the caller.
      *
-     * `matched_value` is bound rather than interpolated and carries the value
-     * the block matched on, so the profile can say what two carriers share
-     * instead of only that they share something. It is a column on every block
-     * because a UNION insists on that, NULL where the caller has nothing to say.
+     * Three columns only — the detail is filled in afterwards, per carrier
+     * rather than per match. `$valueExpression` is a column or a CONCAT_WS of
+     * columns, never anything the caller took from a request, and gives the
+     * profile the value the two carriers actually share instead of only the
+     * fact that they share something.
      */
-    private function addMatch(&$blocks, &$bindings, $label, $where, array $values, $dot, $matchedValue = null)
+    private function addMatch(&$blocks, &$bindings, $label, $valueExpression, $where, array $values, $dot)
     {
         $blocks[] = "
         SELECT
             '{$label}' AS match_type,
-            ? AS matched_value,
-            dot_number,
-            legal_name,
-            dba_name,
-            telephone,
-            fax,
-            email_address,
-            mcs150_mileage AS annual_mileage,
-            (
-                SELECT docket_number
-                FROM carrier_authorities ca
-                WHERE ca.dot_number = carriers.dot_number
-                LIMIT 1
-            ) AS mc_number,
-            (
-                SELECT dun_bradstreet_no
-                FROM carrier_details cd
-                WHERE cd.dot_number = carriers.dot_number
-                LIMIT 1
-            ) AS duns_number,
-           (
-    SELECT CASE fleetsize
-        WHEN 'A' THEN '1'
-        WHEN 'B' THEN '2-3'
-        WHEN 'C' THEN '4-6'
-        WHEN 'D' THEN '7-8'
-        WHEN 'E' THEN '9-11'
-        WHEN 'F' THEN '12-14'
-        WHEN 'G' THEN '15-17'
-        WHEN 'H' THEN '18-19'
-        WHEN 'I' THEN '20-23'
-        WHEN 'J' THEN '24-28'
-        WHEN 'K' THEN '29-32'
-        WHEN 'L' THEN '33-38'
-        WHEN 'M' THEN '39-44'
-        WHEN 'N' THEN '45-55'
-        WHEN 'O' THEN '56-75'
-        WHEN 'P' THEN '76-100'
-        WHEN 'Q' THEN '101-200'
-        WHEN 'R' THEN '201-300'
-        WHEN 'S' THEN '301-400'
-        WHEN 'T' THEN '401-550'
-        WHEN 'U' THEN '551-999'
-        WHEN 'V' THEN '1000-2000'
-        WHEN 'W' THEN '2001-3000'
-        WHEN 'X' THEN '3001-4000'
-        WHEN 'Y' THEN '4001-5000'
-        WHEN 'Z' THEN 'OVER 5000'
-        ELSE NULL
-    END
-    FROM carrier_details cd
-    WHERE cd.dot_number = carriers.dot_number
-    LIMIT 1
-) AS fleet_size
+            {$valueExpression} AS matched_value,
+            dot_number
         FROM carriers
         WHERE {$where}
           AND dot_number <> ?
-    ";
-
-        $bindings[] = $matchedValue;
+        LIMIT ".self::ASSOCIATION_MAX_MATCHES.'
+    ';
 
         foreach ($values as $value) {
             $bindings[] = $value;

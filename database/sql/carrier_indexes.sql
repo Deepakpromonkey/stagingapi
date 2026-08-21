@@ -25,6 +25,11 @@ ALTER TABLE company_census_file ADD INDEX        idx_phy   (phy_state, phy_city,
 -- and the endpoint takes seven minutes.
 ALTER TABLE company_census_file ADD INDEX        idx_fax   (fax),                        ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE company_census_file ADD INDEX        idx_mail  (carrier_mailing_street(64), carrier_mailing_city, carrier_mailing_state, carrier_mailing_zip), ALGORITHM=INPLACE, LOCK=NONE;
+-- Company associations also match a carrier's FORMER physical street, which
+-- arrives from the change log without the state and city idx_phy leads with.
+-- Until this exists that match is another full scan, so the app leaves it off:
+-- set CARRIER_FORMER_PHY_ADDRESS_MATCHING=true once this has been built.
+ALTER TABLE company_census_file ADD INDEX        idx_phy_street (phy_street(64)),  ALGORITHM=INPLACE, LOCK=NONE;
 
 ALTER TABLE sms_input_motor_carrier_census_information ADD INDEX idx_dot (dot_number), ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE sms_ab_passproperty  ADD UNIQUE INDEX uk_dot (dot_number),                 ALGORITHM=INPLACE, LOCK=NONE;
