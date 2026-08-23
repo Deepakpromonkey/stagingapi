@@ -304,7 +304,14 @@ class ShipmentService
                     $stop['custom_events'] ?? $stop['customEvents'] ?? null
                 );
 
-             $shipment->stops()->create([
+                // 👇 PRODUCTION OTP LOGIC 👇
+                // Safely check if frontend sent requires_otp as true
+                $requiresOtp = filter_var($stop['requires_otp'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                
+                // If true, generate a secure 6-digit code. If false, leave it null.
+                $otpCode = $requiresOtp ? (string) random_int(100000, 999999) : null;
+
+                $shipment->stops()->create([
                     'stop_number' => $index + 1,
                     'stop_type' => $stop['stop_type'] ?? 'Pickup',
                     'stop_name' => $stop['stop_name'] ?? null,
@@ -343,8 +350,10 @@ class ShipmentService
                     'comment_to_driver' => $this->blankToNull($stop['comment_to_driver'] ?? null),
                     'alert_emails' => $this->normaliseEmailList($stop['alert_emails'] ?? null),
                     
-                    // Events
+                    // Events & OTP
                     'events' => !empty($processedEvents) ? $processedEvents : null,
+                    'requires_otp' => $requiresOtp,
+                    'otp_code' => $otpCode,
                 ]);
             }
 
