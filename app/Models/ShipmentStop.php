@@ -15,6 +15,9 @@ class ShipmentStop extends Model
         'events' => 'array',
         // Stored as a JSON array so a long alert list cannot overflow the column.
         'alert_emails' => 'array',
+
+        'requires_otp' => 'boolean',
+        'otp_verified_at' => 'datetime',
     ];
 
     public function shipment()
