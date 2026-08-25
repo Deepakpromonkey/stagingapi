@@ -6,6 +6,7 @@ use App\Jobs\DecodeVinPatterns;
 use App\Models\VinPattern;
 use App\Support\Vin;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -190,6 +191,7 @@ class VinDecoderService
          */
         $upserts = [];
         $undecodable = [];
+        $exhausted = [];
         $now = now();
 
         foreach ($results as $index => $row) {
@@ -210,21 +212,36 @@ class VinDecoderService
             $year = $this->cleanInt($row['ModelYear'] ?? null);
             $vehicleType = $this->clean($row['VehicleType'] ?? null);
             $bodyClass = $this->clean($row['BodyClass'] ?? null);
+            $make = $this->clean($row['Make'] ?? null);
+            $model = $this->clean($row['Model'] ?? null);
 
-            // A row with no model year told us nothing usable. Count it as a
-            // failed attempt so it retires after max_attempts instead of
-            // sitting pending forever.
-            if (! $year) {
-                $undecodable[] = $pattern;
+            /*
+             * vPIC answered and had nothing at all. That is a definitive "no
+             * data", not a transient failure, so retire it now rather than
+             * spending two more full passes rediscovering the same silence.
+             *
+             * Only a request we could not complete deserves a retry — that is
+             * handled separately, below, via $unanswered.
+             */
+            if (! $year && ! $make && ! $model && ! $vehicleType && ! $bodyClass) {
+                $exhausted[] = $pattern;
 
                 continue;
             }
 
+            /*
+             * A partial answer is still worth keeping. vPIC knows the make and
+             * body class of many small trailers without knowing their model
+             * year — 'LARK UNITED MANUFACTURING', VehicleType TRAILER, no year
+             * — and that alone fills the Make and Model columns and classifies
+             * the unit as towed equipment. model_year stays null, so the row
+             * contributes nothing to the age averages, which is correct.
+             */
             $upserts[] = [
                 'pattern' => $pattern,
                 'model_year' => $year,
-                'make' => $this->clean($row['Make'] ?? null),
-                'model' => $this->clean($row['Model'] ?? null),
+                'make' => $make,
+                'model' => $model,
                 'vehicle_type' => $vehicleType,
                 'body_class' => $bodyClass,
                 'gvwr' => $this->clean($row['GVWR'] ?? null),
@@ -236,6 +253,16 @@ class VinDecoderService
             ];
 
             $decoded++;
+        }
+
+        if ($exhausted) {
+            VinPattern::query()
+                ->whereIn('pattern', array_map('strval', $exhausted))
+                ->update([
+                    'status' => 'failed',
+                    'attempts' => DB::raw('attempts + 1'),
+                    'updated_at' => $now,
+                ]);
         }
 
         if ($upserts) {

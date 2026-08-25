@@ -179,7 +179,37 @@ stored-procedure decode layer behind it; porting that to MySQL is a project on
 its own, and the pattern cache already shrinks the problem by orders of
 magnitude. Not worth it.
 
-## 7. Caveats
+## 7. Coverage, measured
+
+From the first full production run — 4,576,764 VIN values across both unit
+columns, 243,979 distinct patterns:
+
+| | |
+|---|---|
+| Power units (`vin`) | ~90% decode |
+| Trailers (`vin2`) | far lower |
+| Overall | ~71% |
+
+The gap is NHTSA's, not ours. vPIC has no model-year data for most small
+trailer manufacturers — they do not use the standard position-10 model-year
+encoding, so a VIN like `1W9TS392*5` comes back completely empty, and
+`57133000*0` returns `LARK UNITED MANUFACTURING`, VehicleType `TRAILER`, and no
+year at all.
+
+Two consequences worth designing around, both handled:
+
+* **Partial answers are kept.** A make and body class with no model year still
+  fills the Make and Model columns and classifies the unit as towed equipment.
+  `model_year` stays null so the row contributes nothing to the age averages.
+* **A clean "no data" retires immediately.** vPIC answering with nothing is
+  definitive, not transient — retrying it twice more only rediscovers the same
+  silence. Only a request that could not be completed is retried.
+
+Expect `AVG TRAILER AGE` to rest on fewer VINs than `AVG POWER AGE`. That is
+why `carrier_fleet_stats` carries `vins_decoded` against `vins_total` and the
+card prints the count it is based on.
+
+## 8. Caveats
 
 * Power unit vs. trailer comes from vPIC's `VehicleType`/`BodyClass`, not from
   the feed's `unit_type_desc` — the feed writes `TRUCK TRACTOR`, `TRACTOR` and
