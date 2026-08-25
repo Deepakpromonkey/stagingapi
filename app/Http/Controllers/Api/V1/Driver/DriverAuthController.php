@@ -6,9 +6,9 @@ use App\Http\Controllers\Api\V1\BaseController;
 use App\Models\Driver;
 use App\Models\DriverLoginOtp;
 use App\Models\Shipment;
+use App\Services\SmsSender;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -22,7 +22,7 @@ use Illuminate\Support\Str;
  */
 class DriverAuthController extends BaseController
 {
-    private const CLICKSEND_URL = 'https://rest.clicksend.com/v3/sms/send';
+    public function __construct(private readonly SmsSender $sms) {}
 
     /**
      * Sends a sign-in code.
@@ -193,17 +193,10 @@ class DriverAuthController extends BaseController
         return $this->success(null, 'Signed out.');
     }
 
-    /**
-     * Mirrors CarrierConnectController::sendSms — same provider, same policy on
-     * a missing configuration.
-     */
     private function sendSms(string $to, string $body): bool
     {
-        $username = config('services.clicksend.username');
-        $key = config('services.clicksend.key');
-
-        if (! $username || ! $key) {
-            Log::error('ClickSend is not configured; cannot send the driver sign-in code.');
+        if (! $this->sms->isConfigured()) {
+            Log::error('Telnyx is not configured; cannot send the driver sign-in code.');
 
             // Locally the code has just been written to the log, so sign-in is
             // still testable. Anywhere else, reporting success for a message
@@ -211,23 +204,6 @@ class DriverAuthController extends BaseController
             return app()->environment('local');
         }
 
-        try {
-            $response = Http::withBasicAuth($username, $key)
-                ->acceptJson()
-                ->asJson()
-                ->post(self::CLICKSEND_URL, [
-                    'messages' => [[
-                        'to' => $to,
-                        'body' => $body,
-                        'source' => 'php',
-                    ]],
-                ]);
-
-            return ! $response->failed() && $response->json('response_code') === 'SUCCESS';
-        } catch (\Throwable $e) {
-            Log::error('Driver sign-in SMS failed', ['error' => $e->getMessage()]);
-
-            return false;
-        }
+        return $this->sms->send($to, $body, 'driver sign-in code');
     }
 }
