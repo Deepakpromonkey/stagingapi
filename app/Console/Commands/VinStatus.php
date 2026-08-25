@@ -44,8 +44,26 @@ class VinStatus extends Command
     protected function render(): void
     {
         $queue = config('vin.queue', 'vin');
+        $connection = config('vin.connection', 'database');
+        $driver = config("queue.connections.{$connection}.driver");
+        $table = config("queue.connections.{$connection}.table", 'jobs');
         $batchSize = max(1, (int) config('vin.batch_size', 50));
         $perMinute = max(1, (int) config('vin.batches_per_minute', 6));
+
+        /*
+         * The failure that looks like every other failure. On the sync driver
+         * a dispatched job runs inline and never reaches the jobs table, so a
+         * worker sits idle forever while decoding happens on the request path.
+         */
+        if ($driver === 'sync') {
+            $this->newLine();
+            $this->components->error(
+                "vin.connection resolves to '{$connection}', which is the sync driver. "
+                .'Jobs run inline and never reach a worker — set VIN_QUEUE_CONNECTION=database.'
+            );
+
+            return;
+        }
 
         $counts = VinPattern::query()
             ->selectRaw('status, COUNT(*) AS total')
@@ -57,9 +75,9 @@ class VinStatus extends Command
         $failed = (int) ($counts['failed'] ?? 0);
         $total = $pending + $ok + $failed;
 
-        $queued = DB::table('jobs')->where('queue', $queue)->count();
-        $ready = DB::table('jobs')->where('queue', $queue)->where('available_at', '<=', time())->count();
-        $nextAt = DB::table('jobs')->where('queue', $queue)->min('available_at');
+        $queued = DB::table($table)->where('queue', $queue)->count();
+        $ready = DB::table($table)->where('queue', $queue)->where('available_at', '<=', time())->count();
+        $nextAt = DB::table($table)->where('queue', $queue)->min('available_at');
         $failedJobs = DB::table('failed_jobs')->where('queue', $queue)->count();
 
         $this->newLine();
@@ -116,7 +134,7 @@ class VinStatus extends Command
         }
 
         if ($queued > 0) {
-            $this->components->info("A worker must be running: php artisan queue:work --queue={$queue}");
+            $this->components->info("A worker must be running: php artisan queue:work {$connection} --queue={$queue}");
         }
     }
 }

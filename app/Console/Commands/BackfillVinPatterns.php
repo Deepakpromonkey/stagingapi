@@ -128,7 +128,11 @@ class BackfillVinPatterns extends Command
             );
 
             $this->components->info("At the configured pace that is about {$minutes} minutes of decoding.");
-            $this->components->warn('A worker must be running: php artisan queue:work --queue='.config('vin.queue', 'vin'));
+            $this->components->warn(sprintf(
+                'A worker must be running: php artisan queue:work %s --queue=%s',
+                config('vin.connection', 'database'),
+                config('vin.queue', 'vin'),
+            ));
 
             /*
              * Batches carry a delay so they reach NHTSA at the configured
@@ -136,9 +140,10 @@ class BackfillVinPatterns extends Command
              * turn. Say when the first one is due so that is not mistaken for
              * a hang — and point at vin:status for the running picture.
              */
-            $nextAt = DB::table('jobs')
-                ->where('queue', config('vin.queue', 'vin'))
-                ->min('available_at');
+            $nextAt = DB::table(config(
+                'queue.connections.'.config('vin.connection', 'database').'.table',
+                'jobs'
+            ))->where('queue', config('vin.queue', 'vin'))->min('available_at');
 
             if ($nextAt) {
                 $wait = max(0, (int) $nextAt - time());
