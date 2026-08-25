@@ -4639,11 +4639,7 @@ SQL;
             return [];
         }
 
-        $dots = array_slice(
-            array_values(array_unique(array_map(fn ($match) => $match->dot_number, $matches))),
-            0,
-            self::ASSOCIATION_MAX_MATCHES
-        );
+        $dots = $this->pickAssociationDots($matches);
 
         $placeholders = implode(',', array_fill(0, count($dots), '?'));
 
@@ -4655,6 +4651,8 @@ SQL;
                 telephone,
                 fax,
                 email_address,
+                CONCAT_WS(', ', phy_street, phy_city, phy_state, phy_zip) AS physical_address,
+                CONCAT_WS(', ', mailing_street, mailing_city, mailing_state, mailing_zip) AS mailing_address,
                 mcs150_mileage AS annual_mileage,
                 (
                     SELECT docket_number
@@ -4731,6 +4729,54 @@ SQL;
         );
 
         return $rows;
+    }
+
+    /**
+     * Which carriers make the ASSOCIATION_MAX_MATCHES cut.
+     *
+     * Taking them in match order gave the whole allowance to whichever
+     * identifier happened to match first: one shared name, or one shared mail
+     * drop, fills all 200 slots on its own and the email, phone and address
+     * matches queued behind it never reach the profile at all - which is why a
+     * carrier could show nothing but name matches. Draw one carrier per match
+     * type in turn instead, so every identifier is represented before any one
+     * of them takes a second helping.
+     */
+    private function pickAssociationDots(array $matches): array
+    {
+        $queues = [];
+        $seen = [];
+
+        foreach ($matches as $match) {
+            // First type to turn a carrier up owns it - the carrier's other
+            // match rows ride along once its DOT number is in.
+            if (isset($seen[$match->dot_number])) {
+                continue;
+            }
+
+            $seen[$match->dot_number] = true;
+            $queues[$match->match_type][] = $match->dot_number;
+        }
+
+        $picked = [];
+
+        while (count($picked) < self::ASSOCIATION_MAX_MATCHES && ! empty($queues)) {
+            foreach ($queues as $type => $queue) {
+                $picked[] = array_shift($queue);
+
+                if (empty($queue)) {
+                    unset($queues[$type]);
+                } else {
+                    $queues[$type] = $queue;
+                }
+
+                if (count($picked) >= self::ASSOCIATION_MAX_MATCHES) {
+                    break;
+                }
+            }
+        }
+
+        return $picked;
     }
 
     /**
