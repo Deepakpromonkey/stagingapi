@@ -129,6 +129,26 @@ class BackfillVinPatterns extends Command
 
             $this->components->info("At the configured pace that is about {$minutes} minutes of decoding.");
             $this->components->warn('A worker must be running: php artisan queue:work --queue='.config('vin.queue', 'vin'));
+
+            /*
+             * Batches carry a delay so they reach NHTSA at the configured
+             * pace, which means queue:work can look idle while jobs wait their
+             * turn. Say when the first one is due so that is not mistaken for
+             * a hang — and point at vin:status for the running picture.
+             */
+            $nextAt = DB::table('jobs')
+                ->where('queue', config('vin.queue', 'vin'))
+                ->min('available_at');
+
+            if ($nextAt) {
+                $wait = max(0, (int) $nextAt - time());
+
+                $this->components->info($wait > 0
+                    ? "First batch runs in {$wait}s — until then the worker is idle by design."
+                    : 'First batch is runnable now.');
+            }
+
+            $this->components->info('Watch it with: php artisan vin:status --watch');
         }
 
         return self::SUCCESS;
@@ -146,6 +166,19 @@ class BackfillVinPatterns extends Command
         $batchSize = max(1, (int) config('vin.batch_size', 50));
         $spacing = (int) (60 / max(1, (int) config('vin.batches_per_minute', 6)));
 
+        /*
+         * Spacing counts from the batches already waiting, so a second pass
+         * does not schedule its work on top of the first pass's.
+         *
+         * Counted *before* the insert below. Counting after would include the
+         * batches being scheduled right here, and each pass would push itself
+         * out by its own size — on a full backfill that roughly doubles the
+         * wall-clock time for no reason.
+         */
+        $offset = (int) ceil(
+            VinPattern::query()->where('status', 'pending')->count() / $batchSize
+        );
+
         foreach (array_chunk($patterns, 1000) as $slice) {
             VinPattern::query()->insertOrIgnore(array_map(fn ($pattern) => [
                 'pattern' => $pattern,
@@ -155,14 +188,6 @@ class BackfillVinPatterns extends Command
                 'updated_at' => $now,
             ], $slice));
         }
-
-        /*
-         * Spacing counts from the batches already waiting, not from zero, so a
-         * second run does not schedule its work on top of the first run's.
-         */
-        $offset = (int) ceil(
-            VinPattern::query()->where('status', 'pending')->count() / $batchSize
-        );
 
         foreach (array_chunk($patterns, $batchSize) as $index => $chunk) {
             DecodeVinPatterns::dispatch($chunk)

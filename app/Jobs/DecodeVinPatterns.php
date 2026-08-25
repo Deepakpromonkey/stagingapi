@@ -19,7 +19,16 @@ class DecodeVinPatterns implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
-    public int $tries = 3;
+    /*
+     * Deliberately high. WithoutOverlapping releases the job back to the queue
+     * when another worker holds the lock, and a release counts as an attempt —
+     * with tries = 3 a second worker would burn a batch's attempts on lock
+     * contention alone and fail it without ever calling NHTSA. Real failures
+     * are bounded by maxExceptions instead.
+     */
+    public int $tries = 25;
+
+    public int $maxExceptions = 3;
 
     public int $timeout = 120;
 
