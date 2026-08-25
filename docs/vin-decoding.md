@@ -67,7 +67,7 @@ yet is simply a null the frontend renders as a dash.
 php artisan vin:backfill --count
 
 # 2. A worker has to be draining the vin queue for anything to decode.
-php artisan queue:work --queue=vin
+php artisan queue:work database --queue=vin
 
 # 3. The one-time sweep. Resumable — an interrupted run costs only the scan.
 #    NOTE: --count queues nothing. This is the command that fills the queue;
@@ -81,6 +81,28 @@ php artisan carrier:refresh-fleet-stats --active
 After that the scheduler in `routes/console.php` keeps both current, and a
 profile view queues a refresh for any carrier whose figures are missing or past
 `vin.fleet_stats_ttl`.
+
+### The queue connection is pinned, on purpose
+
+`QUEUE_CONNECTION` is `sync` in this application. On `sync` a dispatched job
+runs **inline and immediately**, and its delay is ignored — which would put
+every vPIC call and every fleet-age aggregation back on the request path, and
+would mean `queue:work` sits idle forever because nothing ever reaches the jobs
+table.
+
+So `DecodeVinPatterns` and `RefreshFleetStats` set their connection explicitly
+from `vin.connection` (default `database`) rather than inheriting it. Change
+that with `VIN_QUEUE_CONNECTION`, not with `QUEUE_CONNECTION` — flipping the
+global would change behaviour for every other job in the application.
+
+The worker therefore names the connection too:
+
+```bash
+php artisan queue:work database --queue=vin
+```
+
+`vin:status` refuses to report anything if the connection resolves to a sync
+driver, because every number it could show would be a lie.
 
 ### An idle-looking worker is usually not stuck
 

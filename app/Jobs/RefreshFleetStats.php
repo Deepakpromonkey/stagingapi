@@ -31,6 +31,9 @@ class RefreshFleetStats implements ShouldBeUnique, ShouldQueue
 
     public function __construct(public string $dot)
     {
+        // Pinned rather than inherited: on the sync connection the profile
+        // endpoint would run the whole fleet aggregation inside the request.
+        $this->onConnection(config('vin.connection', 'database'));
         $this->onQueue(config('vin.queue', 'vin'));
     }
 

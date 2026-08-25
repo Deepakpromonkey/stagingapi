@@ -40,6 +40,18 @@ return [
     'queue' => env('VPIC_QUEUE', 'vin'),
 
     /*
+    | Queue connection for the VIN jobs, set explicitly rather than inherited
+    | from QUEUE_CONNECTION.
+    |
+    | The application default is `sync`, which runs a dispatched job inline and
+    | ignores its delay — that would put every vPIC call and every fleet-age
+    | aggregation on the request path, which is the one thing this whole design
+    | exists to avoid. These two jobs must be genuinely asynchronous whatever
+    | the rest of the application is set to.
+    */
+    'connection' => env('VIN_QUEUE_CONNECTION', 'database'),
+
+    /*
     |--------------------------------------------------------------------------
     | Fleet statistics
     |--------------------------------------------------------------------------

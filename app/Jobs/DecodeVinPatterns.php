@@ -45,6 +45,9 @@ class DecodeVinPatterns implements ShouldBeUnique, ShouldQueue
      */
     public function __construct(public array $patterns)
     {
+        // Pinned rather than inherited: on the sync connection this would call
+        // NHTSA inline from whatever dispatched it. See config/vin.php.
+        $this->onConnection(config('vin.connection', 'database'));
         $this->onQueue(config('vin.queue', 'vin'));
     }
 
