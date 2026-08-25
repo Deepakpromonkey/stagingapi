@@ -4557,25 +4557,39 @@ SQL;
             );
         }
 
-        // Both address matches lead with the columns idx_phy and idx_mail lead
-        // with, so they stay index lookups rather than scans of the census.
+        /*
+        | Street, city and state are the address. The ZIP was a fourth equality
+        | test layered on top of an address the first three had already pinned,
+        | and a filter that narrow can only ever lose matches - the census
+        | carries the ZIP five digits on some rows and nine on others, so two
+        | carriers standing in the same building routinely disagree on it and
+        | the shared address silently never reaches the profile. It is still
+        | what the panel displays, just no longer what the match turns on.
+        |
+        | Requiring a ZIP to be present before matching at all had the same
+        | effect from the other side: a carrier whose own ZIP is blank got no
+        | address block whatsoever.
+        |
+        | Both matches still lead with the columns idx_phy and idx_mail lead
+        | with, so they stay index lookups rather than scans of the census -
+        | idx_phy is (phy_state, phy_city, phy_street) and carries no ZIP, so
+        | dropping it costs nothing there either.
+        */
         if (
             ! empty($carrier->phy_street) &&
             ! empty($carrier->phy_city) &&
-            ! empty($carrier->phy_state) &&
-            ! empty($carrier->phy_zip)
+            ! empty($carrier->phy_state)
         ) {
             $this->addMatch(
                 $blocks,
                 $bindings,
                 'PHYSICAL ADDRESS',
                 "CONCAT_WS(', ', phy_street, phy_city, phy_state, phy_zip)",
-                'phy_street=? AND phy_city=? AND phy_state=? AND phy_zip=?',
+                'phy_street=? AND phy_city=? AND phy_state=?',
                 [
                     $carrier->phy_street,
                     $carrier->phy_city,
                     $carrier->phy_state,
-                    $carrier->phy_zip,
                 ],
                 $dot
             );
@@ -4584,20 +4598,18 @@ SQL;
         if (
             ! empty($carrier->mailing_street) &&
             ! empty($carrier->mailing_city) &&
-            ! empty($carrier->mailing_state) &&
-            ! empty($carrier->mailing_zip)
+            ! empty($carrier->mailing_state)
         ) {
             $this->addMatch(
                 $blocks,
                 $bindings,
                 'MAILING ADDRESS',
                 "CONCAT_WS(', ', mailing_street, mailing_city, mailing_state, mailing_zip)",
-                'mailing_street=? AND mailing_city=? AND mailing_state=? AND mailing_zip=?',
+                'mailing_street=? AND mailing_city=? AND mailing_state=?',
                 [
                     $carrier->mailing_street,
                     $carrier->mailing_city,
                     $carrier->mailing_state,
-                    $carrier->mailing_zip,
                 ],
                 $dot
             );
