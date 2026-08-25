@@ -82,6 +82,23 @@ After that the scheduler in `routes/console.php` keeps both current, and a
 profile view queues a refresh for any carrier whose figures are missing or past
 `vin.fleet_stats_ttl`.
 
+### An idle-looking worker is usually not stuck
+
+Batches are dispatched with a delay so they reach NHTSA at the configured pace.
+A job whose delay has not elapsed is invisible to `queue:work` — so the worker
+prints its banner and sits there, which looks exactly like a hang. Check before
+assuming:
+
+```bash
+php artisan vin:status          # or --watch
+```
+
+`runnable right now` is the number that matters. If it is 0 and `next batch
+runs in` shows a countdown, the worker is paced, not stuck.
+
+The other reason for a silent worker is the obvious one: `vin:backfill --count`
+measures and queues nothing. Only `vin:backfill` fills the queue.
+
 ## 5. Pacing
 
 At the default 6 batches/min, the 79,239-pattern backfill takes about 4.5
