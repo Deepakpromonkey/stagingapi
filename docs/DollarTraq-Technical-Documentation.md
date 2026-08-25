@@ -84,7 +84,7 @@ The two carrier states are deliberately separate. During onboarding the carrier 
    ┌──────────────────────────────────────────────────────────┐
    │ Outbound integrations                                     │
    │  Didit (ID verification) · Stripe (payouts) ·             │
-   │  ClickSend (SMS OTP) · FMCSA API (live snapshot) ·        │
+   │  Telnyx (SMS OTP) · FMCSA API (live snapshot) ·           │
    │  SMTP/SES (mail) · Slack (critical log channel)           │
    └──────────────────────────────────────────────────────────┘
 ```
@@ -222,7 +222,7 @@ A broker with `send-invitation-approved-carriers` clicks **Connect** on a carrie
 | # | Step | Endpoint | What actually happens |
 |---|---|---|---|
 | 0 | Open the link | `GET /carrier/connect/{token}` (web, 30/min) | Landing here proves mailbox control → status becomes `email_verified` |
-| 1 | Phone OTP | `POST /v1/carrier-connect/otp/send` (10/min)<br>`/otp/verify` (15/min) | 6-digit code by SMS via ClickSend. Code is **hashed** at rest, expires in 15 min (`CARRIER_CONNECT_OTP_MINUTES`), 3 attempts max (`CARRIER_CONNECT_OTP_ATTEMPTS`) → `mobile_verified` |
+| 1 | Phone OTP | `POST /v1/carrier-connect/otp/send` (10/min)<br>`/otp/verify` (15/min) | 6-digit code by SMS via Telnyx. Code is **hashed** at rest, expires in 15 min (`CARRIER_CONNECT_OTP_MINUTES`), 3 attempts max (`CARRIER_CONNECT_OTP_ATTEMPTS`) → `mobile_verified` |
 | 2 | Identity verification | `/identity/start`, `/identity/verify`, `/identity/webhook` | A Didit v3 verification session — government ID + liveness. Didit calls the webhook server-to-server → `id_verified` |
 | 3 | Payout account | `/stripe/connect`, `/stripe/verify` | A Stripe Express account is created and onboarded → `bank_verified` |
 | 3b | Factoring (alternative) | `/factoring` | Carriers paid through a factoring company upload the factoring notice (PDF only) instead of connecting Stripe |
@@ -350,7 +350,7 @@ Each environment is a **separate application instance with a separate database a
 **Non-production safety rails built into the code:**
 
 * `CARRIER_CONNECT_TEST_EMAIL` / `CARRIER_CONNECT_TEST_PHONE` intercept all carrier mail and SMS, so local testing can never contact a real trucking company.
-* Third-party integrations (Stripe, Didit, ClickSend) use test-mode credentials outside production. ⚠ TO CONFIRM per service.
+* Third-party integrations (Stripe, Didit, Telnyx) use test-mode credentials outside production. ⚠ TO CONFIRM per service.
 
 ---
 
@@ -415,7 +415,7 @@ A token issued to one audience is rejected by the other's endpoints at the middl
 | OTP length | 6 digits | 6 digits | 6 digits |
 | OTP lifetime | 10 minutes | 10 minutes | 15 min (configurable) |
 | Max attempts | 5 | 5 | 3 (configurable) |
-| Delivery | Email | Email | **SMS** (ClickSend) |
+| Delivery | Email | Email | **SMS** (Telnyx) |
 | Stored as | bcrypt hash | bcrypt hash | bcrypt hash |
 | Trusted device | 1 year | **30 days** | n/a |
 | Password reset token | 64 chars, 15 min, single use | 64 chars, 15 min, single use | n/a |
@@ -548,7 +548,7 @@ Only these are reachable without a token. Everything else requires authenticatio
 | **AWS SES / SMTP** | Transactional mail: invitations, OTPs, credentials, reports | Name, email, OTP, temporary password | Outbound |
 | **Stripe (Express)** | Carrier payout accounts | Carrier business identity, banking — **held by Stripe, not by DollarTraq** | Outbound + webhook |
 | **Didit** | Identity verification: government ID + liveness | Carrier representative's ID document and selfie — **held by Didit** | Outbound + server-to-server webhook |
-| **ClickSend** | SMS delivery of onboarding OTPs | Phone number, 6-digit code | Outbound |
+| **Telnyx** | SMS delivery of onboarding OTPs | Phone number, 6-digit code | Outbound |
 | **FMCSA public API** | Live carrier snapshot on top of the cached census | DOT number only | Outbound |
 | **GitHub / GitHub Actions** | Source control and deployment | Source code | — |
 | **Slack** | Critical-severity log channel | Error metadata | Outbound |
@@ -617,7 +617,7 @@ Only these are reachable without a token. Everything else requires authenticatio
 |---|---|
 | **Application logs** | Laravel logging stack, `LOG_CHANNEL=stack`. Daily rotation available with 14-day retention (`LOG_DAILY_DAYS`). Level via `LOG_LEVEL`. |
 | **Critical alerts** | Slack channel configured as a log channel at `critical` level |
-| **Integration logs** | Didit, Stripe and ClickSend calls are logged around failure paths in the onboarding controller |
+| **Integration logs** | Didit, Stripe and Telnyx calls are logged around failure paths in the onboarding controller |
 | **Authentication audit** | `carrier_login_attempts` — every carrier sign-in attempt with outcome, IP and timestamp. `login_devices` / `trusted_devices` for both audiences. |
 | **Business audit** | `search_histories` (who searched what, with the score at that moment), onboarding status transitions, `onboarding_ip`, prefill tracking, explicit step skips |
 | **Server logs** | Web server access/error logs on EC2 ⚠ TO CONFIRM retention |
@@ -755,7 +755,7 @@ Every S1, and every S2 that recurs, gets a written RCA within five working days 
 | Production server (SSH) | Gaurav, Deepak, Saranjeet | Administrative |
 | Production database | Deepak, Saranjeet | Full |
 | S3 buckets | Deepak, Saranjeet | Full |
-| Third-party dashboards (Stripe, Didit, ClickSend) | ⚠ TO CONFIRM | ⚠ TO CONFIRM |
+| Third-party dashboards (Stripe, Didit, Telnyx) | ⚠ TO CONFIRM | ⚠ TO CONFIRM |
 
 **Review cadence.** This register is reviewed **quarterly** and immediately whenever someone joins or leaves the team. Departures require same-day revocation of GitHub, AWS, SSH, database and third-party dashboard access. ⚠ TO CONFIRM this cadence is being observed and by whom.
 
