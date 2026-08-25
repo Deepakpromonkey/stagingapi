@@ -55,6 +55,7 @@ requests, not 50,000.
 | `VinDecoderService::decode()` | **Queue path only.** The one place that calls NHTSA. |
 | `DecodeVinPatterns` (job) | One batch of ≤50 patterns per vPIC POST. |
 | `FleetStatsService` | Averages ages per carrier into `carrier_fleet_stats`. |
+| `vin:requeue` | Reconciler. Re-dispatches pattern rows that lost their job. |
 | `RefreshFleetStats` (job) | Recomputes one carrier, off the request path. |
 
 Nothing on the request path may call `decode()`. A pattern that is not cached
@@ -120,6 +121,26 @@ runs in` shows a countdown, the worker is paced, not stuck.
 
 The other reason for a silent worker is the obvious one: `vin:backfill --count`
 measures and queues nothing. Only `vin:backfill` fills the queue.
+
+### Stranded pending patterns
+
+A pattern row is written *before* its decode job is dispatched, so the two can
+come apart — a killed worker, a `queue:clear`, a job that exhausted its
+attempts. The row is then stranded: `vin:backfill` and `queueUnknown()` both
+skip any pattern that already has a row, deliberately, so that a decided
+`failed` is never retried forever — and neither can distinguish a stranded row
+from one legitimately waiting its paced turn.
+
+`vin:requeue` is the reconciler, scheduled hourly. It only touches rows pending
+longer than `--older-than` (30 minutes by default), which is what keeps it from
+duplicating live work.
+
+```bash
+php artisan vin:requeue --dry-run
+```
+
+If `vin:status` shows `pending` sitting still while `jobs waiting` is 0, this is
+what to run.
 
 ## 5. Pacing
 
