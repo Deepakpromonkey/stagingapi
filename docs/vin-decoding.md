@@ -1,0 +1,103 @@
+# VIN decoding
+
+Where the fleet table's **Year** and **Model** columns come from, and the
+**Avg Power Age** / **Avg Trailer Age** cards on the carrier profile.
+
+---
+
+## 1. The source
+
+NHTSA's vPIC decoder: <https://vpic.nhtsa.dot.gov/api>. Public, no key, no
+account, CORS open. The FMCSA feed gives us a VIN and a make; it never gives a
+model or a model year, which is why those columns were empty.
+
+## 2. Why we do not decode VINs
+
+`inspections` holds tens of millions of VIN values. Decoding them one by one —
+whether on the request path or in a batch job — would never finish, and would
+be almost entirely wasted work.
+
+Year, make and model live in **positions 1-8 and 10** of a VIN. Position 9 is a
+check digit; positions 11-17 are the assembly plant and the serial number. Those
+last seven characters identify the individual unit and say nothing about what it
+is. vPIC accepts a partial VIN and returns the identical answer:
+
+```
+1FUJGLDR*C        -> 2012 FREIGHTLINER Cascadia (Truck-Tractor)
+1FUJGLDR9CLBP8834 -> 2012 FREIGHTLINER Cascadia (Truck-Tractor)
+1FUJGLDR2CLBS9911 -> 2012 FREIGHTLINER Cascadia (Truck-Tractor)   different truck
+```
+
+So a carrier's 200-truck fleet of one spec and model year is **one** decode, and
+every Cascadia of that year in the country shares it. We cache on the 9-character
+**pattern** — positions 1-8 plus position 10 — not on the VIN.
+
+`php artisan vin:backfill --count` prints the ratio for the live data.
+
+## 3. The pieces
+
+| | |
+|---|---|
+| `App\Support\Vin` | Pattern extraction, validation, partial-VIN formatting. No I/O. |
+| `vin_patterns` | The cache. Primary key is the pattern. Small enough to stay in memory. |
+| `VinDecoderService::lookup()` | **Request path.** One indexed query. Never calls NHTSA. |
+| `VinDecoderService::decode()` | **Queue path only.** The one place that calls NHTSA. |
+| `DecodeVinPatterns` (job) | One batch of ≤50 patterns per vPIC POST. |
+| `FleetStatsService` | Averages ages per carrier into `carrier_fleet_stats`. |
+| `RefreshFleetStats` (job) | Recomputes one carrier, off the request path. |
+
+Nothing on the request path may call `decode()`. A pattern that is not cached
+yet is simply a null the frontend renders as a dash.
+
+## 4. Running it
+
+```bash
+# 1. See the size of the job first.
+php artisan vin:backfill --count
+
+# 2. A worker has to be draining the vin queue for anything to decode.
+php artisan queue:work --queue=vin
+
+# 3. The one-time sweep. Resumable — an interrupted run costs only the scan.
+php artisan vin:backfill
+
+# 4. Fleet ages for the carriers people actually look at.
+php artisan carrier:refresh-fleet-stats --active
+```
+
+After that the scheduler in `routes/console.php` keeps both current, and a
+profile view queues a refresh for any carrier whose figures are missing or past
+`vin.fleet_stats_ttl`.
+
+## 5. Pacing
+
+vPIC publishes no rate limit, which is not the same as not having one. Batches
+are spaced to `vin.batches_per_minute` (default 6/min = 300 patterns/min) and
+`DecodeVinPatterns` carries a `WithoutOverlapping` middleware so two workers
+cannot decode in parallel and defeat the pacing. Raise it if a backfill needs
+to move faster, but keep it civil — this is a free government service.
+
+A pattern that fails `vin.max_attempts` times is marked `failed` and never
+retried. That is deliberate: without it, one junk VIN would be re-queued by
+every carrier profile that contains it, forever.
+
+## 6. What we deliberately did not do
+
+NHTSA publishes the whole vPIC database as a downloadable SQL Server backup, so
+we could self-host and never make a network call. It is a `.bak` with a large
+stored-procedure decode layer behind it; porting that to MySQL is a project on
+its own, and the pattern cache already shrinks the problem by orders of
+magnitude. Not worth it.
+
+## 7. Caveats
+
+* Power unit vs. trailer comes from vPIC's `VehicleType`/`BodyClass`, not from
+  the feed's `unit_type_desc` — the feed writes `TRUCK TRACTOR`, `TRACTOR` and
+  `STRAIGHT TRUCK` for the same thing.
+* Averages are over **distinct VINs**, not inspection rows. A truck stopped nine
+  times would otherwise count nine times.
+* An age below 0 or above `vin.max_plausible_age` is discarded as a bad decode.
+  vPIC does report next year's model year on new equipment.
+* `vins_total` vs. `vins_decoded` on `carrier_fleet_stats` is the honest measure
+  of coverage for a carrier. A number built from three VINs out of two hundred
+  should not be read as fleetwide.
