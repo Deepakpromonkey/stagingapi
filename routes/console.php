@@ -26,6 +26,14 @@ Schedule::command('vin:backfill --incremental')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Patterns whose row was written but whose job was lost — a killed worker, a
+// queue:clear, a job that exhausted its attempts. Nothing else picks these up,
+// because everything else deliberately skips a pattern that already has a row.
+Schedule::command('vin:requeue')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Recompute the carriers whose stored fleet age has gone stale. Capped per
 // run so this never turns into an unbounded job.
 Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
