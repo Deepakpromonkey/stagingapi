@@ -32,7 +32,18 @@ So a carrier's 200-truck fleet of one spec and model year is **one** decode, and
 every Cascadia of that year in the country shares it. We cache on the 9-character
 **pattern** — positions 1-8 plus position 10 — not on the VIN.
 
-`php artisan vin:backfill --count` prints the ratio for the live data.
+`php artisan vin:backfill --count` prints the ratio for the live data. As of
+the first run against production:
+
+```
+VIN rows (power unit column)   5,783,981
+Distinct VINs                  2,512,732
+Distinct patterns                 79,239
+Rows per pattern                73.0 : 1
+```
+
+79k decodes instead of 2.5M — and at 50 patterns per vPIC batch that is 1,585
+requests, not 50,000.
 
 ## 3. The pieces
 
@@ -59,6 +70,8 @@ php artisan vin:backfill --count
 php artisan queue:work --queue=vin
 
 # 3. The one-time sweep. Resumable — an interrupted run costs only the scan.
+#    NOTE: --count queues nothing. This is the command that fills the queue;
+#    a worker started before it will simply sit idle until this runs.
 php artisan vin:backfill
 
 # 4. Fleet ages for the carriers people actually look at.
@@ -70,6 +83,16 @@ profile view queues a refresh for any carrier whose figures are missing or past
 `vin.fleet_stats_ttl`.
 
 ## 5. Pacing
+
+At the default 6 batches/min, the 79,239-pattern backfill takes about 4.5
+hours. That is a one-time cost, and it is fine to raise the pace for it:
+
+```bash
+VPIC_BATCHES_PER_MINUTE=15 php artisan queue:work --queue=vin   # ~1h45m
+```
+
+Put it back to the default afterwards — the steady-state load is a few hundred
+new patterns a day, which needs no pace at all.
 
 vPIC publishes no rate limit, which is not the same as not having one. Batches
 are spaced to `vin.batches_per_minute` (default 6/min = 300 patterns/min) and
