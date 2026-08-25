@@ -131,9 +131,16 @@ skip any pattern that already has a row, deliberately, so that a decided
 `failed` is never retried forever — and neither can distinguish a stranded row
 from one legitimately waiting its paced turn.
 
-`vin:requeue` is the reconciler, scheduled hourly. It only touches rows pending
-longer than `--older-than` (30 minutes by default), which is what keeps it from
-duplicating live work.
+`vin:requeue` is the reconciler, scheduled hourly. Two guards keep it from
+duplicating live work, and the second is the one that matters:
+
+* rows must have been pending longer than `--older-than` (30 minutes default);
+* **the queue must be empty**. A backfill paces its batches over hours — the
+  last of 1,400 batches at 15/min is scheduled 95 minutes out — so a pattern
+  can sit pending far longer than any age guard while its job is queued and
+  perfectly healthy. Age cannot tell that apart from a stranded row. A pattern
+  is only genuinely orphaned once nothing is in flight, so that is when this
+  runs. `--force` overrides it.
 
 ```bash
 php artisan vin:requeue --dry-run
