@@ -77,6 +77,24 @@ class VinPatternTest extends TestCase
         ];
     }
 
+    /**
+     * PHP casts a numeric-string array key to an integer, and these patterns
+     * are deduplicated through array keys. An integer bound against the
+     * CHAR(9) pattern column puts MySQL into numeric context: the primary key
+     * index is abandoned and, under strict mode, the query dies on the first
+     * non-numeric pattern it meets.
+     */
+    public function test_all_digit_patterns_stay_strings(): void
+    {
+        $patterns = Vin::patterns(['20240322341005122', '1FUJGLDR9CLBP8834']);
+
+        foreach ($patterns as $pattern) {
+            $this->assertIsString($pattern, 'a numeric pattern leaked as an integer');
+        }
+
+        $this->assertContains('202403224', $patterns);
+    }
+
     public function test_patterns_deduplicates_across_a_fleet(): void
     {
         $patterns = Vin::patterns([

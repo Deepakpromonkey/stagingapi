@@ -103,6 +103,22 @@ class Vin
             }
         }
 
-        return array_keys($patterns);
+        /*
+         * strval() is load-bearing. Deduplicating through array keys is fast,
+         * but PHP silently casts a numeric-string key to an integer — the
+         * all-digit pattern '202403223' comes back from array_keys() as int
+         * 202403223.
+         *
+         * Bound into `where pattern in (...)` against a CHAR(9) column, that
+         * integer puts MySQL into numeric context: it coerces every row's
+         * pattern to a number, which abandons the primary key index and scans
+         * the table, then errors outright under strict mode the moment it
+         * meets a non-numeric pattern —
+         *
+         *   Truncated incorrect DOUBLE value: '00000000A'
+         *
+         * which is exactly how this was found, on a live backfill.
+         */
+        return array_map('strval', array_keys($patterns));
     }
 }
