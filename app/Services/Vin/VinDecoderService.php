@@ -170,6 +170,20 @@ class VinDecoderService
         $decoded = 0;
         $seen = [];
 
+        /*
+         * Rows are accumulated and written once, not row by row.
+         *
+         * This loop used to call updateOrInsert() per pattern — a SELECT and
+         * an UPDATE each, so about a hundred round trips for a batch of fifty,
+         * plus another query per undecodable pattern. Measured on the live
+         * backfill that made a batch take 4-5 seconds against the half second
+         * the vPIC call itself costs: the decoder spent nine tenths of its
+         * time talking to its own database.
+         */
+        $upserts = [];
+        $undecodable = [];
+        $now = now();
+
         foreach ($results as $index => $row) {
             /*
              * vPIC echoes back the partial VIN it was given, so results are
@@ -193,28 +207,41 @@ class VinDecoderService
             // failed attempt so it retires after max_attempts instead of
             // sitting pending forever.
             if (! $year) {
-                $this->recordAttempt([$pattern]);
+                $undecodable[] = $pattern;
 
                 continue;
             }
 
-            VinPattern::query()->updateOrInsert(
-                ['pattern' => $pattern],
-                [
-                    'model_year' => $year,
-                    'make' => $this->clean($row['Make'] ?? null),
-                    'model' => $this->clean($row['Model'] ?? null),
-                    'vehicle_type' => $vehicleType,
-                    'body_class' => $bodyClass,
-                    'gvwr' => $this->clean($row['GVWR'] ?? null),
-                    'is_trailer' => $this->isTrailer($vehicleType, $bodyClass),
-                    'status' => 'ok',
-                    'decoded_at' => now(),
-                    'updated_at' => now(),
-                ]
-            );
+            $upserts[] = [
+                'pattern' => $pattern,
+                'model_year' => $year,
+                'make' => $this->clean($row['Make'] ?? null),
+                'model' => $this->clean($row['Model'] ?? null),
+                'vehicle_type' => $vehicleType,
+                'body_class' => $bodyClass,
+                'gvwr' => $this->clean($row['GVWR'] ?? null),
+                'is_trailer' => $this->isTrailer($vehicleType, $bodyClass),
+                'status' => 'ok',
+                'decoded_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
 
             $decoded++;
+        }
+
+        if ($upserts) {
+            // One INSERT ... ON DUPLICATE KEY UPDATE for the whole batch.
+            // created_at is deliberately absent from the update list so it
+            // survives on a row that already existed.
+            VinPattern::query()->upsert($upserts, ['pattern'], [
+                'model_year', 'make', 'model', 'vehicle_type', 'body_class',
+                'gvwr', 'is_trailer', 'status', 'decoded_at', 'updated_at',
+            ]);
+        }
+
+        if ($undecodable) {
+            $this->recordAttempt($undecodable);
         }
 
         // Anything vPIC simply did not answer for.
