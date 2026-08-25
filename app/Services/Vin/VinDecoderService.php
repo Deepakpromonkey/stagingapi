@@ -125,7 +125,15 @@ class VinDecoderService
      */
     public function decode(array $patterns): int
     {
-        $patterns = array_values(array_unique(array_filter($patterns)));
+        /*
+         * strval() again, and not redundantly. Vin::patterns() casts at the
+         * source, but a job queued before that fix still carries integers in
+         * its serialised payload — and MySQL puts a CHAR(9) column into
+         * numeric context the moment one is bound, which both defeats the
+         * index and errors on the first non-numeric pattern. Defend here too,
+         * where the payload actually arrives.
+         */
+        $patterns = array_values(array_unique(array_map('strval', array_filter($patterns))));
 
         if (! $patterns) {
             return 0;
@@ -275,6 +283,8 @@ class VinDecoderService
             return;
         }
 
+        $patterns = array_map('strval', $patterns);
+
         VinPattern::query()
             ->whereIn('pattern', $patterns)
             ->increment('attempts', 1, ['updated_at' => now()]);
@@ -286,7 +296,15 @@ class VinDecoderService
             ->update(['status' => 'failed', 'updated_at' => now()]);
     }
 
-    protected function clean(?string $value): ?string
+    /**
+     * Trim, normalise vPIC's empty markers, and cap at the column width.
+     *
+     * The cap is not cosmetic. A batch is written as one upsert, so a single
+     * over-long value would abort the statement and take all fifty rows with
+     * it — losing forty-nine good decodes to one long body_class string. A
+     * truncated label is a far better outcome than a lost batch.
+     */
+    protected function clean(?string $value, int $max = 255): ?string
     {
         $value = trim((string) $value);
 
@@ -295,7 +313,7 @@ class VinDecoderService
             return null;
         }
 
-        return $value;
+        return mb_substr($value, 0, $max);
     }
 
     protected function cleanInt($value): ?int

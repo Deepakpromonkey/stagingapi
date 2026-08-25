@@ -18,14 +18,18 @@ return new class extends Migration
             $table->char('pattern', 9)->primary();
 
             $table->smallInteger('model_year')->nullable();
-            $table->string('make', 100)->nullable();
-            $table->string('model', 100)->nullable();
+
+            // 255 throughout: vPIC's descriptive fields run past 100
+            // characters for some vehicles, and a batch is written as one
+            // upsert, so a single overflow would abort all fifty rows.
+            $table->string('make', 255)->nullable();
+            $table->string('model', 255)->nullable();
 
             // vPIC's own classification. Preferred over the FMCSA feed's
             // free-text unit_type_desc, which is inconsistently written.
-            $table->string('vehicle_type', 50)->nullable();
-            $table->string('body_class', 100)->nullable();
-            $table->string('gvwr', 100)->nullable();
+            $table->string('vehicle_type', 255)->nullable();
+            $table->string('body_class', 255)->nullable();
+            $table->string('gvwr', 255)->nullable();
 
             // Derived once from vehicle_type/body_class so the fleet-age
             // aggregate does not have to pattern-match text on every run.
