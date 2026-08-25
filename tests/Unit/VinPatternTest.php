@@ -64,6 +64,13 @@ class VinPatternTest extends TestCase
             'too long' => ['1FUJGLDR9CLBP88345'],
             // The feed uses runs of zeros to mean "no VIN recorded".
             'zero placeholder' => ['00000000000000000'],
+            /*
+             * Well-formed on their face but still not VINs: position 1 is the
+             * geographic area and zero is not an assigned value. Real examples
+             * pulled from the inspections feed.
+             */
+            'zero-padded serial' => ['00000000041005122'],
+            'zero-padded alnum' => ['000000000AZ387696'],
             // I, O and Q are never used in a VIN.
             'contains letter O' => ['1FUJGLDR9CLBPO834'],
             'contains letter I' => ['1FUJGLDR9CLBPI834'],

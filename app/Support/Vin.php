@@ -43,8 +43,20 @@ class Vin
     {
         $vin = self::normalize($vin);
 
-        // The feed uses runs of zeros as a placeholder for "no VIN recorded".
-        if (preg_match('/^0+$/', $vin)) {
+        /*
+         * Position 1 is the geographic area of the world manufacturer
+         * identifier: 1-5 North America, 6-7 Oceania, 8-9 South America,
+         * A-H Africa, J-R Asia, S-Z Europe. Zero is not an assigned value, so
+         * a VIN beginning with one is not a VIN.
+         *
+         * This matters because the FMCSA feed is full of zero-padded
+         * placeholders that are otherwise well formed — '00000000041005122',
+         * '000000000AZ387696' — and they pass the character-class test. Left
+         * in, each one costs three round trips to NHTSA before retiring as
+         * undecodable. Measured against production: 145 such patterns, none of
+         * which had ever decoded.
+         */
+        if (str_starts_with($vin, '0')) {
             return false;
         }
 
