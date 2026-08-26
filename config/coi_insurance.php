@@ -24,7 +24,7 @@ return [
 
     'inbox' => [
         'local_part' => env('COI_INBOX_LOCAL_PART', 'insurance'),
-        'domain' => env('COI_INBOX_DOMAIN', 'inbox.dollartraq.com'),
+        'domain' => env('COI_INBOX_DOMAIN', 'inbox.dollartraq.app'),
 
         // Falls back to the application's own from-address when unset, which
         // is what a local install without a dedicated inbox should do.

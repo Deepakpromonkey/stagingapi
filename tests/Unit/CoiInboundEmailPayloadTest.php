@@ -17,7 +17,7 @@ class CoiInboundEmailPayloadTest extends TestCase
     {
         $payload = InboundEmailPayload::fromProviderPayload([
             'FromFull' => ['Email' => 'Agent@Agency.COM', 'Name' => 'Jane Agent'],
-            'ToFull' => [['Email' => 'insurance+1234567-abc123@inbox.dollartraq.com']],
+            'ToFull' => [['Email' => 'insurance+1234567-abc123@inbox.dollartraq.app']],
             'Subject' => 'RE: Insurance details of the carrier ACME 1234567',
             'TextBody' => "Policy expires 04/30/2026.\n\nOn Mon you wrote:\n> exp 01/01/2020",
             'StrippedTextReply' => 'Policy expires 04/30/2026.',
@@ -25,7 +25,7 @@ class CoiInboundEmailPayloadTest extends TestCase
 
         // Lowercased, because matching downstream is exact.
         $this->assertSame('agent@agency.com', $payload->fromEmail);
-        $this->assertSame(['insurance+1234567-abc123@inbox.dollartraq.com'], $payload->recipients);
+        $this->assertSame(['insurance+1234567-abc123@inbox.dollartraq.app'], $payload->recipients);
 
         // The quoted thread carries a stale expiry date; the stripped reply is
         // what the model must be given.
@@ -37,7 +37,7 @@ class CoiInboundEmailPayloadTest extends TestCase
         $payload = InboundEmailPayload::fromProviderPayload([
             'sender' => 'agent@agency.com',
             'from' => '"Jane Agent" <agent@agency.com>',
-            'recipient' => 'insurance+1234567-abc123@inbox.dollartraq.com',
+            'recipient' => 'insurance+1234567-abc123@inbox.dollartraq.app',
             'body-plain' => "Expires 2026-04-30\n> quoted",
             'stripped-text' => 'Expires 2026-04-30',
         ]);
@@ -51,12 +51,12 @@ class CoiInboundEmailPayloadTest extends TestCase
     {
         $payload = InboundEmailPayload::fromProviderPayload([
             'from' => 'Jane Agent <agent@agency.com>',
-            'to' => 'insurance+1234567-abc123@inbox.dollartraq.com, someone@else.com',
+            'to' => 'insurance+1234567-abc123@inbox.dollartraq.app, someone@else.com',
             'text' => 'Expiry: April 30, 2026',
         ]);
 
         $this->assertSame(
-            ['insurance+1234567-abc123@inbox.dollartraq.com', 'someone@else.com'],
+            ['insurance+1234567-abc123@inbox.dollartraq.app', 'someone@else.com'],
             $payload->recipients,
         );
     }
@@ -70,8 +70,8 @@ class CoiInboundEmailPayloadTest extends TestCase
     {
         $payload = InboundEmailPayload::fromProviderPayload([
             'from' => 'Jane Agent <agent@agency.com>',
-            'to' => 'Jane Agent <agent@agency.com>, insurance@inbox.dollartraq.com',
-            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.com"],"from":"agent@agency.com"}',
+            'to' => 'Jane Agent <agent@agency.com>, insurance@inbox.dollartraq.app',
+            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.app"],"from":"agent@agency.com"}',
             'subject' => 'Re: Insurance details of the carrier ACME 1234567',
             'text' => 'Policy runs through 2026-04-30.',
         ]);
@@ -80,7 +80,7 @@ class CoiInboundEmailPayloadTest extends TestCase
 
         // The sub-addressed envelope recipient must come first: it is what the
         // service matches the request on.
-        $this->assertSame('insurance+1234567-abc123@inbox.dollartraq.com', $payload->recipients[0]);
+        $this->assertSame('insurance+1234567-abc123@inbox.dollartraq.app', $payload->recipients[0]);
         $this->assertSame('Policy runs through 2026-04-30.', $payload->bodyForExtraction());
     }
 
@@ -92,7 +92,7 @@ class CoiInboundEmailPayloadTest extends TestCase
     public function test_it_reads_sendgrid_raw_mime_mode(): void
     {
         $payload = InboundEmailPayload::fromProviderPayload([
-            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.com"],"from":"agent@agency.com"}',
+            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.app"],"from":"agent@agency.com"}',
             'email' => "From: Jane Agent <agent@agency.com>\r\n"
                 ."Subject: Re: Insurance details\r\n"
                 ."Content-Type: text/plain; charset=UTF-8\r\n\r\n"
@@ -118,10 +118,10 @@ class CoiInboundEmailPayloadTest extends TestCase
             'Message' => json_encode([
                 'mail' => [
                     'source' => 'agent@agency.com',
-                    'destination' => ['insurance+1234567-abc123@inbox.dollartraq.com'],
+                    'destination' => ['insurance+1234567-abc123@inbox.dollartraq.app'],
                     'commonHeaders' => [
                         'from' => ['Jane Agent <agent@agency.com>'],
-                        'to' => ['insurance+1234567-abc123@inbox.dollartraq.com'],
+                        'to' => ['insurance+1234567-abc123@inbox.dollartraq.app'],
                         'subject' => 'Re: Insurance details of the carrier ACME 1234567',
                     ],
                 ],
@@ -130,7 +130,7 @@ class CoiInboundEmailPayloadTest extends TestCase
         ]);
 
         $this->assertSame('agent@agency.com', $payload->fromEmail);
-        $this->assertSame(['insurance+1234567-abc123@inbox.dollartraq.com'], $payload->recipients);
+        $this->assertSame(['insurance+1234567-abc123@inbox.dollartraq.app'], $payload->recipients);
 
         // The =2E is a quoted-printable full stop. Leaving it undecoded is the
         // failure mode that makes a body look fine until a date lands on one.

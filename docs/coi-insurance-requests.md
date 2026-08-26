@@ -24,14 +24,14 @@ the DOT and a per-request token ride in the sub-address, which is what
 `CarrierInsuranceRequestService::matchRequest()` matches on:
 
 ```
-insurance+1234567-k3f9x2p7q1m4h8s0d6b2n5v7@inbox.dollartraq.com
+insurance+1234567-k3f9x2p7q1m4h8s0d6b2n5v7@inbox.dollartraq.app
           ^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^
           DOT     reply_token
 ```
 
 Set up:
 
-1. Create `insurance@inbox.dollartraq.com` (or whatever `COI_INBOX_LOCAL_PART`
+1. Create `insurance@inbox.dollartraq.app` (or whatever `COI_INBOX_LOCAL_PART`
    and `COI_INBOX_DOMAIN` say) at the mail provider.
 2. Make sure the provider **preserves plus-addressing** and delivers
    `insurance+anything@` to that mailbox. All four providers below do; a plain
@@ -66,8 +66,8 @@ read.
 ```dotenv
 # The inbox and what the mail says it is from
 COI_INBOX_LOCAL_PART=insurance
-COI_INBOX_DOMAIN=inbox.dollartraq.com
-COI_FROM_ADDRESS=insurance@dollartraq.com
+COI_INBOX_DOMAIN=inbox.dollartraq.app
+COI_FROM_ADDRESS=insurance@dollartraq.app
 COI_FROM_NAME="DollarTraq Team"
 
 # The whole of the webhook's authorisation. Unset closes the endpoint.
@@ -229,7 +229,7 @@ mailer's output — so the agency's reply can be simulated with `curl`.
 MAIL_MAILER=log
 COI_QUEUE_CONNECTION=sync      # send and extraction run inline; no worker needed
 COI_INBOUND_SECRET=local-test
-COI_INBOX_DOMAIN=inbox.dollartraq.com
+COI_INBOX_DOMAIN=inbox.dollartraq.app
 ANTHROPIC_API_KEY=sk-ant-...   # the extraction is a real call
 ```
 
@@ -259,7 +259,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/webhooks/inbound-email?secret=local-t
   -H 'Content-Type: application/json' \
   -d '{
     "FromFull": {"Email": "certs@someagency.com", "Name": "Jane Agent"},
-    "ToFull": [{"Email": "insurance+1234567-PASTE_TOKEN@inbox.dollartraq.com"}],
+    "ToFull": [{"Email": "insurance+1234567-PASTE_TOKEN@inbox.dollartraq.app"}],
     "Subject": "RE: Insurance details of the carrier ACME 1234567",
     "TextBody": "Hi, the auto liability policy runs through April 30, 2026. Cert attached.",
     "StrippedTextReply": "Hi, the auto liability policy runs through April 30, 2026."
@@ -300,47 +300,59 @@ staff mail — repointing it would break every mailbox you have.
 So the reply inbox lives on a **subdomain that has no other purpose**:
 
 ```
-inbox.dollartraq.com    MX  10  mx.sendgrid.net
+inbox.dollartraq.app    MX  10  mx.sendgrid.net
 ```
 
 Nothing else uses that subdomain, so handing its MX to SendGrid costs nothing.
 
-`no-reply@dollartraq.com` stays exactly as it is — it is the **From**, and
+`no-reply@dollartraq.app` stays exactly as it is — it is the **From**, and
 SendGrid only needs it verified for *sending*. The **Reply-To** is what carries
 the conversation:
 
 ```
-From:     no-reply@dollartraq.com        <- verified sender, never receives
-Reply-To: insurance+{dot}-{token}@inbox.dollartraq.com   <- Inbound Parse
+From:     no-reply@dollartraq.app        <- verified sender, never receives
+Reply-To: insurance+{dot}-{token}@inbox.dollartraq.app   <- Inbound Parse
 ```
 
 The agency presses Reply in their mail client and it goes to the Reply-To, not
 the From. That is the entire trick, and it is why "no-reply" being just a name
 is fine.
 
-### Step 1 — sending
+### Step 1 — sending: already done
 
-Verify `no-reply@dollartraq.com` under **Settings → Sender Authentication**
-(single sender is enough to start; domain authentication is better for
-deliverability). Create an API key with **Mail Send** permission, then:
+The application already sends through SendGrid; nothing here needs changing.
+For reference, that is:
 
 ```dotenv
 MAIL_MAILER=smtp
 MAIL_HOST=smtp.sendgrid.net
 MAIL_PORT=587
-MAIL_USERNAME=apikey          # the literal word "apikey", not your key
-MAIL_PASSWORD=SG.xxxxxxxx     # the key itself
-MAIL_ENCRYPTION=tls
-MAIL_FROM_ADDRESS=no-reply@dollartraq.com
-MAIL_FROM_NAME="DollarTraq Team"
+MAIL_SCHEME=smtp              # NOT MAIL_ENCRYPTION - removed in Laravel 11+.
+MAIL_USERNAME=apikey          # the literal word "apikey", not the key
+MAIL_PASSWORD=SG....          # the key itself
+MAIL_FROM_ADDRESS="no-reply@dollartraq.app"
+MAIL_FROM_NAME="dollarTraq"
 ```
+
+`MAIL_SCHEME=smtp` on port 587 means STARTTLS. `smtps` is for implicit TLS on
+465. `MAIL_ENCRYPTION` is silently ignored by this version of the framework —
+setting it does nothing at all.
+
+The one thing to check is that `no-reply@dollartraq.app` is verified under
+**Settings → Sender Authentication**. Since carrier invitations already go out
+from it, it is.
+
+> **The mail domain and the API domain are different on purpose.** Mail is
+> `dollartraq.app`; the API this webhook lives on is
+> `brokerapi.dollartraq.com`. Both are correct — do not "fix" one to match the
+> other.
 
 ### Step 2 — DNS
 
 Add the MX at your DNS provider and wait for it to propagate:
 
 ```bash
-dig +short MX inbox.dollartraq.com
+dig +short MX inbox.dollartraq.app
 # expect: 10 mx.sendgrid.net.
 ```
 
@@ -353,7 +365,7 @@ until the MX resolves.
 
 | Field | Value |
 |---|---|
-| Receiving domain | `inbox.dollartraq.com` |
+| Receiving domain | `inbox.dollartraq.app` |
 | Destination URL | `https://brokerapi.dollartraq.com/api/v1/webhooks/inbound-email?secret=YOUR_SECRET` |
 | POST the raw, full MIME message | **leave unchecked** |
 | Check incoming emails for spam | optional |
@@ -369,8 +381,8 @@ normaliser is happiest with.
 
 ```dotenv
 COI_INBOX_LOCAL_PART=insurance
-COI_INBOX_DOMAIN=inbox.dollartraq.com
-COI_FROM_ADDRESS=no-reply@dollartraq.com
+COI_INBOX_DOMAIN=inbox.dollartraq.app
+COI_FROM_ADDRESS=no-reply@dollartraq.app
 COI_FROM_NAME="DollarTraq Team"
 COI_INBOUND_SECRET=YOUR_SECRET
 ANTHROPIC_API_KEY=sk-ant-...
@@ -422,7 +434,7 @@ the worker is down it stops here and the card still says Pending.
 
 **3.** Check your Gmail. Subject:
 `Insurance details of the carrier <name> 10000`. Check the **Reply-To** is
-`insurance+10000-<token>@inbox.dollartraq.com` — in Gmail, "Show original".
+`insurance+10000-<token>@inbox.dollartraq.app` — in Gmail, "Show original".
 If the mail never arrives, it is SendGrid sending, not this feature:
 **Activity Feed** in the SendGrid dashboard will say why.
 
