@@ -48,6 +48,14 @@ return [
         'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
     ],
 
+    /*
+     | Reads the policy expiry date out of an insurance agency's reply. See
+     | config/coi_insurance.php for the model and the rest of that flow.
+     */
+    'anthropic' => [
+        'key' => env('ANTHROPIC_API_KEY'),
+    ],
+
     // SMS gateway for onboarding OTPs.
     'telnyx' => [
         'key' => env('TELNYX_API_KEY'),

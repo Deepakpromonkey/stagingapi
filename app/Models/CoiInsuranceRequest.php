@@ -1,0 +1,131 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Support\Str;
+
+/**
+ * A request to a carrier's insurance agency for current COI details.
+ *
+ * The lifecycle is one-way: pending -> responded -> success, with failed and
+ * expired as the two ways out. Nothing moves a row backwards, so a second
+ * reply on an already-resolved request is stored but does not re-open it.
+ */
+class CoiInsuranceRequest extends Model
+{
+    public const STATUS_PENDING = 'pending';
+
+    public const STATUS_RESPONDED = 'responded';
+
+    public const STATUS_SUCCESS = 'success';
+
+    public const STATUS_FAILED = 'failed';
+
+    public const STATUS_EXPIRED = 'expired';
+
+    protected $fillable = [
+        'uuid',
+        'company_id',
+        'user_id',
+        'dot_number',
+        'carrier_name',
+        'carrier_mc',
+        'recipient_email',
+        'recipient_source',
+        'status',
+        'reply_token',
+        'subject',
+        'message_id',
+        'insurance_expiry_date',
+        'sent_at',
+        'responded_at',
+        'resolved_at',
+        'last_error',
+    ];
+
+    protected $casts = [
+        'dot_number' => 'integer',
+        'insurance_expiry_date' => 'date',
+        'sent_at' => 'datetime',
+        'responded_at' => 'datetime',
+        'resolved_at' => 'datetime',
+    ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (self $request) {
+            $request->uuid ??= (string) Str::uuid();
+            $request->reply_token ??= self::newReplyToken();
+        });
+    }
+
+    /**
+     * The random half of the Reply-To sub-address.
+     *
+     * Long enough that guessing one is not a way to inject a fabricated expiry
+     * date into another company's carrier, and restricted to characters that
+     * survive a mail provider's address normalisation unchanged.
+     */
+    public static function newReplyToken(): string
+    {
+        return Str::lower(Str::random(24));
+    }
+
+    public function company(): BelongsTo
+    {
+        return $this->belongsTo(Company::class);
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function responses(): HasMany
+    {
+        return $this->hasMany(CoiInsuranceResponse::class);
+    }
+
+    /**
+     * The reply the current answer was read out of — the newest one, because a
+     * follow-up correction from the agency supersedes the first mail.
+     */
+    public function latestResponse(): HasOne
+    {
+        return $this->hasOne(CoiInsuranceResponse::class)->latestOfMany();
+    }
+
+    public function isOpen(): bool
+    {
+        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_RESPONDED], true);
+    }
+
+    /**
+     * The address the agency replies to: the shared inbox, sub-addressed with
+     * this carrier's DOT and this request's token.
+     */
+    public function replyToAddress(): string
+    {
+        $local = config('coi_insurance.inbox.local_part');
+        $domain = config('coi_insurance.inbox.domain');
+
+        return sprintf('%s+%d-%s@%s', $local, $this->dot_number, $this->reply_token, $domain);
+    }
+
+    /**
+     * The subject line the whole feature is identified by, in the broker's
+     * inbox as much as in ours.
+     */
+    public static function buildSubject(?string $carrierName, int|string $dot): string
+    {
+        $name = trim((string) $carrierName);
+
+        return 'Insurance details of the carrier '
+            .($name !== '' ? $name.' ' : '')
+            .$dot;
+    }
+}

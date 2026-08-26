@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use Anthropic\Client as AnthropicClient;
 use App\Models\User;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
@@ -22,7 +23,16 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        /*
+         | The Anthropic client reads ANTHROPIC_API_KEY off the process
+         | environment when constructed bare, which is not the same thing as
+         | the application's .env once config is cached — php-fpm does not
+         | necessarily carry it. Bound here so the key comes from config like
+         | every other credential in the application.
+         */
+        $this->app->singleton(AnthropicClient::class, function () {
+            return new AnthropicClient(apiKey: config('services.anthropic.key'));
+        });
     }
 
     /**

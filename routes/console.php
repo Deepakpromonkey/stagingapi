@@ -40,3 +40,21 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
     ->hourly()
     ->withoutOverlapping()
     ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
+| Carrier insurance requests
+|--------------------------------------------------------------------------
+|
+| Closes out the ones no agency ever answered. Nothing else moves a request
+| off `pending`, and the resend cooldown in the service will not let a broker
+| ask again while one is still open.
+|
+| Deliberately after the VIN sweep rather than alongside it — both are daily
+| and neither is urgent, so they may as well not contend for the same worker.
+|
+*/
+Schedule::command('coi:expire-requests')
+    ->dailyAt('04:15')
+    ->withoutOverlapping()
+    ->onOneServer();
