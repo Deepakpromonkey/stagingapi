@@ -43,6 +43,42 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 
 /*
 |--------------------------------------------------------------------------
+| Queue
+|--------------------------------------------------------------------------
+|
+| The worker, started from the scheduler rather than supervised.
+|
+| Both queues are intermittent: the VIN sweep is finished, so `vin` now only
+| sees the daily incremental pass, the hourly requeue and the odd fleet-stats
+| refresh a profile view dispatches, while `default` sees a mail and an
+| extraction whenever a broker chases an insurance agency. Neither justifies a
+| process sitting idle around the clock, and until now the only worker on this
+| box was an unsupervised `nohup` that would not survive a reboot.
+|
+| --stop-when-empty means this normally exits in well under a second and does
+| nothing at all when there is nothing to do. If it dies, the next minute
+| starts a fresh one - which is more supervision than it had before.
+|
+| `default` is named first because Laravel drains queues in order, and a broker
+| waiting on a request should not queue behind a VIN batch. The connection is
+| named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
+| would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
+|
+| Delayed jobs are not "available", so the VIN batches' pacing survives this:
+| the worker exits, and the next run picks up whatever has come due.
+|
+| This is a stopgap for a box with no process supervision. Given systemd or
+| supervisor, run a long-lived `queue:work` instead and delete this.
+|
+*/
+Schedule::command('queue:work database --queue=default,vin --stop-when-empty --max-time=50')
+    ->everyMinute()
+    ->withoutOverlapping(2)
+    ->runInBackground()
+    ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
 | Carrier insurance requests
 |--------------------------------------------------------------------------
 |
