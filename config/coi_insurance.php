@@ -34,6 +34,27 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Test recipient
+    |--------------------------------------------------------------------------
+    |
+    | Sends every request here instead of to the agency. For proving the loop
+    | on a live server without mailing a real insurance broker — the whole
+    | point of the feature is that a stranger receives the mail, and that is
+    | not something to discover is broken by sending it.
+    |
+    | The address the resolver actually found is still recorded on the request,
+    | so what the row says is what production would have done. It also stands
+    | in for a missing contact: a DOT whose certificate carries no agency
+    | address can still be walked end to end.
+    |
+    | MUST be empty in production.
+    |
+    */
+
+    'force_recipient' => env('COI_FORCE_RECIPIENT'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Inbound webhook
     |--------------------------------------------------------------------------
     |

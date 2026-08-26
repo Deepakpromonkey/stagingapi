@@ -286,3 +286,180 @@ php artisan tinker
 
 The last two are the ones to actually run — they are what stops the feature
 mailing an agency repeatedly or billing twice for one reply.
+
+---
+
+## 8. SendGrid, end to end
+
+### The constraint that shapes everything
+
+SendGrid receives mail through **Inbound Parse**, which works by owning a
+domain's **MX record**. Your main domain's MX points at whatever runs your
+staff mail — repointing it would break every mailbox you have.
+
+So the reply inbox lives on a **subdomain that has no other purpose**:
+
+```
+inbox.dollartraq.com    MX  10  mx.sendgrid.net
+```
+
+Nothing else uses that subdomain, so handing its MX to SendGrid costs nothing.
+
+`no-reply@dollartraq.com` stays exactly as it is — it is the **From**, and
+SendGrid only needs it verified for *sending*. The **Reply-To** is what carries
+the conversation:
+
+```
+From:     no-reply@dollartraq.com        <- verified sender, never receives
+Reply-To: insurance+{dot}-{token}@inbox.dollartraq.com   <- Inbound Parse
+```
+
+The agency presses Reply in their mail client and it goes to the Reply-To, not
+the From. That is the entire trick, and it is why "no-reply" being just a name
+is fine.
+
+### Step 1 — sending
+
+Verify `no-reply@dollartraq.com` under **Settings → Sender Authentication**
+(single sender is enough to start; domain authentication is better for
+deliverability). Create an API key with **Mail Send** permission, then:
+
+```dotenv
+MAIL_MAILER=smtp
+MAIL_HOST=smtp.sendgrid.net
+MAIL_PORT=587
+MAIL_USERNAME=apikey          # the literal word "apikey", not your key
+MAIL_PASSWORD=SG.xxxxxxxx     # the key itself
+MAIL_ENCRYPTION=tls
+MAIL_FROM_ADDRESS=no-reply@dollartraq.com
+MAIL_FROM_NAME="DollarTraq Team"
+```
+
+### Step 2 — DNS
+
+Add the MX at your DNS provider and wait for it to propagate:
+
+```bash
+dig +short MX inbox.dollartraq.com
+# expect: 10 mx.sendgrid.net.
+```
+
+Do not move on until that answers. Inbound Parse silently receives nothing
+until the MX resolves.
+
+### Step 3 — Inbound Parse
+
+**Settings → Inbound Parse → Add Host & URL**:
+
+| Field | Value |
+|---|---|
+| Receiving domain | `inbox.dollartraq.com` |
+| Destination URL | `https://brokerapi.dollartraq.com/api/v1/webhooks/inbound-email?secret=YOUR_SECRET` |
+| POST the raw, full MIME message | **leave unchecked** |
+| Check incoming emails for spam | optional |
+
+The secret goes in the query string because Inbound Parse cannot set a custom
+header. Use a long random value — it is the only thing standing between the
+open internet and a fabricated insurance expiry date.
+
+Raw-MIME mode is handled if you tick it, but the parsed form is what the
+normaliser is happiest with.
+
+### Step 4 — application
+
+```dotenv
+COI_INBOX_LOCAL_PART=insurance
+COI_INBOX_DOMAIN=inbox.dollartraq.com
+COI_FROM_ADDRESS=no-reply@dollartraq.com
+COI_FROM_NAME="DollarTraq Team"
+COI_INBOUND_SECRET=YOUR_SECRET
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```bash
+composer install
+php artisan migrate
+php artisan config:clear     # or config:cache, if that is what you run
+```
+
+Make sure a worker is draining the queue, or nothing sends and nothing extracts.
+
+---
+
+## 9. Proving it on live, safely
+
+Point every request at your own inbox first. A real insurance agency should not
+be the audience for a first run.
+
+```dotenv
+COI_FORCE_RECIPIENT=deepakgandhi2007@gmail.com
+```
+
+The mail goes to you; the row still records what the resolver actually found,
+as `recipient_source: test:ocr` (or `test:none` when the certificate carried no
+address). So the run still tells you whether resolution works — it just does
+not mail a stranger to find out. It also lets a DOT with no contact at all be
+walked end to end, which is how DOT 10000 can be used whether or not it has a
+certificate on file.
+
+**Remember to remove it.** While it is set, every broker's request goes to you.
+
+### The walkthrough
+
+**1.** Open the carrier profile for DOT 10000 and press **Raise request**.
+The card should show **Pending**.
+
+**2.** Watch the row appear:
+
+```sql
+SELECT id, dot_number, carrier_name, carrier_mc, recipient_email,
+       recipient_source, status, reply_token, sent_at
+FROM coi_insurance_requests ORDER BY id DESC LIMIT 1;
+```
+
+`sent_at` set means it reached the queue — **not** that it was delivered. If
+the worker is down it stops here and the card still says Pending.
+
+**3.** Check your Gmail. Subject:
+`Insurance details of the carrier <name> 10000`. Check the **Reply-To** is
+`insurance+10000-<token>@inbox.dollartraq.com` — in Gmail, "Show original".
+If the mail never arrives, it is SendGrid sending, not this feature:
+**Activity Feed** in the SendGrid dashboard will say why.
+
+**4.** Reply to it from Gmail — normally, hitting Reply. Write something a
+human would write:
+
+> Hi, the auto liability policy is valid through April 30, 2026.
+
+**5.** Within seconds:
+
+```sql
+SELECT id, coi_insurance_request_id, from_email, extracted_expiry_date, llm_response
+FROM coi_insurance_responses ORDER BY id DESC LIMIT 1;
+
+SELECT status, insurance_expiry_date, last_error
+FROM coi_insurance_requests ORDER BY id DESC LIMIT 1;
+```
+
+Expect `status = success` and `insurance_expiry_date = 2026-04-30`. The card
+turns **Received**, and Track opens your own reply.
+
+### The four tables involved
+
+| Table | Where | Written by |
+|---|---|---|
+| `coi_insurance_requests` | app database | pressing Raise |
+| `coi_insurance_responses` | app database | the inbound webhook |
+| `jobs` | app database | the mail and the extraction, while queued |
+| `coi_document_extractions` | `external_db` | **read only** — where the agency address is found |
+
+### When it does not work
+
+| Symptom | Look at |
+|---|---|
+| 422 on Raise | No agency address for that DOT — set `COI_FORCE_RECIPIENT` |
+| Stuck at Pending, no mail | Queue worker down; `php artisan queue:work --once` |
+| Mail sent, reply changes nothing | SendGrid **Inbound Parse → Activity**; then `dig MX` |
+| Webhook 401 | Secret in the URL does not match `COI_INBOUND_SECRET` |
+| "No matching request" in the log | Reply went to the bare inbox, not the sub-address — check Reply-To |
+| `failed` with an auth error | `ANTHROPIC_API_KEY` missing, or config cached before it was added |

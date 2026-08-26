@@ -75,12 +75,25 @@ class CarrierInsuranceRequestService
 
         $contact = $this->contacts->resolve($dotNumber);
 
-        if ($contact === null) {
+        $forced = config('coi_insurance.force_recipient');
+
+        if ($contact === null && ! $forced) {
             throw new RuntimeException(
                 'No insurance contact could be found for DOT '.$dotNumber
                 .'. The certificate on file does not carry an agency email address.'
             );
         }
+
+        /*
+         | With a test recipient set the mail goes there, but the row still
+         | records what the resolver found — otherwise a staging run would
+         | report that every carrier resolves perfectly, which is the one
+         | thing it is being run to check.
+         */
+        $recipient = $forced ?: $contact['email'];
+        $source = $forced
+            ? 'test:'.($contact['source'] ?? 'none')
+            : $contact['source'];
 
         $request = CoiInsuranceRequest::create([
             'company_id' => $user->company_id,
@@ -88,8 +101,8 @@ class CarrierInsuranceRequestService
             'dot_number' => $dotNumber,
             'carrier_name' => $identity['name'],
             'carrier_mc' => $identity['mc'],
-            'recipient_email' => $contact['email'],
-            'recipient_source' => $contact['source'],
+            'recipient_email' => $recipient,
+            'recipient_source' => $source,
             'status' => CoiInsuranceRequest::STATUS_PENDING,
             'subject' => CoiInsuranceRequest::buildSubject($identity['name'], $dotNumber),
         ]);

@@ -61,6 +61,48 @@ class CoiInboundEmailPayloadTest extends TestCase
         );
     }
 
+    /**
+     * SendGrid posts the SMTP envelope as a JSON string. It is the address the
+     * mail was really delivered to, and on a reply-all it is the only one still
+     * carrying our token.
+     */
+    public function test_it_reads_sendgrid_inbound_parse(): void
+    {
+        $payload = InboundEmailPayload::fromProviderPayload([
+            'from' => 'Jane Agent <agent@agency.com>',
+            'to' => 'Jane Agent <agent@agency.com>, insurance@inbox.dollartraq.com',
+            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.com"],"from":"agent@agency.com"}',
+            'subject' => 'Re: Insurance details of the carrier ACME 1234567',
+            'text' => 'Policy runs through 2026-04-30.',
+        ]);
+
+        $this->assertSame('agent@agency.com', $payload->fromEmail);
+
+        // The sub-addressed envelope recipient must come first: it is what the
+        // service matches the request on.
+        $this->assertSame('insurance+1234567-abc123@inbox.dollartraq.com', $payload->recipients[0]);
+        $this->assertSame('Policy runs through 2026-04-30.', $payload->bodyForExtraction());
+    }
+
+    /**
+     * SendGrid's "POST the raw, full MIME message" setting replaces every
+     * parsed field with one blob. Easy to tick by accident, and the failure it
+     * would otherwise cause is a reply with silently no body.
+     */
+    public function test_it_reads_sendgrid_raw_mime_mode(): void
+    {
+        $payload = InboundEmailPayload::fromProviderPayload([
+            'envelope' => '{"to":["insurance+1234567-abc123@inbox.dollartraq.com"],"from":"agent@agency.com"}',
+            'email' => "From: Jane Agent <agent@agency.com>\r\n"
+                ."Subject: Re: Insurance details\r\n"
+                ."Content-Type: text/plain; charset=UTF-8\r\n\r\n"
+                ."Policy runs through 2026-04-30.\r\n",
+        ]);
+
+        $this->assertSame('agent@agency.com', $payload->fromEmail);
+        $this->assertSame('Policy runs through 2026-04-30.', $payload->bodyForExtraction());
+    }
+
     public function test_it_reads_ses_mime_out_of_an_sns_envelope(): void
     {
         $mime = "Content-Type: multipart/alternative; boundary=\"BB\"\r\n"

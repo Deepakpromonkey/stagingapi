@@ -184,20 +184,48 @@ class InboundEmailPayload
      */
     private static function fromGeneric(array $payload): self
     {
+        /*
+         | SendGrid posts the SMTP envelope as a JSON *string*, not as nested
+         | fields, so `envelope.to` reads as nothing without decoding it first.
+         | It matters more than the To header: the header is what the agency's
+         | client wrote and can be rewritten or dropped on a reply-all, while
+         | the envelope is the address the mail was actually delivered to —
+         | which is the one carrying our token.
+         */
+        $envelope = Arr::get($payload, 'envelope');
+
+        if (is_string($envelope)) {
+            $decoded = json_decode($envelope, true);
+            $envelope = is_array($decoded) ? $decoded : [];
+        }
+
         $recipients = array_merge(
+            self::splitAddressList(Arr::get((array) $envelope, 'to')),
             self::splitAddressList(Arr::get($payload, 'to')),
             self::splitAddressList(Arr::get($payload, 'To')),
-            self::splitAddressList(Arr::get($payload, 'envelope.to')),
             (array) Arr::get($payload, 'recipients', []),
         );
 
+        /*
+         | SendGrid's "POST the raw, full MIME message" setting replaces every
+         | parsed field with one `email` blob. Handled rather than forbidden,
+         | because the box is easy to tick by accident and the failure it
+         | causes otherwise is a reply that silently has no body.
+         */
+        $rawMime = Arr::get($payload, 'email');
+        $parsed = is_string($rawMime) && trim($rawMime) !== ''
+            ? MimeMessage::parse($rawMime)
+            : ['text' => null, 'html' => null];
+
         return new self(
-            fromEmail: self::normaliseAddress(Arr::get($payload, 'from') ?? Arr::get($payload, 'From')),
+            fromEmail: self::normaliseAddress(
+                Arr::get($payload, 'from') ?? Arr::get($payload, 'From') ?? Arr::get((array) $envelope, 'from')
+            ),
             fromName: self::nameFromAddress(Arr::get($payload, 'from') ?? Arr::get($payload, 'From')),
             recipients: self::unique($recipients),
             subject: Arr::get($payload, 'subject') ?? Arr::get($payload, 'Subject'),
-            text: Arr::get($payload, 'text') ?? Arr::get($payload, 'plain'),
-            html: Arr::get($payload, 'html'),
+            text: Arr::get($payload, 'text') ?? Arr::get($payload, 'plain') ?? $parsed['text'],
+            html: Arr::get($payload, 'html') ?? $parsed['html'],
             inReplyTo: Arr::get($payload, 'in_reply_to') ?? Arr::get($payload, 'In-Reply-To'),
             receivedAt: self::parseDate(Arr::get($payload, 'date') ?? Arr::get($payload, 'Date')),
             raw: $payload,
