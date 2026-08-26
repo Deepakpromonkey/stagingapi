@@ -15,6 +15,8 @@ use App\Http\Controllers\Api\V1\CarrierPortal\CarrierUserController;
 use App\Http\Controllers\Api\V1\CarrierReportController;
 use App\Http\Controllers\Api\V1\CarrierShortlistController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
+use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
+use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
 use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
@@ -72,6 +74,14 @@ Route::prefix('v1')->group(function () {
 
     // Stripe's own callback. Authorised by the signed payload, not a token.
     Route::post('/stripe/webhook', [StripeWebhookController::class, 'handle']);
+
+    /*
+    | The mail provider's callback for a reply to the insurance inbox. Public
+    | for the same reason Stripe's is — the provider has no token — and
+    | authorised by the shared secret it carries, on a header or the query
+    | string. See config/coi_insurance.php.
+    */
+    Route::post('/webhooks/inbound-email', [InboundEmailWebhookController::class, 'handle']);
 
     /*
     | Signup verification. Public by necessity — there is no account to
@@ -357,6 +367,18 @@ Route::prefix('v1')->group(function () {
 
         // OCR
         Route::post('/ocr-data', [OcrController::class, 'getOcrData']);
+
+        /*
+        | Chasing a carrier's insurance agency for current COI details. Scoped
+        | to the caller's company, so a colleague who opens the same carrier
+        | profile sees the request someone else already raised rather than
+        | mailing the agency a second time.
+        */
+        Route::get('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'index']);
+        Route::post('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'store']);
+        Route::get('/carrier-insurance-requests/responses/{uuid}', [CarrierInsuranceRequestController::class, 'response']);
+        Route::get('/carriers/{dot}/insurance-request', [CarrierInsuranceRequestController::class, 'show'])
+            ->where('dot', '[0-9]+');
 
         /*
         | Carrier onboarding, broker side. Scoped to the caller's company, so
