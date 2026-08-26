@@ -4,9 +4,7 @@ namespace App\Services;
 
 use App\Mail\SignupOtpMail;
 use App\Models\SignupOtp;
-use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
@@ -21,7 +19,7 @@ use Illuminate\Validation\ValidationException;
  */
 class SignupOtpService
 {
-    private const CLICKSEND_URL = 'https://rest.clicksend.com/v3/sms/send';
+    public function __construct(private readonly SmsSender $sms) {}
 
     /**
      * Issue a code and send it.
@@ -293,11 +291,8 @@ class SignupOtpService
     {
         $body = 'Your DollarTraq verification code is '.$otp.'. It expires in '.$minutes.' minutes.';
 
-        $username = config('services.clicksend.username');
-        $key = config('services.clicksend.key');
-
-        if (! $username || ! $key) {
-            Log::error('ClickSend is not configured; cannot send signup OTP.');
+        if (! $this->sms->isConfigured()) {
+            Log::error('Telnyx is not configured; cannot send signup OTP.');
 
             if (app()->environment('local')) {
                 Log::info('=========== Signup OTP ===========');
@@ -311,51 +306,11 @@ class SignupOtpService
             return false;
         }
 
-        try {
-            $response = $this->clicksend($username, $key)->post(self::CLICKSEND_URL, [
-                'messages' => [[
-                    'to' => $phone,
-                    'body' => $body,
-                    'source' => 'php',
-                ]],
-            ]);
-
-            if ($response->failed() || $response->json('response_code') !== 'SUCCESS') {
-                Log::error('ClickSend rejected the signup OTP', [
-                    'to' => $this->mask($phone),
-                    'status' => $response->status(),
-                    'body' => $response->body(),
-                ]);
-
-                return false;
-            }
-
-            return true;
-        } catch (\Throwable $e) {
-            Log::error('Signup OTP SMS failed', [
-                'to' => $this->mask($phone),
-                'error' => $e->getMessage(),
-            ]);
-
-            return false;
-        }
-    }
-
-    private function clicksend(string $username, string $key): PendingRequest
-    {
-        return Http::withBasicAuth($username, $key)
-            ->acceptJson()
-            ->asJson()
-
-            // The signup form is waiting on this call. Fail fast rather than
-            // holding the request open on an unresponsive gateway.
-            ->timeout(10);
+        return $this->sms->send($phone, $body, 'signup OTP');
     }
 
     private function mask(string $phone): string
     {
-        return strlen($phone) <= 4
-            ? $phone
-            : str_repeat('*', strlen($phone) - 4).substr($phone, -4);
+        return SmsSender::mask($phone);
     }
 }

@@ -24,6 +24,7 @@ use App\Models\Carriers\Carrier;
 use App\Models\EmailTemplate;
 use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
+use App\Services\SmsSender;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -53,10 +54,9 @@ class CarrierConnectController extends BaseController
 
     private const STRIPE_BASE_URL = 'https://api.stripe.com/v1';
 
-    private const CLICKSEND_URL = 'https://rest.clicksend.com/v3/sms/send';
-
     public function __construct(
-        private CarrierAccountService $carrierAccountService
+        private CarrierAccountService $carrierAccountService,
+        private SmsSender $sms
     ) {}
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1969,11 +1969,8 @@ class CarrierConnectController extends BaseController
 
     private function sendSms(string $to, string $body): bool
     {
-        $username = config('services.clicksend.username');
-        $key = config('services.clicksend.key');
-
-        if (! $username || ! $key) {
-            Log::error('ClickSend is not configured; cannot send onboarding OTP.');
+        if (! $this->sms->isConfigured()) {
+            Log::error('Telnyx is not configured; cannot send onboarding OTP.');
 
             // In local the code has just been written to the log, so the step is
             // still testable. Anywhere else, reporting success for a message
@@ -1982,57 +1979,11 @@ class CarrierConnectController extends BaseController
             return app()->environment('local');
         }
 
-        try {
-            $response = Http::withBasicAuth($username, $key)
-                ->acceptJson()
-                ->asJson()
-                ->post(self::CLICKSEND_URL, [
-                    'messages' => [[
-                        'to' => $to,
-                        'body' => $body,
-                        'source' => 'php',
-                    ]],
-                ]);
-
-            if ($response->failed() || $response->json('response_code') !== 'SUCCESS') {
-                Log::error('ClickSend rejected the request', [
-                    'to' => $this->maskPhone($to),
-                    'status' => $response->status(),
-                    'body' => $response->body(),
-                ]);
-
-                return false;
-            }
-
-            // A top-level SUCCESS only means ClickSend accepted the request. The
-            // individual message can still fail — INSUFFICIENT_CREDIT is the
-            // common one — and treating that as sent leaves the carrier waiting
-            // for a code that never arrives.
-            $messageStatus = $response->json('data.messages.0.status');
-
-            if (! in_array($messageStatus, ['SUCCESS', 'QUEUED'], true)) {
-                Log::error('ClickSend accepted the request but did not send', [
-                    'to' => $this->maskPhone($to),
-                    'message_status' => $messageStatus,
-                    'balance_hint' => $response->json('data.total_price'),
-                ]);
-
-                return false;
-            }
-
-            return true;
-        } catch (\Throwable $e) {
-            Log::error('ClickSend SMS threw', [
-                'to' => $this->maskPhone($to),
-                'error' => $e->getMessage(),
-            ]);
-
-            return false;
-        }
+        return $this->sms->send($to, $body, 'onboarding OTP');
     }
 
     /**
-     * FMCSA phone numbers arrive as bare digits, ClickSend wants E.164.
+     * FMCSA phone numbers arrive as bare digits, Telnyx wants E.164.
      */
     private function normalisePhone(?string $phone): ?string
     {

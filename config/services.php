@@ -57,9 +57,21 @@ return [
     ],
 
     // SMS gateway for onboarding OTPs.
-    'clicksend' => [
-        'username' => env('CLICKSEND_USERNAME'),
-        'key' => env('CLICKSEND_KEY'),
+    'telnyx' => [
+        'key' => env('TELNYX_API_KEY'),
+
+        /*
+        | The sending address: a number on the messaging profile, a short code,
+        | or an alphanumeric sender ID. Alphanumeric senders are one-way and are
+        | rejected outright in the US and Canada, so leave this as a number
+        | unless every recipient is somewhere that allows one.
+        |
+        | It may be left unset if a messaging profile with a number pool is
+        | configured below — Telnyx then picks the sending number itself.
+        */
+        'from' => env('TELNYX_FROM'),
+
+        'messaging_profile_id' => env('TELNYX_MESSAGING_PROFILE_ID'),
     ],
 
 ];

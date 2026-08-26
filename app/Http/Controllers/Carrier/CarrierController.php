@@ -20,9 +20,13 @@ use App\Models\CarrierShortlist;
 use App\Models\Connect\CarrierConnectRequestsModel;
 use App\Models\Customers\CustomersQuestionsModel;
 use App\Models\SearchHistory;
+use App\Jobs\RefreshFleetStats;
 use App\Services\Carrier\CarrierChangeLogService;
+use App\Services\Vin\FleetStatsService;
+use App\Services\Vin\VinDecoderService;
 use App\Support\CarrierBenchmarks;
 use App\Support\Fmcsa;
+use App\Support\Vin;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Http\Request;
@@ -2865,6 +2869,26 @@ class CarrierController extends Controller
         }
     }
 
+    /**
+     * Shape one VIN's decoded fields for the response, or nulls when the VIN
+     * is absent, malformed, or not decoded yet.
+     *
+     * @param  \Illuminate\Support\Collection  $decoded  keyed by normalised VIN
+     */
+    protected function decodedVinFields(Collection $decoded, ?string $vin): array
+    {
+        $hit = $decoded->get(Vin::normalize($vin));
+
+        return [
+            'model_year' => $hit?->model_year,
+            'make' => $hit?->make,
+            'model' => $hit?->model,
+            'vehicle_type' => $hit?->vehicle_type,
+            'body_class' => $hit?->body_class,
+            'is_trailer' => $hit?->is_trailer,
+        ];
+    }
+
     public function detail($rowid)
     {
         // row_id is the DOT number rendered as a string, so filter on
@@ -3298,6 +3322,35 @@ class CarrierController extends Controller
         $observedLast120Days = $totalInspections > 0
             ? round(($inspectionsLast120Days * 100) / $totalInspections, 1)
             : 0;
+        /*
+        | Fleet age comes from the VIN patterns decoded off the request path —
+        | see App\Support\Vin. This is a single primary-key read; it never
+        | decodes and never aggregates. A carrier nobody has opened before has
+        | no row yet, so the cards render blank and a refresh is queued.
+        */
+        $fleetStats = app(FleetStatsService::class)->forCarrier((string) $carrier->dot_number);
+
+        $fleetStatsAge = $fleetStats['computed_at']
+            ? Carbon::parse($fleetStats['computed_at'])->diffInSeconds(now())
+            : null;
+
+        if ($fleetStatsAge === null || $fleetStatsAge > (int) config('vin.fleet_stats_ttl', 86400)) {
+            // Unique per carrier for 15 minutes, so a popular profile does not
+            // queue one of these per view.
+            RefreshFleetStats::dispatch((string) $carrier->dot_number);
+        }
+
+        /*
+        | Year / make / model for the inspection rows this response actually
+        | returns. One indexed lookup against the local pattern cache — a miss
+        | is simply a null the frontend renders as a dash.
+        */
+        $vinDecoder = app(VinDecoderService::class);
+
+        $decodedVins = $vinDecoder->lookup(
+            $carrier->inspections->flatMap(fn ($inspection) => [$inspection->vin, $inspection->vin2])
+        );
+
         // ════════════════════════════════════════════════════════════════
         // RESPONSE
         // ════════════════════════════════════════════════════════════════
@@ -3359,6 +3412,14 @@ class CarrierController extends Controller
                     'recent_inspections' => $inspectionsLast120Days,
                     'total_inspections' => $totalInspections,
                 ],
+
+                /*
+                | Average equipment age in years, over every distinct VIN the
+                | carrier has ever been inspected with — not just the recent
+                | inspections returned below. Null until the VIN patterns
+                | behind this carrier have been decoded.
+                */
+                'fleet_age' => $fleetStats,
 
                 // ── Addresses ─────────────────────────────────────────
                 'physical_address' => [
@@ -3422,12 +3483,18 @@ class CarrierController extends Controller
                 // through it without a null check — a 500 on those profiles.
                 'risk_level' => Fmcsa::safetyRating($detail?->safety_rating),
                 // ── Inspections ───────────────────────────────────────
-                'inspections' => $carrier->inspections->map(function ($inspection) {
+                'inspections' => $carrier->inspections->map(function ($inspection) use ($decodedVins) {
                     $data = $inspection->toArray();
 
                     $data['insp_date'] = $inspection->insp_date
                         ? Carbon::parse($inspection->insp_date)->format('Y-m-d')
                         : null;
+
+                    // Decoded from the VIN. The FMCSA feed carries a make but
+                    // never a model or a model year, which is why the fleet
+                    // table had nothing to show in those columns.
+                    $data['vin_decoded'] = $this->decodedVinFields($decodedVins, $inspection->vin);
+                    $data['vin2_decoded'] = $this->decodedVinFields($decodedVins, $inspection->vin2);
 
                     return $data;
                 }),

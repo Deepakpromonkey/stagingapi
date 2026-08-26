@@ -10,12 +10,48 @@ Artisan::command('inspire', function () {
 
 /*
 |--------------------------------------------------------------------------
+| VIN decoding
+|--------------------------------------------------------------------------
+|
+| Both of these keep the fleet cards and the year/model columns current
+| without anything happening on the request path. Neither is the first run:
+| the initial sweep is `php artisan vin:backfill`, run by hand once, and it
+| needs a worker on the vin queue to drain what it schedules.
+|
+*/
+
+// Patterns from inspection rows the FMCSA loader added since the last pass.
+Schedule::command('vin:backfill --incremental')
+    ->dailyAt('03:30')
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Patterns whose row was written but whose job was lost — a killed worker, a
+// queue:clear, a job that exhausted its attempts. Nothing else picks these up,
+// because everything else deliberately skips a pattern that already has a row.
+Schedule::command('vin:requeue')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Recompute the carriers whose stored fleet age has gone stale. Capped per
+// run so this never turns into an unbounded job.
+Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
 | Carrier insurance requests
 |--------------------------------------------------------------------------
 |
 | Closes out the ones no agency ever answered. Nothing else moves a request
 | off `pending`, and the resend cooldown in the service will not let a broker
 | ask again while one is still open.
+|
+| Deliberately after the VIN sweep rather than alongside it — both are daily
+| and neither is urgent, so they may as well not contend for the same worker.
 |
 */
 Schedule::command('coi:expire-requests')
