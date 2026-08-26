@@ -394,7 +394,26 @@ php artisan migrate
 php artisan config:clear     # or config:cache, if that is what you run
 ```
 
-Make sure a worker is draining the queue, or nothing sends and nothing extracts.
+### The worker
+
+The mail and the extraction both go to the `default` queue on the `database`
+connection, and nothing else in the application uses `default` - every other
+job pins itself to `vin`. So a `--queue=vin` worker will not touch these.
+
+`routes/console.php` starts a short-lived worker every minute for both queues,
+driven by the scheduler cron. It exits immediately when there is nothing to do,
+so it costs nothing while idle, and a fresh one starts the next minute if it
+dies. That is a stopgap for a box with no process supervision - given systemd,
+run a long-lived worker instead and delete those lines:
+
+```ini
+ExecStart=/usr/bin/php8.5 /var/www/dollarTraq-main/artisan queue:work database \
+    --queue=default,vin --sleep=3 --max-time=3600
+```
+
+Either way `database` must be named: `QUEUE_CONNECTION` is `sync` in this
+application, and a worker without it watches the wrong connection and sits idle
+forever. See docs/vin-decoding.md.
 
 ---
 
