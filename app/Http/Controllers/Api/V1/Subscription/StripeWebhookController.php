@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\Subscription;
 
 use App\Http\Controllers\Controller;
+use App\Services\BillingService;
 use App\Services\SubscriptionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -21,7 +22,8 @@ class StripeWebhookController extends Controller
     private const SIGNATURE_TOLERANCE = 300;
 
     public function __construct(
-        protected SubscriptionService $subscriptionService
+        protected SubscriptionService $subscriptionService,
+        protected BillingService $billingService
     ) {}
 
     public function handle(Request $request)
@@ -62,7 +64,16 @@ class StripeWebhookController extends Controller
                 // The subscription status moves with it, but syncing off the
                 // invoice too closes the gap when the two events race.
                 'invoice.payment_failed',
+                'invoice.paid',
                 'invoice.payment_succeeded' => $this->handleInvoice($object),
+
+                // No subscription state rides on these, but the invoice
+                // history should still reflect them.
+                'invoice.created',
+                'invoice.finalized',
+                'invoice.updated',
+                'invoice.voided',
+                'invoice.marked_uncollectible' => $this->billingService->syncInvoiceFromStripe($object),
 
                 default => Log::debug('Unhandled Stripe webhook', ['type' => $type]),
             };
@@ -100,17 +111,40 @@ class StripeWebhookController extends Controller
         $this->subscriptionService->syncSubscriptionById($subscriptionId);
     }
 
+    /**
+     * A payment on a subscription invoice, taken or failed.
+     *
+     * The subscription is synced first so the invoice row can be attached to
+     * it, then the invoice itself is mirrored, then — for a payment that
+     * actually landed — our branded copy is emailed.
+     */
     private function handleInvoice(array $invoice): void
     {
         $subscriptionId = $invoice['subscription']
             ?? $invoice['parent']['subscription_details']['subscription']
             ?? null;
 
-        if (! $subscriptionId) {
+        if ($subscriptionId) {
+            $this->subscriptionService->syncSubscriptionById($subscriptionId);
+        }
+
+        $record = $this->billingService->syncInvoiceFromStripe($invoice);
+
+        if (! $record || ! $record->isPaid()) {
             return;
         }
 
-        $this->subscriptionService->syncSubscriptionById($subscriptionId);
+        if (! config('billing.send_branded_email')) {
+            return;
+        }
+
+        /*
+        | `once: true` is what makes this safe to receive twice. Stripe sends
+        | both invoice.paid and invoice.payment_succeeded for the same payment,
+        | and will replay either one after a failed delivery — without the
+        | guard the customer gets the same invoice mailed three or four times.
+        */
+        $this->billingService->sendBrandedInvoiceEmail($record, once: true);
     }
 
     /**

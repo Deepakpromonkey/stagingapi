@@ -481,7 +481,10 @@ class SubscriptionService
             : null;
     }
 
-    private function planForPriceId(?string $priceId): ?string
+    /** Which configured plan a Stripe price belongs to. Public because
+     * App\Services\BillingService resolves an invoice's plan the same way.
+     */
+    public function planForPriceId(?string $priceId): ?string
     {
         if (! $priceId) {
             return null;

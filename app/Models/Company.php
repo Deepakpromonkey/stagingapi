@@ -48,6 +48,15 @@ class Company extends Model
     }
 
     /**
+     * Every Stripe invoice raised against this company, newest first.
+     * Mirrored locally — see App\Services\BillingService.
+     */
+    public function invoices(): HasMany
+    {
+        return $this->hasMany(SubscriptionInvoice::class)->latest('issued_at');
+    }
+
+    /**
      * The subscription the company is billed on right now. Newest wins, so a
      * plan change that leaves the old row behind still resolves correctly.
      */
