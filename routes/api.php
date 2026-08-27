@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentTemplateController;
+use App\Http\Controllers\Api\V1\Subscription\BillingController;
 use App\Http\Controllers\Api\V1\Subscription\StripeWebhookController;
 use App\Http\Controllers\Api\V1\Subscription\SubscriptionController;
 use App\Http\Controllers\Api\V1\User\UserController;
@@ -303,6 +304,37 @@ Route::prefix('v1')->group(function () {
             Route::post('/subscription/checkout/sync', [SubscriptionController::class, 'syncCheckout']);
             Route::post('/subscription/portal', [SubscriptionController::class, 'billingPortal']);
             Route::post('/subscription/enterprise-inquiry', [SubscriptionController::class, 'enterpriseInquiry']);
+        });
+
+        /*
+        | Billing — everything after the plan is bought.
+        |
+        | Reading the account's own invoices and spend is gated on the billing
+        | permission, same as changing the plan: an invoice names what the
+        | company pays, which is not something every seat on a brokerage desk
+        | should be able to read.
+        */
+        Route::middleware(PermissionMiddleware::using('edit-company-profile-billing'))->group(function () {
+
+            Route::get('/billing', [BillingController::class, 'overview']);
+            Route::get('/billing/report', [BillingController::class, 'report']);
+
+            Route::get('/billing/invoices', [BillingController::class, 'invoices']);
+
+            // Before the {invoice} route, or 'export' is read as an invoice
+            // reference and answers 404.
+            Route::get('/billing/invoices/export', [BillingController::class, 'exportInvoices']);
+
+            Route::get('/billing/invoices/{invoice}', [BillingController::class, 'invoice']);
+
+            // The DollarTraq-branded PDF. Not JSON — it answers with the file.
+            Route::get('/billing/invoices/{invoice}/download', [BillingController::class, 'downloadInvoice']);
+
+            Route::post('/billing/invoices/{invoice}/email', [BillingController::class, 'emailInvoice']);
+
+            // Cancel anytime. Ends at the close of the paid period by default.
+            Route::post('/billing/subscription/cancel', [BillingController::class, 'cancel']);
+            Route::post('/billing/subscription/resume', [BillingController::class, 'resume']);
         });
 
         // Team & roles
