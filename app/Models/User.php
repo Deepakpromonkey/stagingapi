@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Carrier;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -10,7 +11,12 @@ use Spatie\Permission\Traits\HasRoles;
 
 class User extends Authenticatable
 {
-    use HasApiTokens, HasRoles, Notifiable;
+    // Removing a teammate must not take their history with them — loads they
+    // booked, payments they released and the invitations they sent all point
+    // back here. `deleted_at` has been on this table since the first
+    // migration; this only starts honouring it, so a removed user drops out
+    // of every query (auth included) while the audit trail stays intact.
+    use HasApiTokens, HasRoles, Notifiable, SoftDeletes;
 
     protected $fillable = [
         'uuid',

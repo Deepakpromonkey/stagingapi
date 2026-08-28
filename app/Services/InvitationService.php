@@ -102,15 +102,96 @@ class InvitationService
     }
 
     /**
+     * Send the invitation again to someone who never got it, or lost it.
+     *
+     * The account already exists — the invite flow creates it up front — so
+     * this mints a fresh temporary password, extends the invitation window
+     * and re-delivers the same email.
+     *
+     * Only for people still sitting on the temporary password. Once someone
+     * has chosen their own, resending would silently overwrite it; they want
+     * a password reset, not another invitation.
+     */
+    public function resendInvitation(User $actor, string $userUuid): Invitation
+    {
+        $invitedUser = User::where('company_id', $actor->company_id)
+            ->where('uuid', $userUuid)
+            ->first();
+
+        if (! $invitedUser) {
+            throw ValidationException::withMessages([
+                'uuid' => ['No such user in your company.'],
+            ]);
+        }
+
+        if (! $invitedUser->must_change_password) {
+            throw ValidationException::withMessages([
+                'uuid' => ['This user has already set their own password. Ask them to use "Forgot password" instead.'],
+            ]);
+        }
+
+        $invitation = Invitation::where('user_id', $invitedUser->id)
+            ->latest('id')
+            ->first();
+
+        if (! $invitation) {
+            throw ValidationException::withMessages([
+                'uuid' => ['There is no invitation on record for this user.'],
+            ]);
+        }
+
+        // Same alphabet as the original invite — this gets typed by hand out
+        // of an email, so no symbols.
+        $temporaryPassword = Str::password(12, letters: true, numbers: true, symbols: false, spaces: false);
+
+        DB::transaction(function () use ($invitedUser, $invitation, $temporaryPassword) {
+
+            $invitedUser->update([
+                'password' => Hash::make($temporaryPassword),
+                'must_change_password' => true,
+            ]);
+
+            // The old temporary password is dead now, so any session opened
+            // with it goes too.
+            $invitedUser->tokens()->delete();
+
+            $invitation->update([
+                'token' => Str::random(64),
+                'expires_at' => now()->addDays(7),
+            ]);
+        });
+
+        $invitation->load(['company', 'role', 'creator', 'user']);
+
+        // Unlike the first send, a failure here has to reach the caller. The
+        // admin pressed "Resend" precisely because delivery is in doubt, and
+        // a success toast over a bounced email is worse than no button.
+        if (! $this->sendInvitationMail($invitation, $temporaryPassword)) {
+            throw ValidationException::withMessages([
+                'email' => ['We could not deliver the invitation email. Please try again shortly.'],
+            ]);
+        }
+
+        return $invitation;
+    }
+
+    /**
      * Delivery failures must not roll back the account that was just created,
      * so this runs outside the transaction.
+     *
+     * Returns whether the message actually went out, for callers that need to
+     * report a failure rather than only log it.
      */
-    protected function sendInvitationMail(Invitation $invitation, string $temporaryPassword): void
+    protected function sendInvitationMail(Invitation $invitation, string $temporaryPassword): bool
     {
+        $delivered = true;
+
         try {
             Mail::to($invitation->email)
                 ->send(new InvitationMail($invitation, $temporaryPassword));
         } catch (\Exception $e) {
+            $delivered = false;
+
             Log::error('Invitation email failed', [
                 'email' => $invitation->email,
                 'error' => $e->getMessage(),
@@ -128,6 +209,8 @@ class InvitationService
             ]);
             Log::info('==================================================');
         }
+
+        return $delivered;
     }
 
     public function acceptInvitation(array $data)

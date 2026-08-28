@@ -342,6 +342,17 @@ Route::prefix('v1')->group(function () {
 
             Route::get('/users', [UserController::class, 'index']);
 
+            // Seat changes, contact edits and switching someone off. What you
+            // may set is bounded by your own seat — see UpdateUserRequest.
+            Route::put('/users/{uuid}', [UserController::class, 'update']);
+
+            // Soft delete. The person leaves the team but their history stays.
+            Route::delete('/users/{uuid}', [UserController::class, 'destroy']);
+
+            // A fresh temporary password by email, for an invite that never
+            // arrived. Keyed by the user uuid the team list already holds.
+            Route::post('/users/{uuid}/resend-invitation', [InvitationController::class, 'resend']);
+
             Route::get('/roles', [RoleController::class, 'index']);
 
             Route::post('/invitations', [InvitationController::class, 'store']);
