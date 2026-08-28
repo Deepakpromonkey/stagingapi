@@ -386,4 +386,160 @@ class BrokerTeamManagementTest extends TestCase
         $this->assertSame(25, $response->json('data.pagination.per_page'));
         $this->assertCount(13, $response->json('data.users'));
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Accepting an invitation
+    // ─────────────────────────────────────────────────────────────────────
+
+    public function test_the_invitation_email_carries_a_link_and_never_a_password(): void
+    {
+        Mail::fake();
+
+        $company = $this->company();
+        $owner = $this->brokerUser($company, 'owner_admin');
+
+        Sanctum::actingAs($owner);
+
+        $this->postJson('/api/v1/invitations', [
+            'first_name' => 'Priya',
+            'email' => 'priya@northwind.test',
+            'role_id' => $this->roleId('agent'),
+        ])->assertCreated();
+
+        $invitation = Invitation::where('email', 'priya@northwind.test')->firstOrFail();
+
+        Mail::assertSent(InvitationMail::class, function (InvitationMail $mail) use ($invitation) {
+            $body = $mail->render();
+
+            return str_contains($mail->acceptUrl, $invitation->token)
+                && str_contains($body, $invitation->token)
+                && ! str_contains(strtolower($body), 'temporary password');
+        });
+    }
+
+    public function test_the_invitation_link_sets_a_password_and_signs_them_in(): void
+    {
+        Mail::fake();
+
+        $company = $this->company();
+        $owner = $this->brokerUser($company, 'owner_admin');
+
+        Sanctum::actingAs($owner);
+
+        $this->postJson('/api/v1/invitations', [
+            'first_name' => 'Priya',
+            'email' => 'priya@northwind.test',
+            'role_id' => $this->roleId('agent'),
+        ])->assertCreated();
+
+        $invitation = Invitation::where('email', 'priya@northwind.test')->firstOrFail();
+        $token = $invitation->token;
+
+        $response = $this->postJson('/api/v1/invitations/accept', [
+            'token' => $token,
+            'password' => 'chosen-password',
+            'password_confirmation' => 'chosen-password',
+        ])->assertOk();
+
+        $this->assertNotEmpty($response->json('data.token'));
+
+        $invited = User::where('email', 'priya@northwind.test')->firstOrFail();
+
+        $this->assertTrue(Hash::check('chosen-password', $invited->password));
+        $this->assertFalse((bool) $invited->must_change_password);
+
+        // The link is spent: the token it carried no longer opens anything.
+        $this->assertNotSame($token, $invitation->fresh()->token);
+    }
+
+    public function test_an_invitation_link_cannot_be_used_twice(): void
+    {
+        Mail::fake();
+
+        $company = $this->company();
+        $owner = $this->brokerUser($company, 'owner_admin');
+
+        Sanctum::actingAs($owner);
+
+        $this->postJson('/api/v1/invitations', [
+            'first_name' => 'Priya',
+            'email' => 'priya@northwind.test',
+            'role_id' => $this->roleId('agent'),
+        ])->assertCreated();
+
+        $token = Invitation::where('email', 'priya@northwind.test')->firstOrFail()->token;
+
+        $this->postJson('/api/v1/invitations/accept', [
+            'token' => $token,
+            'password' => 'chosen-password',
+            'password_confirmation' => 'chosen-password',
+        ])->assertOk();
+
+        $this->postJson('/api/v1/invitations/accept', [
+            'token' => $token,
+            'password' => 'another-password',
+            'password_confirmation' => 'another-password',
+        ])->assertStatus(422)->assertJsonValidationErrors('token');
+
+        // The first password still stands.
+        $invited = User::where('email', 'priya@northwind.test')->firstOrFail();
+        $this->assertTrue(Hash::check('chosen-password', $invited->password));
+    }
+
+    public function test_an_expired_invitation_link_is_refused(): void
+    {
+        Mail::fake();
+
+        $company = $this->company();
+        $owner = $this->brokerUser($company, 'owner_admin');
+
+        Sanctum::actingAs($owner);
+
+        $this->postJson('/api/v1/invitations', [
+            'first_name' => 'Priya',
+            'email' => 'priya@northwind.test',
+            'role_id' => $this->roleId('agent'),
+        ])->assertCreated();
+
+        $invitation = Invitation::where('email', 'priya@northwind.test')->firstOrFail();
+
+        $invitation->update(['expires_at' => now()->subDay()]);
+
+        $this->postJson('/api/v1/invitations/accept', [
+            'token' => $invitation->token,
+            'password' => 'chosen-password',
+            'password_confirmation' => 'chosen-password',
+        ])->assertStatus(422)->assertJsonValidationErrors('token');
+
+        $this->assertTrue(
+            (bool) User::where('email', 'priya@northwind.test')->firstOrFail()->must_change_password
+        );
+    }
+
+    public function test_a_resent_invitation_invalidates_the_first_link(): void
+    {
+        Mail::fake();
+
+        $company = $this->company();
+        $owner = $this->brokerUser($company, 'owner_admin');
+
+        Sanctum::actingAs($owner);
+
+        $this->postJson('/api/v1/invitations', [
+            'first_name' => 'Priya',
+            'email' => 'priya@northwind.test',
+            'role_id' => $this->roleId('agent'),
+        ])->assertCreated();
+
+        $invited = User::where('email', 'priya@northwind.test')->firstOrFail();
+        $staleToken = Invitation::where('user_id', $invited->id)->firstOrFail()->token;
+
+        $this->postJson("/api/v1/users/{$invited->uuid}/resend-invitation")->assertOk();
+
+        $this->postJson('/api/v1/invitations/accept', [
+            'token' => $staleToken,
+            'password' => 'chosen-password',
+            'password_confirmation' => 'chosen-password',
+        ])->assertStatus(422)->assertJsonValidationErrors('token');
+    }
 }
