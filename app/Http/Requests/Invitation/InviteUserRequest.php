@@ -39,8 +39,11 @@ class InviteUserRequest extends FormRequest
                 'email',
                 'max:255',
 
-                // Email should not already exist as a user
-                Rule::unique('users', 'email'),
+                // Email should not already exist as a user. Removed teammates
+                // keep their row so their history stays intact, so skip those
+                // — otherwise the same person could never be invited back.
+                Rule::unique('users', 'email')
+                    ->whereNull('deleted_at'),
 
                 // Email should not already have a pending invitation
                 Rule::unique('invitations', 'email')
