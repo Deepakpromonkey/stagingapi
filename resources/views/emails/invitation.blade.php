@@ -1,3 +1,12 @@
+{{--
+    No credential appears in this email by design. It used to print a
+    temporary password next to a "Sign in" button, which is the exact shape
+    of a credential-harvesting mail -- Microsoft Defender quarantined it as
+    phishing regardless of SPF/DKIM/DMARC all passing. A one-time link that
+    expires carries nothing worth stealing.
+
+    Table layout and inline styles throughout: this has to survive Outlook.
+--}}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -18,50 +27,33 @@
                     </tr>
 
                     <tr>
-                        <td style="padding-bottom: 20px;">
+                        <td style="padding-bottom: 24px;">
                             <p style="margin: 0; color: #6b7280; font-size: 15px; line-height: 1.6;">
-                                You have been invited to join
+                                {{ $invitation->creator->first_name }} {{ $invitation->creator->last_name }}
+                                has added you to
                                 <strong style="color: #111827;">{{ $invitation->company->company_name }}</strong>
-                                as <strong style="color: #111827;">{{ $invitation->role->name }}</strong>.
-                                Your account is ready — sign in with the credentials below.
+                                on dollarTraq as <strong style="color: #111827;">{{ $invitation->role->name }}</strong>.
+                                Choose a password to finish setting up your account.
                             </p>
                         </td>
                     </tr>
 
-                    <!-- Credentials -->
                     <tr>
-                        <td style="padding-bottom: 20px;">
-                            <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px;">
-                                <tr>
-                                    <td style="padding-bottom: 12px;">
-                                        <div style="color: #9ca3af; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px;">Email</div>
-                                        <div style="color: #111827; font-size: 15px; font-weight: 600;">{{ $invitation->email }}</div>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td>
-                                        <div style="color: #9ca3af; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px;">Temporary password</div>
-                                        <div style="font-family: 'Courier New', Courier, monospace; font-size: 22px; font-weight: 800; color: #4f46e5; letter-spacing: 2px;">{{ $temporaryPassword }}</div>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <td align="center" style="padding-bottom: 24px;">
-                            <a href="{{ rtrim(config('app.frontend_url'), '/') }}/login"
+                        <td align="center" style="padding-bottom: 20px;">
+                            <a href="{{ $acceptUrl }}"
                                style="background:#2563eb; color:#ffffff; padding:13px 26px; text-decoration:none; border-radius:6px; font-size:15px; font-weight:600; display:inline-block;">
-                                Sign in
+                                Choose your password
                             </a>
                         </td>
                     </tr>
 
                     <tr>
                         <td style="padding-bottom: 24px;">
-                            <p style="margin: 0; color: #b45309; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px; font-size: 13px; line-height: 1.6;">
-                                <strong>You'll be asked to choose a new password the first time you sign in.</strong>
-                                Until then this temporary password is the only way into the account, so please don't forward this email.
+                            <p style="margin: 0 0 6px 0; color: #9ca3af; font-size: 12px; line-height: 1.5;">
+                                Or paste this address into your browser:
+                            </p>
+                            <p style="margin: 0; color: #4b5563; font-size: 12px; line-height: 1.5; word-break: break-all;">
+                                {{ $acceptUrl }}
                             </p>
                         </td>
                     </tr>
@@ -69,8 +61,10 @@
                     <tr>
                         <td style="border-top: 1px solid #f1f5f9; padding-top: 20px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 13px; line-height: 1.5;">
-                                Invited by {{ $invitation->creator->first_name }} {{ $invitation->creator->last_name }}.
-                                If you weren't expecting this invitation, please contact your administrator.
+                                This link works once and expires on
+                                {{ $invitation->expires_at->format('j F Y') }}.
+                                If you weren't expecting it, you can ignore this email — no account can be
+                                opened without it.
                             </p>
                         </td>
                     </tr>
