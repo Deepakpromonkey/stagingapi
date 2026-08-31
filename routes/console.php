@@ -60,7 +60,9 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 | starts a fresh one - which is more supervision than it had before.
 |
 | `default` is named first because Laravel drains queues in order, and a broker
-| waiting on a request should not queue behind a VIN batch. The connection is
+| waiting on a request should not queue behind a VIN batch. `eld` is named last
+| for the same reason, and is the heaviest of the three: one first sync
+| backfills a month of duty-status logs for an entire fleet. The connection is
 | named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
 | would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
 |
@@ -71,7 +73,7 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 | supervisor, run a long-lived `queue:work` instead and delete this.
 |
 */
-Schedule::command('queue:work database --queue=default,vin --stop-when-empty --max-time=50')
+Schedule::command('queue:work database --queue=default,vin,eld --stop-when-empty --max-time=50')
     ->everyMinute()
     ->withoutOverlapping(2)
     ->runInBackground()
@@ -92,5 +94,24 @@ Schedule::command('queue:work database --queue=default,vin --stop-when-empty --m
 */
 Schedule::command('coi:expire-requests')
     ->dailyAt('04:15')
+    ->withoutOverlapping()
+    ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
+| ELD / telematics
+|--------------------------------------------------------------------------
+|
+| Terminal's webhooks are what normally moves a fleet forward; this is the
+| backstop for the deliveries that never arrive — an endpoint that was down, a
+| provider that went quiet, a connection made while the webhook was
+| misconfigured. Nothing else would notice any of those.
+|
+| Hourly rather than by the minute: `resync_after_minutes` decides what is
+| actually stale, and this only queues what has crossed it.
+|
+*/
+Schedule::command('eld:sync --stale')
+    ->hourly()
     ->withoutOverlapping()
     ->onOneServer();

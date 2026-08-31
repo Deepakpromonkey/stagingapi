@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
 use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
+use App\Http\Controllers\Api\V1\Eld\TerminalWebhookController;
 use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
@@ -66,6 +67,14 @@ Route::prefix('v1')->group(function () {
     Route::post('/signup', [AuthController::class, 'signup']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
+
+    /*
+    | Terminal (ELD) webhooks. Public because Terminal has no session here —
+    | authenticity is the Svix signature, checked before the body is read. No
+    | throttle: throttling a webhook means Terminal retries, which arrives as
+    | more of the same traffic.
+    */
+    Route::post('/webhooks/terminal', TerminalWebhookController::class);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
@@ -134,6 +143,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/identity/verify', [CarrierConnectController::class, 'checkIdentityVerification']);
             Route::post('/stripe/connect', [CarrierConnectController::class, 'connectStripe']);
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
+            Route::post('/eld/connect', [CarrierConnectController::class, 'connectEld']);
+            Route::post('/eld/verify', [CarrierConnectController::class, 'verifyEld']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
             Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);
