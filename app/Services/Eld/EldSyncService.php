@@ -35,9 +35,16 @@ class EldSyncService
     /**
      * Full pass over one connection.
      *
-     * Returns the counts rather than throwing on a partial failure: a fleet
-     * that synced its vehicles but tripped over HOS is still more useful than
-     * no fleet at all, and the error is recorded on the connection.
+     * Each collection is attempted on its own and a failure in one does not
+     * abandon the rest. Terminal scopes permissions per resource, so an
+     * account without `hos:read` answers 403 there and 200 everywhere else —
+     * losing the whole fleet over one missing scope would be absurd, and
+     * retrying it would not help either.
+     *
+     * The distinction that matters downstream:
+     *   completed  everything came across
+     *   partial    some resources refused; what arrived is real
+     *   failed     nothing came across, and the job should retry
      */
     public function sync(EldConnection $connection): array
     {
@@ -46,35 +53,73 @@ class EldSyncService
             'last_sync_error' => null,
         ])->save();
 
-        $counts = [];
-
+        // The liveness check, and the only fatal step: if the connection
+        // itself cannot be read, the four below are certain to fail too.
         try {
             $this->refreshConnection($connection);
-
-            $counts['vehicles'] = $this->syncVehicles($connection);
-            $counts['drivers'] = $this->syncDrivers($connection);
-            $counts['hos_logs'] = $this->syncHosLogs($connection);
-            $counts['locations'] = $this->syncVehicleLocations($connection);
-
-            $connection->forceFill([
-                'sync_status' => 'completed',
-                'last_synced_at' => now(),
-            ])->save();
         } catch (Throwable $e) {
-            $connection->forceFill([
-                'sync_status' => 'failed',
-                'last_sync_error' => mb_substr($e->getMessage(), 0, 1000),
-            ])->save();
-
-            Log::error('ELD sync failed', array_merge([
-                'connection' => $connection->terminal_connection_id,
-                'error' => $e->getMessage(),
-            ], $e instanceof TerminalRequestException ? $e->context() : []));
+            $this->recordFailure($connection, $e);
 
             throw $e;
         }
 
+        $counts = [];
+        $errors = [];
+
+        foreach ([
+            'vehicles' => fn () => $this->syncVehicles($connection),
+            'drivers' => fn () => $this->syncDrivers($connection),
+            'hos_logs' => fn () => $this->syncHosLogs($connection),
+            'locations' => fn () => $this->syncVehicleLocations($connection),
+        ] as $resource => $pull) {
+            try {
+                $counts[$resource] = $pull();
+            } catch (Throwable $e) {
+                $errors[$resource] = $e->getMessage();
+
+                Log::warning('ELD sync could not read '.$resource, array_merge([
+                    'connection' => $connection->terminal_connection_id,
+                    'error' => $e->getMessage(),
+                ], $e instanceof TerminalRequestException ? $e->context() : []));
+            }
+        }
+
+        // Nothing at all came across — that is a failure, and the job retrying
+        // it is the right response.
+        if (count($errors) === 4) {
+            $e = new TerminalRequestException(
+                'Terminal refused every resource on this connection.',
+                0,
+                json_encode($errors)
+            );
+
+            $this->recordFailure($connection, $e);
+
+            throw $e;
+        }
+
+        $connection->forceFill([
+            'sync_status' => $errors ? 'partial' : 'completed',
+            'last_synced_at' => now(),
+            'last_sync_error' => $errors
+                ? mb_substr(json_encode($errors), 0, 1000)
+                : null,
+        ])->save();
+
         return $counts;
+    }
+
+    protected function recordFailure(EldConnection $connection, Throwable $e): void
+    {
+        $connection->forceFill([
+            'sync_status' => 'failed',
+            'last_sync_error' => mb_substr($e->getMessage(), 0, 1000),
+        ])->save();
+
+        Log::error('ELD sync failed', array_merge([
+            'connection' => $connection->terminal_connection_id,
+            'error' => $e->getMessage(),
+        ], $e instanceof TerminalRequestException ? $e->context() : []));
     }
 
     /**
@@ -190,8 +235,8 @@ class EldSyncService
                     'source_id' => $row['sourceId'] ?? null,
                     'provider' => $row['provider'] ?? $connection->provider_code,
                     'status' => $row['status'] ?? $row['dutyStatus'] ?? null,
-                    'driver_terminal_id' => $row['driverId'] ?? Arr::get($row, 'driver.id'),
-                    'vehicle_terminal_id' => $row['vehicleId'] ?? Arr::get($row, 'vehicle.id'),
+                    'driver_terminal_id' => $this->relationId($row, 'driver'),
+                    'vehicle_terminal_id' => $this->relationId($row, 'vehicle'),
                     'started_at' => $row['startedAt'] ?? null,
                     'ended_at' => $row['endedAt'] ?? null,
                     'latitude' => Arr::get($row, 'location.latitude'),
@@ -215,7 +260,7 @@ class EldSyncService
         $rows = $this->terminal->paginate('/vehicles/locations', $connection->connection_token);
 
         foreach ($rows as $row) {
-            $vehicleId = $row['vehicleId'] ?? Arr::get($row, 'vehicle.id');
+            $vehicleId = $this->relationId($row, 'vehicle');
 
             if (! $vehicleId) {
                 continue;
@@ -231,14 +276,44 @@ class EldSyncService
                     'longitude' => $row['longitude'] ?? Arr::get($row, 'location.longitude'),
                     'speed' => $row['speed'] ?? null,
                     'heading' => $row['heading'] ?? null,
-                    'description' => $row['description'] ?? Arr::get($row, 'location.description'),
-                    'located_at' => $row['timestamp'] ?? $row['locatedAt'] ?? null,
+                    'description' => Arr::get($row, 'address.formatted')
+                        ?? $row['description']
+                        ?? Arr::get($row, 'location.description'),
+                    'located_at' => $row['locatedAt'] ?? $row['timestamp'] ?? null,
                     'payload' => $row,
                 ]
             );
         }
 
         return count($rows);
+    }
+
+    /**
+     * Resolve a reference to another record.
+     *
+     * Terminal points at a related entity in three different ways depending on
+     * the endpoint: a bare id string (`"vehicle": "vcl_..."` — what
+     * /vehicles/locations actually returns), an expanded object
+     * (`"vehicle": {"id": ...}` when `expand` is used), or a flat sibling key
+     * (`vehicleId`). Reading only one of them silently drops every row, which
+     * is exactly what happened to locations until a real sandbox response was
+     * put in front of it.
+     */
+    protected function relationId(array $row, string $key): ?string
+    {
+        $value = $row[$key] ?? null;
+
+        if (is_string($value) && $value !== '') {
+            return $value;
+        }
+
+        if (is_array($value) && ! empty($value['id'])) {
+            return $value['id'];
+        }
+
+        $flat = $row[$key.'Id'] ?? null;
+
+        return is_string($flat) && $flat !== '' ? $flat : null;
     }
 
     /**

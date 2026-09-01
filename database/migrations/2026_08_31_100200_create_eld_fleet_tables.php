@@ -98,9 +98,18 @@ return new class extends Migration
 
             $table->unique(['eld_connection_id', 'terminal_id']);
 
-            // "This driver's last 8 days", which is the only way anyone reads
-            // these — a compliance view, not a log dump.
-            $table->index(['eld_connection_id', 'driver_terminal_id', 'started_at']);
+            /*
+            | "This driver's last 8 days", which is the only way anyone reads
+            | these — a compliance view, not a log dump.
+            |
+            | Named, because the one Laravel derives from three columns and a
+            | table this long comes to 66 characters and MySQL stops at 64.
+            | sqlite has no such limit, so the test suite cannot catch it.
+            */
+            $table->index(
+                ['eld_connection_id', 'driver_terminal_id', 'started_at'],
+                'eld_hos_logs_driver_window_index'
+            );
         });
 
         Schema::create('eld_vehicle_locations', function (Blueprint $table) {
@@ -120,7 +129,11 @@ return new class extends Migration
             $table->json('payload')->nullable();
             $table->timestamps();
 
-            $table->unique(['eld_connection_id', 'vehicle_terminal_id']);
+            // Named for the same reason as the HOS index above.
+            $table->unique(
+                ['eld_connection_id', 'vehicle_terminal_id'],
+                'eld_vehicle_locations_connection_vehicle_unique'
+            );
         });
     }
 

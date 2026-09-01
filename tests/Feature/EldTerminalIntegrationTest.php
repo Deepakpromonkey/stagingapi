@@ -334,14 +334,18 @@ class EldTerminalIntegrationTest extends TestCase
                 'status' => 'connected',
                 'provider' => ['code' => 'geotab', 'name' => 'Geotab'],
             ]),
+            // Shaped from a real sandbox response: `vehicle` is a bare id
+            // string, coordinates are nested, and the time is `locatedAt`.
             '*/vehicles/locations*' => Http::response([
                 'results' => [[
-                    'id' => 'loc_1',
-                    'vehicleId' => 'vcl_1',
-                    'latitude' => 36.1627,
-                    'longitude' => -86.7816,
+                    'provider' => 'motive',
+                    'vehicle' => 'vcl_1',
+                    'driver' => 'drv_1',
                     'speed' => 62.5,
-                    'timestamp' => '2026-08-30T12:00:00.000Z',
+                    'heading' => 54,
+                    'locatedAt' => '2026-08-30T12:00:00.000Z',
+                    'address' => ['formatted' => 'Daly Avenue, Ottawa, ON'],
+                    'location' => ['latitude' => 36.1627, 'longitude' => -86.7816],
                 ]],
             ]),
             '*/vehicles*' => Http::response([
@@ -406,7 +410,114 @@ class EldTerminalIntegrationTest extends TestCase
         // `dutyStatus` and `status` both appear in Terminal's own docs.
         $this->assertSame('driving', $connection->hosLogs()->firstOrFail()->status);
 
-        $this->assertSame(62.5, $connection->vehicleLocations()->firstOrFail()->speed);
+        $location = $connection->vehicleLocations()->firstOrFail();
+
+        $this->assertSame(62.5, $location->speed);
+        $this->assertSame('vcl_1', $location->vehicle_terminal_id);
+        $this->assertSame(36.1627, $location->latitude);
+        $this->assertSame('Daly Avenue, Ottawa, ON', $location->description);
+    }
+
+    /**
+     * Terminal points at a related record three different ways depending on the
+     * endpoint. Reading only one of them drops every row silently — locations
+     * counted four and stored none until a real response was put in front of
+     * it, which no amount of self-consistent fixtures would have caught.
+     */
+    public function test_it_resolves_a_related_record_however_terminal_spells_it(): void
+    {
+        $connection = EldConnection::create([
+            'uuid' => Str::uuid(),
+            'terminal_connection_id' => 'conn_01TESTCONNECTION',
+            'connection_token' => 'con_tkn_secret',
+            'status' => EldConnection::STATUS_CONNECTED,
+        ]);
+
+        Http::fake([
+            '*/connections/current' => Http::response(['id' => 'conn_01TESTCONNECTION', 'status' => 'connected']),
+            '*/vehicles/locations*' => Http::response(['results' => [
+                // A bare id string, as /vehicles/locations really answers.
+                ['vehicle' => 'vcl_bare', 'location' => ['latitude' => 1.0, 'longitude' => 2.0]],
+
+                // An expanded object, as `expand=vehicle` answers.
+                ['vehicle' => ['id' => 'vcl_expanded'], 'location' => ['latitude' => 3.0, 'longitude' => 4.0]],
+
+                // A flat sibling key, as the OpenAPI spec describes.
+                ['vehicleId' => 'vcl_flat', 'location' => ['latitude' => 5.0, 'longitude' => 6.0]],
+
+                // Nothing usable — skipped rather than stored against no vehicle.
+                ['location' => ['latitude' => 7.0, 'longitude' => 8.0]],
+            ]]),
+            '*/vehicles*' => Http::response(['results' => []]),
+            '*/drivers*' => Http::response(['results' => []]),
+            '*/hos/logs*' => Http::response(['results' => []]),
+        ]);
+
+        app(EldSyncService::class)->sync($connection);
+
+        $this->assertSame(
+            ['vcl_bare', 'vcl_expanded', 'vcl_flat'],
+            $connection->vehicleLocations()->orderBy('vehicle_terminal_id')->pluck('vehicle_terminal_id')->all()
+        );
+    }
+
+    /**
+     * Terminal scopes permissions per resource, so an account without
+     * `hos:read` answers 403 there and 200 everywhere else. Losing a whole
+     * fleet over one missing scope would be absurd, and retrying cannot fix it.
+     */
+    public function test_one_refused_resource_does_not_discard_the_rest(): void
+    {
+        $connection = EldConnection::create([
+            'uuid' => Str::uuid(),
+            'terminal_connection_id' => 'conn_01TESTCONNECTION',
+            'connection_token' => 'con_tkn_secret',
+            'status' => EldConnection::STATUS_CONNECTED,
+        ]);
+
+        Http::fake([
+            '*/connections/current' => Http::response(['id' => 'conn_01TESTCONNECTION', 'status' => 'connected']),
+            '*/hos/logs*' => Http::response(['code' => 'forbidden'], 403),
+            '*/vehicles/locations*' => Http::response(['results' => []]),
+            '*/vehicles*' => Http::response(['results' => [['id' => 'vcl_1', 'name' => 'Big Red']]]),
+            '*/drivers*' => Http::response(['results' => [['id' => 'drv_1', 'name' => 'Dana Whitfield']]]),
+        ]);
+
+        $counts = app(EldSyncService::class)->sync($connection);
+
+        $this->assertArrayNotHasKey('hos_logs', $counts);
+        $this->assertSame(1, $connection->vehicles()->count());
+        $this->assertSame(1, $connection->drivers()->count());
+
+        $connection->refresh();
+
+        // Not "completed" — the broker must not read a partial fleet as whole.
+        $this->assertSame('partial', $connection->sync_status);
+        $this->assertStringContainsString('hos_logs', $connection->last_sync_error);
+    }
+
+    public function test_a_connection_that_refuses_everything_is_a_failure(): void
+    {
+        $connection = EldConnection::create([
+            'uuid' => Str::uuid(),
+            'terminal_connection_id' => 'conn_01TESTCONNECTION',
+            'connection_token' => 'con_tkn_secret',
+            'status' => EldConnection::STATUS_CONNECTED,
+        ]);
+
+        Http::fake([
+            '*/connections/current' => Http::response(['id' => 'conn_01TESTCONNECTION', 'status' => 'connected']),
+            '*' => Http::response(['code' => 'forbidden'], 403),
+        ]);
+
+        try {
+            app(EldSyncService::class)->sync($connection);
+            $this->fail('Expected a connection that refuses everything to surface as a failure.');
+        } catch (\Throwable) {
+            // expected — the job should retry this one.
+        }
+
+        $this->assertSame('failed', $connection->fresh()->sync_status);
     }
 
     public function test_a_second_sync_updates_rather_than_duplicates(): void
