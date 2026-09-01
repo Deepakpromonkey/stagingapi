@@ -105,6 +105,73 @@ class EldTerminalIntegrationTest extends TestCase
         $this->assertStringContainsString('/carrier/connect/'.$connectRequest->token, $query['redirect_url']);
     }
 
+    /**
+     * Pressing Connect twice used to mint a second state over the first, which
+     * invalidated the link the carrier was already part way through. They came
+     * back to "could not be verified" having done nothing wrong.
+     */
+    public function test_opening_the_link_twice_keeps_the_first_state_alive(): void
+    {
+        $connectRequest = $this->connectRequest();
+
+        $first = $this->postJson('/api/v1/carrier-connect/eld/connect', [
+            'token' => $connectRequest->token,
+        ])->assertOk()->json('data.url');
+
+        $stored = $connectRequest->fresh()->eld_link_state;
+
+        $second = $this->postJson('/api/v1/carrier-connect/eld/connect', [
+            'token' => $connectRequest->token,
+        ])->assertOk()->json('data.url');
+
+        $this->assertSame($stored, $connectRequest->fresh()->eld_link_state);
+
+        parse_str(parse_url($first, PHP_URL_QUERY), $a);
+        parse_str(parse_url($second, PHP_URL_QUERY), $b);
+
+        // Both links remain usable, because they carry the same state.
+        $this->assertSame($a['state'], $b['state']);
+    }
+
+    /**
+     * React's development double-invoke sends the confirmation twice. The first
+     * spends the token and clears the state; the second must not then report
+     * failure over a connection that just succeeded.
+     */
+    public function test_a_repeated_confirmation_reports_success_not_failure(): void
+    {
+        Bus::fake();
+
+        $connectRequest = $this->connectRequest();
+        $connectRequest->forceFill(['eld_link_state' => 'state-abc'])->save();
+
+        Http::fake([
+            '*/public-token/exchange' => Http::response([
+                'connectionId' => 'conn_01TESTCONNECTION',
+                'connectionToken' => 'con_tkn_secret',
+            ]),
+            '*/connections/current' => Http::response([
+                'id' => 'conn_01TESTCONNECTION',
+                'status' => 'connected',
+                'provider' => ['code' => 'motive', 'name' => 'Motive'],
+            ]),
+        ]);
+
+        $payload = [
+            'token' => $connectRequest->token,
+            'public_token' => 'pub_tkn_from_redirect',
+            'state' => 'state-abc',
+        ];
+
+        $this->postJson('/api/v1/carrier-connect/eld/verify', $payload)->assertOk();
+
+        // Same request again, exactly as the second effect invocation sends it.
+        $this->postJson('/api/v1/carrier-connect/eld/verify', $payload)->assertOk();
+
+        // And it did not attach a second connection on the way through.
+        $this->assertSame(1, EldConnection::count());
+    }
+
     public function test_it_refuses_to_start_when_terminal_is_not_configured(): void
     {
         config(['terminal.enabled' => false]);

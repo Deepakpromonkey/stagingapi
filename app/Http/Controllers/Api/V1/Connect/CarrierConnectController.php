@@ -1037,7 +1037,17 @@ class CarrierConnectController extends BaseController
             return $this->error('ELD connection is unavailable right now.', null, 503);
         }
 
-        $state = Str::random(40);
+        /*
+        | Reuse an unspent state rather than minting a fresh one.
+        |
+        | Every call used to overwrite it, so a second press of Connect -- or a
+        | second tab, or a re-render -- invalidated the link the carrier was
+        | already part way through, and they came back to "could not be
+        | verified" having done nothing wrong. The state is single use and
+        | cleared on success, so holding one open across repeat presses costs
+        | nothing and makes the step idempotent.
+        */
+        $state = $connectRequest->eld_link_state ?: Str::random(40);
 
         $connectRequest->forceFill(['eld_link_state' => $state])->save();
 
@@ -1075,6 +1085,16 @@ class CarrierConnectController extends BaseController
 
         if (! $this->terminal->isConfigured()) {
             return $this->error('ELD connection is unavailable right now.', null, 503);
+        }
+
+        /*
+        | Already done. The browser sends this twice under React's development
+        | double-invoke, and the second arrival must not report failure over a
+        | connection the first one completed -- the state is cleared on success,
+        | so the check below would otherwise reject it.
+        */
+        if ($connectRequest->eld_connection_id && ! $connectRequest->eld_link_state) {
+            return $this->respondWithRequest($connectRequest, 'ELD already connected.');
         }
 
         // Single use, and compared in constant time. Without this a public
