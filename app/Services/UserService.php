@@ -74,7 +74,7 @@ class UserService
 
             $target->fill(
                 collect($data)
-                    ->only(['first_name', 'last_name', 'phone', 'designation', 'status'])
+                    ->only(['first_name', 'last_name', 'phone', 'country_code', 'designation', 'status'])
                     ->toArray()
             )->save();
 

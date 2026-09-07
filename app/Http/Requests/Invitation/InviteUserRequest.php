@@ -34,6 +34,15 @@ class InviteUserRequest extends FormRequest
                 'max:20',
             ],
 
+            // ISO alpha-2 for the dialling country the invite form picked.
+            // Constrained to the four countries the form offers, so a stray
+            // value cannot land in the column.
+            'country_code' => [
+                'nullable',
+                'string',
+                Rule::in(['US', 'CA', 'MX', 'IN']),
+            ],
+
             'email' => [
                 'required',
                 'email',

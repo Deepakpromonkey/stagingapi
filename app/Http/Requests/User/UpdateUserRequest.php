@@ -22,6 +22,10 @@ class UpdateUserRequest extends FormRequest
 
             'phone' => ['sometimes', 'nullable', 'string', 'max:20'],
 
+            // ISO alpha-2 for the dialling country, same four the team
+            // form offers.
+            'country_code' => ['sometimes', 'nullable', 'string', Rule::in(['US', 'CA', 'MX', 'IN'])],
+
             'designation' => ['sometimes', 'nullable', 'string', 'max:100'],
 
             // False switches the person off and drops their session. The seat

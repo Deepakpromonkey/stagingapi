@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
 use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
+use App\Http\Controllers\Api\V1\Notification\NotificationController;
 use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
@@ -274,6 +275,13 @@ Route::prefix('v1')->group(function () {
     // Protected Routes
     Route::middleware(['auth:sanctum', EnsureBrokerUser::class, EnsurePasswordChanged::class])->group(function () {
         Route::post('/check-pro-number', [ShipmentController::class, 'checkProNumber']);
+
+        /*
+        | The header bell. Derived from the onboarding rows rather than stored,
+        | so it can never disagree with the Connected Carriers list — see
+        | NotificationController.
+        */
+        Route::get('/notifications', [NotificationController::class, 'index']);
 
         // Session
         Route::get('/me', [AuthController::class, 'me']);

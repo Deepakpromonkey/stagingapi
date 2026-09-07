@@ -116,6 +116,7 @@ class CarrierConnectRequest extends Model
         'bank_skipped_at' => 'datetime',
         'factoring_answered_at' => 'datetime',
         'questionnaire_completed_at' => 'datetime',
+        'documents_completed_at' => 'datetime',
         'signed_at' => 'datetime',
         'portal_account_provisioned_at' => 'datetime',
         'didit_response' => 'array',
