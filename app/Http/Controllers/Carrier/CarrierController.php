@@ -2662,11 +2662,18 @@ class CarrierController extends Controller
      */
     private function runCarrierSearch(callable $filter, int $page, int $perPage, string $sortDir, string $cacheKey): array
     {
+        // One row past the page, so "is there another page" is answered by the
+        // page query itself. forPage() derives the offset from the page size,
+        // so the offset is set by hand rather than passing $perPage + 1 to it.
         $ids = $filter(Carrier::query())
             ->orderBy('legal_name', $sortDir)
             ->orderBy('id')
-            ->forPage($page, $perPage)
+            ->skip(($page - 1) * $perPage)
+            ->take($perPage + 1)
             ->pluck('id');
+
+        $hasMore = $ids->count() > $perPage;
+        $ids = $ids->take($perPage);
 
         $rows = $ids->isEmpty()
             ? collect()
@@ -2676,29 +2683,75 @@ class CarrierController extends Controller
                 ->orderBy('id')
                 ->get();
 
-        return [$rows, $this->carrierSearchTotal($filter, $page, $perPage, $ids->count(), $cacheKey)];
+        return [
+            $rows,
+            $hasMore,
+            $this->carrierSearchTotal($filter, $page, $perPage, $ids->count(), $hasMore, $cacheKey),
+        ];
     }
 
     /**
-     * Total row count for a search, without paying for it on every request.
-     *
-     * A short page is the last page, so the total falls out of the offset and
-     * no COUNT runs at all — which covers every DOT / MC / phone / email lookup.
-     * Name searches use LIKE '%term%', which MySQL can only answer with a full
-     * index scan (~5s over 2M rows), so that count is cached: the carrier
-     * database is refreshed by batch load, not live writes.
+     * How long a search's total row count stays usable. The carrier database
+     * is a scheduled bulk load rather than a live write path, so a count
+     * cannot move between two searches minutes — or hours — apart.
      */
-    private function carrierSearchTotal(callable $filter, int $page, int $perPage, int $rowCount, string $cacheKey): int
+    private const SEARCH_TOTAL_TTL_HOURS = 6;
+
+    /**
+     * Total row count for a search, never on the request path.
+     *
+     * A last page needs no COUNT at all: the total falls out of the offset and
+     * the rows in hand, which covers every DOT / MC / phone / email lookup and
+     * the tail of a name search.
+     *
+     * Otherwise the count comes from cache, and a cold cache returns null —
+     * "not known yet" — rather than making the broker wait. `LIKE '%term%'`
+     * can only be counted by scanning the whole index (~12s over 4.48M rows),
+     * which was the single slowest thing in a company-name search and bought
+     * nothing but a number in the results header. The scan instead runs once
+     * after the response has been flushed, so the next page of the same search
+     * reads it from the cache.
+     *
+     * Paging does not depend on this: `has_more_pages` comes from the page
+     * query fetching one row past the page.
+     */
+    private function carrierSearchTotal(callable $filter, int $page, int $perPage, int $rowCount, bool $hasMore, string $cacheKey): ?int
     {
-        if ($rowCount < $perPage) {
+        if (! $hasMore) {
             return ($page - 1) * $perPage + $rowCount;
         }
 
-        return (int) Cache::remember(
-            'carrier_search_total:'.md5($cacheKey),
-            now()->addMinutes(10),
-            fn () => $filter(Carrier::query())->toBase()->getCountForPagination()
-        );
+        $key = 'carrier_search_total:'.md5($cacheKey);
+
+        $cached = Cache::get($key);
+
+        if ($cached !== null) {
+            return (int) $cached;
+        }
+
+        // One warm-up per term at a time. Without the lock every request for a
+        // popular term queues its own 12s scan behind the response and holds a
+        // PHP worker for it.
+        if (Cache::add($key.':warming', 1, now()->addMinutes(2))) {
+
+            app()->terminating(function () use ($filter, $key) {
+
+                try {
+                    Cache::put(
+                        $key,
+                        (int) $filter(Carrier::query())->toBase()->getCountForPagination(),
+                        now()->addHours(self::SEARCH_TOTAL_TTL_HOURS),
+                    );
+                } catch (\Throwable $e) {
+                    Log::warning('Carrier search total warm-up failed', ['error' => $e->getMessage()]);
+                } finally {
+                    Cache::forget($key.':warming');
+                }
+
+            });
+        }
+
+        return null;
     }
 
     /**
@@ -3170,7 +3223,7 @@ class CarrierController extends Controller
         $perPage = max(1, min(100, (int) $request->query('per_page', 10)));
         $page = max(1, (int) $request->query('page', 1));
 
-        [$rows, $total] = $this->runCarrierSearch(
+        [$rows, $hasMore, $total] = $this->runCarrierSearch(
             fn (EloquentBuilder $query) => $this->applyCarrierSearchFilter($query, $search, $searchedBy),
             $page,
             $perPage,
@@ -3183,9 +3236,12 @@ class CarrierController extends Controller
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
+            // Null while the count is still warming — the results header shows
+            // "10+" for it rather than a wrong number, and paging runs off
+            // has_more_pages, which is always exact.
             'total' => $total,
-            'last_page' => max(1, (int) ceil($total / $perPage)),
-            'has_more_pages' => ($page * $perPage) < $total,
+            'last_page' => $total === null ? null : max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => $hasMore,
             'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow(
                 $carrier,
                 $scores[$carrier->id] ?? null,
@@ -3239,7 +3295,7 @@ class CarrierController extends Controller
             return $query->where('legal_name', 'LIKE', "%{$search}%");
         };
 
-        [$rows, $total] = $this->runCarrierSearch(
+        [$rows, $hasMore, $total] = $this->runCarrierSearch(
             $filter,
             $page,
             $perPage,
@@ -3252,9 +3308,12 @@ class CarrierController extends Controller
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
+            // Null while the count is still warming — the results header shows
+            // "10+" for it rather than a wrong number, and paging runs off
+            // has_more_pages, which is always exact.
             'total' => $total,
-            'last_page' => max(1, (int) ceil($total / $perPage)),
-            'has_more_pages' => ($page * $perPage) < $total,
+            'last_page' => $total === null ? null : max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => $hasMore,
             'data' => $rows->map(function (Carrier $carrier) use ($scores) {
                 // search2 has always returned the raw FMCSA rating code here
                 // rather than the label search() uses.

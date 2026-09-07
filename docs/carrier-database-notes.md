@@ -101,11 +101,22 @@ DOT numbers with 2-4 rows), plus 26,310 rows with an empty `dot_number`.
 | `COUNT(*)` with `legal_name LIKE '%SWIFT%' OR dba_name LIKE '%SWIFT%'` | 15.3s |
 | the same page query with `LIMIT 10` | 0.3s |
 
-The application now caches that count for 10 minutes and skips it entirely for
-DOT / MC / phone / email lookups, which is what made search usable without
-touching this database.
+**The count is no longer on the request path at all (2026-09-07).** The page
+query fetches one row past the page, so `has_more_pages` is exact without any
+COUNT, and paging never waits on one. A cold count returns `total: null` and
+`last_page: null` — the results header shows "10+ results" — while the scan
+runs once in a terminating callback after the response has been flushed, under
+a two-minute `:warming` lock so a popular term does not queue one scan per
+request. It is cached for 6 hours (was 10 minutes; the data is a scheduled bulk
+load, so the old TTL bought nothing). The second search for a term, and every
+later page of the same search, shows the exact total.
 
-A FULLTEXT index would make the count itself fast:
+That takes a cold company-name search from ~12s to the cost of the page query
+alone. DOT / MC / phone / email lookups never counted in the first place.
+
+A FULLTEXT index would make the count itself fast, and would be the way to
+make the page query fast too if `LIKE '%term%'` on 4.48M rows stops being
+acceptable:
 
 ```sql
 ALTER TABLE carriers ADD FULLTEXT INDEX ft_carriers_name (legal_name, dba_name);
