@@ -2688,11 +2688,45 @@ class CarrierController extends Controller
     }
 
     /**
+     * The DT scores this company has already seen, keyed by carrier id.
+     *
+     * The score is only ever computed on the profile endpoint, so this is the
+     * last score the company was actually shown for that carrier — carriers
+     * nobody here has opened yet have none, and the row carries a null. The
+     * lookup is against the application database (search_histories), not the
+     * EC2 carrier database, and is scoped to the ids on this page.
+     *
+     * Guest search (`/guest-pay/carrier/search`) runs unauthenticated, so
+     * there is no company to scope to and every row is scoreless.
+     *
+     * @param  \Illuminate\Support\Collection  $rows
+     * @return array<int, int>
+     */
+    private function storedDtScores(Collection $rows): array
+    {
+        $companyId = auth()->user()?->company_id;
+
+        if (! $companyId || $rows->isEmpty()) {
+            return [];
+        }
+
+        return SearchHistory::query()
+            ->where('company_id', $companyId)
+            ->whereIn('carrier_id', $rows->pluck('id')->all())
+            ->whereNotNull('dt_score')
+            ->pluck('dt_score', 'carrier_id')
+            ->map(fn ($score) => (int) $score)
+            ->all();
+    }
+
+    /**
      * Shape a carrier row for the search response.
      */
-    private function transformSearchRow(Carrier $carrier): array
+    private function transformSearchRow(Carrier $carrier, ?int $dtScore = null): array
     {
         return [
+
+            'dt_score' => $dtScore,
 
             'id' => $carrier->id,
             'row_id' => $carrier->row_id,
@@ -2753,13 +2787,18 @@ class CarrierController extends Controller
             "search|{$searchedBy}|".mb_strtolower($search),
         );
 
+        $scores = $this->storedDtScores($rows);
+
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
             'total' => $total,
             'last_page' => max(1, (int) ceil($total / $perPage)),
             'has_more_pages' => ($page * $perPage) < $total,
-            'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow($carrier))->values(),
+            'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow(
+                $carrier,
+                $scores[$carrier->id] ?? null,
+            ))->values(),
         ]);
     }
 
@@ -2817,17 +2856,19 @@ class CarrierController extends Controller
             'search2|'.mb_strtolower($search),
         );
 
+        $scores = $this->storedDtScores($rows);
+
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
             'total' => $total,
             'last_page' => max(1, (int) ceil($total / $perPage)),
             'has_more_pages' => ($page * $perPage) < $total,
-            'data' => $rows->map(function (Carrier $carrier) {
+            'data' => $rows->map(function (Carrier $carrier) use ($scores) {
                 // search2 has always returned the raw FMCSA rating code here
                 // rather than the label search() uses.
                 return array_merge(
-                    $this->transformSearchRow($carrier),
+                    $this->transformSearchRow($carrier, $scores[$carrier->id] ?? null),
                     ['risk_level' => $carrier->safety_rating],
                 );
             })->values(),
