@@ -261,3 +261,46 @@ trusting shortlists or search history.
 | Name search, cold count | ~7.5s | ~12s (4.48M rows, not 2.07M) |
 | Carrier profile | ~15.5s | ~17s |
 
+
+## Covering indexes for the search DT score (added 2026-09-07)
+
+Search now scores every row inline, which needs three numbers out of the
+inspection data per carrier: the row count, and the distinct VINs seen as power
+units and as trailers. `inspections` is a view over `sms_input_inspection`
+(5.2M rows, 1.4GB), and the distinct-VIN aggregate could only be answered with
+a temporary table plus MRR row lookups — **102s** for one page of ten large
+carriers, returning ten rows.
+
+Two covering indexes were added to the base table, one per inspection unit
+slot, so the aggregate is answered from the index alone (`Using index`):
+
+```sql
+ALTER TABLE sms_input_inspection
+  ADD INDEX idx_dot_vin_type  (dot_number, vin,  unit_type_desc),
+  ALGORITHM=INPLACE, LOCK=NONE;
+
+ALTER TABLE sms_input_inspection
+  ADD INDEX idx_dot_vin2_type (dot_number, vin2, unit_type_desc2),
+  ALGORITHM=INPLACE, LOCK=NONE;
+```
+
+Each took ~55s to build online, with reads and writes uninterrupted. **These
+have to be recreated if the carrier database is reloaded from scratch** —
+without them a search that returns a large carrier stalls for minutes.
+
+Do not shorten them to prefix indexes: `COUNT(DISTINCT vin)` cannot be answered
+from a prefix, and the plan falls back to row lookups.
+
+### Measured, ten busiest carriers in the feed (worst case, over a remote link)
+
+| | Before | After |
+|---|---|---|
+| distinct-VIN aggregate | 102.6s | 3.5s |
+| whole page scored, cold | 221s | 13.7s |
+| whole page scored, cached | — | ~1ms |
+
+Most of the remaining 13.7s is per-query network latency from a developer
+laptop (~550ms × 12 statements); on the application host the same page is
+dominated by the two aggregates instead. Scores were byte-identical before and
+after the index, and the SQL aggregate was checked against the profile's PHP
+logic on six carriers — same observed units, trailers and inspection totals.
