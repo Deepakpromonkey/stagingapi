@@ -18,6 +18,7 @@ class UserResource extends JsonResource
             'last_name' => $this->last_name,
             'email' => $this->email,
             'phone' => $this->phone,
+            'country_code' => $this->country_code,
             'designation' => $this->designation,
             'is_owner' => $this->is_owner,
             'status' => $this->status,
@@ -46,6 +47,19 @@ class UserResource extends JsonResource
             ],
 
             'company' => new CompanyResource($this->whenLoaded('company')),
+
+            /*
+            | When the seat was created and last touched.
+            |
+            | Both the raw timestamp and a pre-formatted string: the profile
+            | screen renders "Onboarding Date" / "Last Updated" straight from
+            | these, and used to show them blank because the resource carried
+            | neither.
+            */
+            'added_on' => $this->created_at?->toIso8601String(),
+            'added_on_formatted' => $this->created_at?->format('d M, Y'),
+            'updated_on' => $this->updated_at?->toIso8601String(),
+            'updated_on_formatted' => $this->updated_at?->format('d M, Y'),
         ];
     }
 }
