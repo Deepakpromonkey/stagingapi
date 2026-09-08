@@ -2,10 +2,17 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
  * The synced fleet: what Terminal returns for a connection, normalised.
+ *
+ * Foreign keys are named explicitly rather than left to Laravel's generated
+ * `{table}_{column}_foreign`. MySQL scopes a constraint name to the SCHEMA, not
+ * to the table, so an environment still holding a previous ELD schema — even
+ * parked under another table name — owns those generated names and blocks these
+ * tables from taking them.
  *
  * Every table carries the provider's own id in `terminal_id` and is unique on
  * (connection, terminal_id), because syncs re-read overlapping windows and a
@@ -15,13 +22,31 @@ use Illuminate\Support\Facades\Schema;
  */
 return new class extends Migration
 {
+    /**
+     * The tables this migration owns, newest-dependency first.
+     *
+     * Named here because up() has to be able to clear what a failed run of
+     * itself left behind before it can create them again.
+     */
+    private const TABLES = [
+        'eld_sync_checkpoints',
+        'eld_locations',
+        'eld_hos_logs',
+        'eld_drivers',
+        'eld_vehicles',
+    ];
+
     public function up(): void
     {
+        $this->clearPartialRun();
+
         Schema::create('eld_vehicles', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('eld_connection_id')
-                ->constrained('eld_connections')
+            $table->foreignId('eld_connection_id');
+
+            $table->foreign('eld_connection_id', 'eld_vehicles_connection_fk')
+                ->references('id')->on('eld_connections')
                 ->cascadeOnDelete();
 
             $table->string('terminal_id', 64);
@@ -48,8 +73,10 @@ return new class extends Migration
         Schema::create('eld_drivers', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('eld_connection_id')
-                ->constrained('eld_connections')
+            $table->foreignId('eld_connection_id');
+
+            $table->foreign('eld_connection_id', 'eld_drivers_connection_fk')
+                ->references('id')->on('eld_connections')
                 ->cascadeOnDelete();
 
             $table->string('terminal_id', 64);
@@ -78,8 +105,10 @@ return new class extends Migration
         Schema::create('eld_hos_logs', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('eld_connection_id')
-                ->constrained('eld_connections')
+            $table->foreignId('eld_connection_id');
+
+            $table->foreign('eld_connection_id', 'eld_hos_logs_connection_fk')
+                ->references('id')->on('eld_connections')
                 ->cascadeOnDelete();
 
             $table->string('terminal_id', 64);
@@ -112,8 +141,10 @@ return new class extends Migration
         Schema::create('eld_locations', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('eld_connection_id')
-                ->constrained('eld_connections')
+            $table->foreignId('eld_connection_id');
+
+            $table->foreign('eld_connection_id', 'eld_locations_connection_fk')
+                ->references('id')->on('eld_connections')
                 ->cascadeOnDelete();
 
             $table->string('vehicle_terminal_id', 64);
@@ -149,8 +180,10 @@ return new class extends Migration
         Schema::create('eld_sync_checkpoints', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('eld_connection_id')
-                ->constrained('eld_connections')
+            $table->foreignId('eld_connection_id');
+
+            $table->foreign('eld_connection_id', 'eld_sync_checkpoints_connection_fk')
+                ->references('id')->on('eld_connections')
                 ->cascadeOnDelete();
 
             // vehicles | drivers | hos | locations
@@ -167,6 +200,31 @@ return new class extends Migration
 
             $table->unique(['eld_connection_id', 'resource'], 'eld_sync_checkpoints_connection_resource_unique');
         });
+    }
+
+    /**
+     * Undo a run of this migration that failed partway.
+     *
+     * Creating five tables is five statements, and MySQL commits each one as
+     * it goes — so a failure on the third leaves the first two behind and the
+     * retry dies on "table already exists" instead of on whatever actually
+     * went wrong.
+     *
+     * Only ever drops a table this migration created and that is still empty.
+     * A populated one is left alone so the create fails loudly rather than
+     * this quietly deleting a synced fleet.
+     */
+    private function clearPartialRun(): void
+    {
+        Schema::disableForeignKeyConstraints();
+
+        foreach (self::TABLES as $table) {
+            if (Schema::hasTable($table) && DB::table($table)->count() === 0) {
+                Schema::drop($table);
+            }
+        }
+
+        Schema::enableForeignKeyConstraints();
     }
 
     public function down(): void
