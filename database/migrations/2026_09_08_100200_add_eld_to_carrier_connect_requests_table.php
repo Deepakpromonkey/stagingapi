@@ -77,6 +77,29 @@ return new class extends Migration
                     .self::LEGACY_FOREIGN_KEY.'`'
                 );
             }
+
+            /*
+            | And then the index behind it, separately. MySQL creates an index
+            | to back a foreign key and does NOT remove it when the key is
+            | dropped, so the name stays taken — which is why the retry failed
+            | with 1061 "duplicate key name" even though no foreign key of that
+            | name was left to be found.
+            */
+            $staleIndex = DB::selectOne(
+                'SELECT 1 AS found FROM information_schema.STATISTICS
+                 WHERE TABLE_SCHEMA = DATABASE()
+                   AND TABLE_NAME = ?
+                   AND INDEX_NAME = ?
+                 LIMIT 1',
+                ['carrier_connect_requests', self::LEGACY_FOREIGN_KEY]
+            );
+
+            if ($staleIndex) {
+                DB::statement(
+                    'ALTER TABLE `carrier_connect_requests` DROP INDEX `'
+                    .self::LEGACY_FOREIGN_KEY.'`'
+                );
+            }
         }
 
         if (Schema::hasColumn('carrier_connect_requests', 'eld_connection_id')) {
