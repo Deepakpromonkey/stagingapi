@@ -52,11 +52,17 @@ class CarrierEldConnectionTest extends TestCase
             'services.terminal.secret_key' => 'sk_sandbox_test',
             'services.terminal.publishable_key' => 'pk_sandbox_test',
             'services.terminal.base_url' => 'https://api.sandbox.withterminal.com/tsp/v1',
+            'services.terminal.retry_delay_ms' => 0,
             'services.terminal.link_url' => 'https://link.sandbox.withterminal.com',
             'services.terminal.webhook_secret' => 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw',
         ]);
 
         Queue::fake();
+
+        // A request this suite has not stubbed must fail loudly rather than
+        // reach the real sandbox: silent live calls are slow, flaky, and they
+        // spend real metered quota.
+        Http::preventStrayRequests();
     }
 
     private function company(string $name = 'Northwind Logistics', ?string $template = 'tpl_northwind'): Company
@@ -85,6 +91,22 @@ class CarrierEldConnectionTest extends TestCase
             // reads as expired.
             'sent_on' => now(),
             'mobile_verified_at' => now(),
+        ]);
+    }
+
+    /**
+     * Terminal's answers for a test.
+     *
+     * Overrides go in first — Http::fake matches on the earliest registered
+     * pattern — and the defaults below cover every call the connect flow makes,
+     * so a request nobody thought about fails the suite rather than quietly
+     * reaching the real sandbox.
+     */
+    private function fakeTerminal(array $overrides = []): void
+    {
+        Http::fake($overrides + [
+            '*/public-token/exchange' => Http::response(self::CONNECTION),
+            '*/connections/current' => Http::response(['status' => 'connected']),
         ]);
     }
 
@@ -162,7 +184,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_it_exchanges_the_public_token_and_stores_the_connection(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
         $connection = $this->link($request);
@@ -176,7 +198,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_the_connection_token_is_encrypted_at_rest_and_never_serialised(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $connection = $this->link($this->connectRequest($this->company()));
 
@@ -191,7 +213,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_return_carrying_the_wrong_state_is_refused(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
 
@@ -208,7 +230,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_the_state_is_single_use_so_a_return_url_cannot_be_replayed(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
 
@@ -229,13 +251,81 @@ class CarrierEldConnectionTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_a_new_connection_is_narrowed_to_the_fleet_still_running(): void
+    {
+        $this->fakeTerminal();
+
+        $this->link($this->connectRequest($this->company()));
+
+        Http::assertSent(function ($request) {
+            if (! str_contains($request->url(), '/connections/current')) {
+                return false;
+            }
+
+            return $request['filters']['vehicles']['status'] === 'active'
+                && $request['filters']['drivers']['status'] === 'active';
+        });
+    }
+
+    public function test_the_filter_is_applied_before_the_first_import_is_queued(): void
+    {
+        $order = [];
+
+        $this->fakeTerminal([
+            '*/connections/current' => function () use (&$order) {
+                $order[] = 'filtered';
+
+                return Http::response(['status' => 'connected']);
+            },
+        ]);
+
+        Queue::fake();
+
+        $this->link($this->connectRequest($this->company()));
+
+        // The initial import is the largest read a connection ever makes, so a
+        // filter that lands after it has saved nothing on the costly pass.
+        $this->assertSame(['filtered'], $order);
+        Queue::assertPushed(SyncEldConnection::class);
+    }
+
+    public function test_a_carrier_still_gets_connected_when_the_filter_cannot_be_applied(): void
+    {
+        $this->fakeTerminal(['*/connections/current' => Http::response([], 500)]);
+
+        $request = $this->connectRequest($this->company());
+
+        $this->postJson('/api/v1/carrier-connect/eld/connect', ['token' => $request->token]);
+
+        $this->postJson('/api/v1/carrier-connect/eld/verify', [
+            'token' => $request->token,
+            'public_token' => 'pub_tkn_x',
+            'state' => $request->refresh()->eld_link_state,
+        ])->assertOk();
+
+        // A bill to trim later is not a reason to fail somebody's onboarding.
+        $this->assertSame(1, EldConnection::count());
+        $this->assertNotNull($request->refresh()->eld_connected_at);
+    }
+
+    public function test_the_filter_can_be_turned_off(): void
+    {
+        config(['services.terminal.filter_active_only' => false]);
+
+        $this->fakeTerminal();
+
+        $this->link($this->connectRequest($this->company()));
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/connections/current'));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // One carrier, several brokers
     // ─────────────────────────────────────────────────────────────────────────
 
     public function test_a_second_broker_reuses_the_connection_and_gets_its_own_grant(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $first = $this->connectRequest($this->company('Northwind Logistics'));
         $second = $this->connectRequest($this->company('Bravo Freight', 'tpl_bravo'));
@@ -256,10 +346,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_one_broker_leaving_does_not_blind_the_others(): void
     {
-        Http::fake([
-            '*/public-token/exchange' => Http::response(self::CONNECTION),
-            '*/connections/current' => Http::response(['status' => 'archived']),
-        ]);
+        $this->fakeTerminal(['*/connections/current' => Http::response(['status' => 'archived'])]);
 
         $first = $this->connectRequest($this->company('Northwind Logistics'));
         $second = $this->connectRequest($this->company('Bravo Freight', 'tpl_bravo'));
@@ -281,10 +368,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_the_connection_is_archived_once_no_broker_is_left_watching(): void
     {
-        Http::fake([
-            '*/public-token/exchange' => Http::response(self::CONNECTION),
-            '*/connections/current' => Http::response(['status' => 'archived']),
-        ]);
+        $this->fakeTerminal(['*/connections/current' => Http::response(['status' => 'archived'])]);
 
         $request = $this->connectRequest($this->company());
         $connection = $this->link($request);
@@ -299,7 +383,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_second_broker_is_offered_the_connection_the_carrier_already_made(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $first = $this->connectRequest($this->company('Northwind Logistics'));
         $this->link($first);
@@ -317,7 +401,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_sharing_records_consent_without_a_second_trip_to_the_provider(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $first = $this->connectRequest($this->company('Northwind Logistics'));
         $this->link($first);
@@ -345,7 +429,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_the_offer_disappears_once_this_broker_has_been_granted_access(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $first = $this->connectRequest($this->company('Northwind Logistics'));
         $this->link($first);
@@ -393,7 +477,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_skipping_cannot_throw_away_a_connection_already_made(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
         $this->link($request);
@@ -408,7 +492,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_dropped_connection_stops_reading_as_connected(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
         $connection = $this->link($request);
@@ -429,7 +513,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_carrier_with_a_broken_connection_is_sent_to_re_authenticate(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $request = $this->connectRequest($this->company());
         $connection = $this->link($request);
@@ -484,7 +568,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_disconnect_event_marks_the_connection_down(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $connection = $this->link($this->connectRequest($this->company()));
 
@@ -499,7 +583,7 @@ class CarrierEldConnectionTest extends TestCase
 
     public function test_a_retried_delivery_is_acknowledged_without_acting_twice(): void
     {
-        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+        $this->fakeTerminal();
 
         $connection = $this->link($this->connectRequest($this->company()));
 

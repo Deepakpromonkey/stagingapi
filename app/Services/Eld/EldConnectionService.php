@@ -157,6 +157,14 @@ class EldConnectionService
             return $connection;
         });
 
+        /*
+        | Before the first sync, not after. Terminal meters what it ingests, and
+        | the initial import is the largest read a connection ever makes — a
+        | filter applied afterwards would arrive too late to have saved
+        | anything on the one pass that costs the most.
+        */
+        $this->applyDefaultFilters($connection);
+
         // Outside the transaction: the job must not start against a connection
         // row the transaction has not committed yet.
         SyncEldConnection::dispatch($connection->id, true);
@@ -223,6 +231,44 @@ class EldConnectionService
         ])->save();
 
         return $grant;
+    }
+
+    /**
+     * Narrow what Terminal ingests to the fleet that is actually running.
+     *
+     * A real carrier's provider account carries retired tractors and drivers
+     * who left years ago, and Terminal bills for data synced rather than for
+     * entities held — so every one of them is a standing charge for records
+     * nobody will ever look at.
+     *
+     * Status is the only filter that is safe here, and that is a consequence of
+     * the sharing model rather than a limitation of Terminal: one connection
+     * serves every broker working with the carrier, so narrowing it to the
+     * trucks on one broker's loads would blind the others looking at the same
+     * carrier.
+     *
+     * Failure is not fatal. The connection works either way; without the filter
+     * it simply syncs more than it needs to, and that is a bill to trim rather
+     * than a reason to fail a carrier's onboarding.
+     */
+    private function applyDefaultFilters(EldConnection $connection): void
+    {
+        if (! config('services.terminal.filter_active_only', true)) {
+            return;
+        }
+
+        $applied = $this->terminal->updateConnection($connection->connection_token, [
+            'filters' => [
+                'vehicles' => ['status' => 'active'],
+                'drivers' => ['status' => 'active'],
+            ],
+        ]);
+
+        if (! $applied) {
+            Log::warning('Could not narrow an ELD connection to active vehicles and drivers', [
+                'connection' => $connection->uuid,
+            ]);
+        }
     }
 
     /**

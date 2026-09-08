@@ -259,10 +259,17 @@ class TerminalClient
             ->asJson()
             ->timeout(30)
 
-            // Terminal proxies live provider APIs, so a slow provider surfaces
-            // as a 429 or a 504 here. Retrying twice costs nothing and saves a
-            // sync from failing over a blip.
-            ->retry(2, 500, throw: false);
+            /*
+            | Terminal proxies live provider APIs, so a slow provider surfaces
+            | as a 429 or a 504 here. Retrying twice costs nothing and saves a
+            | sync from failing over a blip.
+            |
+            | The pause between attempts is configurable so the test suite can
+            | set it to zero — otherwise every test that exercises a failure
+            | sits through the real backoff, which turned a six second suite
+            | into a thirty five second one.
+            */
+            ->retry(2, (int) config('services.terminal.retry_delay_ms', 500), throw: false);
 
         if ($connectionToken !== null) {
             $request = $request->withHeaders(['Connection-Token' => $connectionToken]);

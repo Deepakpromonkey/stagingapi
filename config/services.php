@@ -147,6 +147,21 @@ return [
         | ping would otherwise fall in the gap between two runs.
         */
         'lookback_hours' => (int) env('TERMINAL_LOOKBACK_HOURS', 48),
+
+        /*
+        | Restrict a new connection to vehicles and drivers the carrier still
+        | runs. Terminal meters ingested data, so retired tractors and departed
+        | drivers are a standing charge for records nobody reads.
+        |
+        | Status is the only filter that can be applied: one connection serves
+        | every broker working with the carrier, so narrowing it further would
+        | blind the brokers it was not narrowed for.
+        */
+        'filter_active_only' => filter_var(env('TERMINAL_FILTER_ACTIVE_ONLY', true), FILTER_VALIDATE_BOOLEAN),
+
+        // Pause between retries of a failed Terminal call. Zero in tests, so a
+        // failure case does not sit through a real backoff.
+        'retry_delay_ms' => (int) env('TERMINAL_RETRY_DELAY_MS', 500),
     ],
 
 ];

@@ -42,9 +42,15 @@ class EldFleetSyncTest extends TestCase
             'services.terminal.secret_key' => 'sk_sandbox_test',
             'services.terminal.publishable_key' => 'pk_sandbox_test',
             'services.terminal.base_url' => $this->base,
+            'services.terminal.retry_delay_ms' => 0,
             'services.terminal.backfill_days' => 0,
             'services.terminal.lookback_hours' => 48,
         ]);
+
+        // A request this suite has not stubbed must fail loudly rather than
+        // reach the real sandbox: silent live calls are slow, flaky, and they
+        // spend real metered quota.
+        Http::preventStrayRequests();
     }
 
     private function connection(array $attributes = []): EldConnection
