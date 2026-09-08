@@ -72,6 +72,17 @@ return [
         'from' => env('TELNYX_FROM'),
 
         'messaging_profile_id' => env('TELNYX_MESSAGING_PROFILE_ID'),
+
+        /*
+        | Test redirect. When set, every SMS goes to this number instead of the
+        | real recipient, with the intended recipient named in the message.
+        |
+        | For staging, where carrier records carry real phone numbers a tester
+        | cannot receive. MUST be unset in production — it would divert real
+        | carriers' one-time codes. SmsSender logs a warning on every send while
+        | it is on, so an environment running with it by mistake says so.
+        */
+        'override_to' => env('SMS_OVERRIDE_TO'),
     ],
 
     /*
