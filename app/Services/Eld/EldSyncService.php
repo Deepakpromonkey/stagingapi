@@ -50,15 +50,27 @@ class EldSyncService
         $connection->forceFill(['sync_status' => EldConnection::SYNC_RUNNING])->save();
 
         try {
-            $this->syncVehicles($connection, $initial);
-            $this->syncDrivers($connection, $initial);
-            $this->syncHosLogs($connection, $initial);
-            $this->syncLocations($connection, $initial);
+            $unavailable = array_filter([
+                $this->attempt('vehicles', fn () => $this->syncVehicles($connection, $initial)),
+                $this->attempt('drivers', fn () => $this->syncDrivers($connection, $initial)),
+                $this->attempt('hos', fn () => $this->syncHosLogs($connection, $initial)),
+                $this->attempt('locations', fn () => $this->syncLocations($connection, $initial)),
+            ]);
 
             $connection->forceFill([
                 'sync_status' => EldConnection::SYNC_COMPLETED,
                 'last_sync_at' => now(),
-                'last_sync_error' => null,
+
+                /*
+                | A completed sync that could not read everything still says so.
+                | Written here rather than left null because a broker looking at
+                | an empty hours-of-service column needs to know the account was
+                | refused, not that the driver never drove.
+                */
+                'last_sync_error' => $unavailable === []
+                    ? null
+                    : 'Not available to this Terminal account: '.implode('; ', $unavailable),
+
                 'vehicle_count' => $connection->vehicles()->count(),
                 'driver_count' => $connection->drivers()->count(),
             ])->save();
@@ -74,6 +86,38 @@ class EldSyncService
             ])->save();
 
             throw $e;
+        }
+    }
+
+    /**
+     * Run one resource's sync, tolerating an account that cannot see it.
+     *
+     * Terminal meters and entitles each model separately, and providers differ
+     * in what they expose at all — so a connection that yields vehicles and
+     * drivers may be refused hours of service outright. Failing the whole pass
+     * on that would throw away the resources that did work and would keep
+     * failing, since a missing permission answers the same way every time.
+     *
+     * Only entitlement refusals are absorbed. A timeout or a 5xx still raises,
+     * so the pass fails, the checkpoints stay put, and the next run retries the
+     * same window.
+     *
+     * @param  callable():void  $sync
+     * @return string|null a note naming what could not be read, or null
+     */
+    private function attempt(string $resource, callable $sync): ?string
+    {
+        try {
+            $sync();
+
+            return null;
+        } catch (TerminalPermissionException $e) {
+            Log::warning('Skipping ELD resource this Terminal account cannot read', [
+                'resource' => $resource,
+                'detail' => $e->getMessage(),
+            ]);
+
+            return $resource.' ('.$e->getMessage().')';
         }
     }
 

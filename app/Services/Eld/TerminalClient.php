@@ -212,6 +212,20 @@ class TerminalClient
             if ($response->failed()) {
                 $this->logFailure('list '.$path, $response);
 
+                /*
+                | 403 is an entitlement, not a fault: Terminal names the
+                | permission the account is missing — `hos:read`, say — and will
+                | answer the same way on every retry. Raised as its own type so
+                | the sync can skip the resource instead of failing the pass and
+                | losing the resources that did work.
+                */
+                if ($response->status() === 403) {
+                    throw new TerminalPermissionException(
+                        (string) ($response->json('detail')
+                            ?: 'Terminal refused '.$path.' for this account.')
+                    );
+                }
+
                 throw new TerminalRequestException(
                     'Terminal returned '.$response->status().' for '.$path
                 );

@@ -63,9 +63,11 @@ class EldFleetSyncTest extends TestCase
      * A fleet spread over two pages, so a walk that stopped on a short page
      * would lose the tail of it.
      */
-    private function fakeFleet(): void
+    private function fakeFleet(array $overrides = []): void
     {
-        Http::fake([
+        // Overrides go in first: Http::fake matches on the earliest registered
+        // pattern, so a later call cannot replace one of these.
+        Http::fake($overrides + [
             // Registered first: the broad /vehicles* pattern below would
             // otherwise answer the per-vehicle locations call too.
             $this->base.'/vehicles/*/locations*' => Http::response([
@@ -236,6 +238,48 @@ class EldFleetSyncTest extends TestCase
         // Advancing here would skip the window that was never read, and
         // nothing would ever come back for it.
         $this->assertNull(EldSyncCheckpoint::where('resource', 'vehicles')->first()?->synced_through);
+    }
+
+    public function test_a_resource_the_account_cannot_read_does_not_sink_the_rest(): void
+    {
+        // Terminal's real answer when a model is not entitled on the account:
+        // it names the permission, and it will say the same on every retry.
+        $this->fakeFleet([
+            $this->base.'/hos/logs*' => Http::response([
+                'code' => 'forbidden',
+                'message' => 'Forbidden Request',
+                'detail' => 'Oops! Your Terminal account requires the following permissions to perform this operation: hos:read.',
+            ], 403),
+        ]);
+
+        $connection = $this->connection();
+
+        app(EldSyncService::class)->sync($connection, true);
+
+        $connection->refresh();
+
+        // The pass completes on what it could read.
+        $this->assertSame(EldConnection::SYNC_COMPLETED, $connection->sync_status);
+        $this->assertSame(2, EldVehicle::count());
+        $this->assertSame(1, EldDriver::count());
+        $this->assertSame(1, EldLocation::count());
+        $this->assertSame(0, EldHosLog::count());
+
+        // And says what it could not, so an empty hours-of-service column reads
+        // as "refused" rather than "the driver never drove".
+        $this->assertStringContainsString('hos', (string) $connection->last_sync_error);
+        $this->assertStringContainsString('hos:read', (string) $connection->last_sync_error);
+    }
+
+    public function test_a_transient_failure_still_fails_the_pass(): void
+    {
+        // Unlike a 403, a 503 may succeed next time — so it must not be
+        // swallowed, and the checkpoint must stay where it was.
+        Http::fake([$this->base.'/*' => Http::response([], 503)]);
+
+        $this->expectException(TerminalRequestException::class);
+
+        app(EldSyncService::class)->sync($this->connection(), true);
     }
 
     public function test_an_archived_connection_is_left_alone(): void
