@@ -297,6 +297,79 @@ class CarrierEldConnectionTest extends TestCase
         $this->assertFalse($connection->isSyncable());
     }
 
+    public function test_a_second_broker_is_offered_the_connection_the_carrier_already_made(): void
+    {
+        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+
+        $first = $this->connectRequest($this->company('Northwind Logistics'));
+        $this->link($first);
+
+        $second = $this->connectRequest($this->company('Bravo Freight', 'tpl_bravo'));
+
+        // Reading the second broker's onboarding surfaces the existing
+        // connection rather than presenting an empty step.
+        $response = $this->postJson('/api/v1/carrier-connect/load', ['token' => $second->token])
+            ->assertOk();
+
+        $this->assertSame('Samsara', $response->json('data.connect_request.eld_shareable.provider'));
+        $this->assertFalse($response->json('data.connect_request.eld_connected'));
+    }
+
+    public function test_sharing_records_consent_without_a_second_trip_to_the_provider(): void
+    {
+        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+
+        $first = $this->connectRequest($this->company('Northwind Logistics'));
+        $this->link($first);
+
+        $second = $this->connectRequest($this->company('Bravo Freight', 'tpl_bravo'));
+
+        Http::fake();
+
+        $this->postJson('/api/v1/carrier-connect/eld/share', ['token' => $second->token])
+            ->assertOk()
+            ->assertJsonPath('data.eld_connected', true);
+
+        // No provider login, and nothing asked of Terminal.
+        Http::assertNothingSent();
+
+        // One fleet, two brokers' consent — the whole point of the design.
+        $this->assertSame(1, EldConnection::count());
+        $this->assertSame(2, EldConnectionGrant::count());
+
+        $this->assertSame(
+            EldConnection::first()->id,
+            $second->refresh()->eld_connection_id
+        );
+    }
+
+    public function test_the_offer_disappears_once_this_broker_has_been_granted_access(): void
+    {
+        Http::fake(['*/public-token/exchange' => Http::response(self::CONNECTION)]);
+
+        $first = $this->connectRequest($this->company('Northwind Logistics'));
+        $this->link($first);
+
+        $second = $this->connectRequest($this->company('Bravo Freight', 'tpl_bravo'));
+        $this->postJson('/api/v1/carrier-connect/eld/share', ['token' => $second->token]);
+
+        $response = $this->postJson('/api/v1/carrier-connect/load', ['token' => $second->token]);
+
+        // Now it is simply their connection.
+        $this->assertNull($response->json('data.connect_request.eld_shareable'));
+        $this->assertTrue($response->json('data.connect_request.eld_connected'));
+    }
+
+    public function test_there_is_nothing_to_share_when_the_carrier_has_never_connected(): void
+    {
+        $request = $this->connectRequest($this->company());
+
+        $this->postJson('/api/v1/carrier-connect/eld/share', ['token' => $request->token])
+            ->assertStatus(422);
+
+        $this->assertNull($request->refresh()->eld_connected_at);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Skipping, and the step's own state
     // ─────────────────────────────────────────────────────────────────────────

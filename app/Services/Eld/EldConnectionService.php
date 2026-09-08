@@ -225,6 +225,70 @@ class EldConnectionService
         return $grant;
     }
 
+    /**
+     * A live connection this carrier already made, that this broker cannot see.
+     *
+     * The carrier links their provider once. A second broker inviting the same
+     * carrier needs their own consent recorded, but not another trip through
+     * the provider's login — we already hold a working token, and Terminal
+     * would only dedupe the new attempt back onto this same connection.
+     *
+     * Returns null once this broker has been granted access, because then it is
+     * simply their connection and the wizard shows it as connected.
+     */
+    public function shareableFor(CarrierConnectRequest $connectRequest): ?EldConnection
+    {
+        $dot = trim((string) $connectRequest->carrier_dot_number);
+
+        if ($dot === '') {
+            return null;
+        }
+
+        $connection = EldConnection::where('carrier_dot_number', $dot)
+            ->where('status', EldConnection::STATUS_CONNECTED)
+            ->latest('id')
+            ->first();
+
+        if (! $connection) {
+            return null;
+        }
+
+        $alreadyGranted = EldConnectionGrant::where('eld_connection_id', $connection->id)
+            ->where('company_id', $connectRequest->company_id)
+            ->whereNull('revoked_at')
+            ->exists();
+
+        return $alreadyGranted ? null : $connection;
+    }
+
+    /**
+     * Record this broker's access to a connection the carrier already made.
+     *
+     * The consent is real and explicit — the carrier presses a button naming
+     * the broker — it just does not need the provider's login screen a second
+     * time to be given.
+     */
+    public function share(CarrierConnectRequest $connectRequest): ?EldConnection
+    {
+        $connection = $this->shareableFor($connectRequest);
+
+        if (! $connection) {
+            return null;
+        }
+
+        DB::transaction(function () use ($connection, $connectRequest) {
+            $this->grantTo($connection, $connectRequest);
+
+            $connectRequest->forceFill([
+                'eld_connection_id' => $connection->id,
+                'eld_connected_at' => now(),
+                'eld_skipped_at' => null,
+            ])->save();
+        });
+
+        return $connection;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Wind-down
     // ─────────────────────────────────────────────────────────────────────────

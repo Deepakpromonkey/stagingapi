@@ -517,7 +517,10 @@ class CarrierConnectController extends BaseController
 
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
-        $connectRequest->load(['agreementDocument', 'documents']);
+        // eldConnection included so a carrier returning to the wizard sees the
+        // provider and the fleet counts on the ELD tile, rather than a bare
+        // tick with nothing behind it.
+        $connectRequest->load(['agreementDocument', 'documents', 'eldConnection']);
 
         return $this->success([
             'connect_request' => new CarrierConnectRequestResource($connectRequest),
@@ -1176,6 +1179,40 @@ class CarrierConnectController extends BaseController
         }
 
         return $this->success(['url' => $url], 'ELD connection started.');
+    }
+
+    /**
+     * Share a connection the carrier already made with this broker.
+     *
+     * A carrier hauling for several brokers links their provider once. The
+     * second broker still needs the carrier's consent — the wizard names them
+     * on the button — but not another trip through the provider's login, since
+     * the token already exists and Terminal would only dedupe back onto the
+     * same connection.
+     */
+    public function shareEld(CarrierConnectTokenRequest $request)
+    {
+        $connectRequest = $this->resolveRequest($request->validated()['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $connection = $this->eldConnections->share($connectRequest);
+
+        if (! $connection) {
+            return $this->error(
+                'There is no connected ELD to share. Please connect one.',
+                null,
+                422
+            );
+        }
+
+        return $this->respondWithRequest(
+            $connectRequest->refresh(),
+            ($connection->provider ? $connection->provider.' shared' : 'ELD shared')
+                .' with '.($connectRequest->company?->company_name ?? 'this broker').'.'
+        );
     }
 
     /**

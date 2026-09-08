@@ -138,6 +138,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
             Route::post('/eld/connect', [CarrierConnectController::class, 'connectEld']);
             Route::post('/eld/verify', [CarrierConnectController::class, 'verifyEld']);
+            Route::post('/eld/share', [CarrierConnectController::class, 'shareEld']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
             Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);

@@ -5,6 +5,7 @@ namespace App\Http\Resources;
 use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
 use App\Models\Eld\EldConnection;
+use App\Services\Eld\EldConnectionService;
 use App\Services\Carrier\CarrierAccountService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -152,6 +153,18 @@ class CarrierConnectRequestResource extends JsonResource
             | The connection token is never part of this: it is hidden on the
             | model and has no business leaving the server.
             */
+            /*
+            | A live connection this carrier made during another broker's
+            | onboarding, which this broker has not been granted yet. Present
+            | only until they are: after that it is simply their connection and
+            | `eld` below describes it.
+            |
+            | The wizard uses this to offer one-click sharing instead of sending
+            | the carrier back through their provider's login for a connection
+            | that already exists.
+            */
+            'eld_shareable' => $this->shareable(),
+
             'eld' => $this->whenLoaded('eldConnection', fn () => $this->eldConnection ? [
                 'provider' => $this->eldConnection->provider,
                 'status' => $this->eldConnection->status,
@@ -373,6 +386,31 @@ class CarrierConnectRequestResource extends JsonResource
             })
             ->values()
             ->all();
+    }
+
+    /**
+     * The connection this carrier already has that this broker cannot yet see.
+     *
+     * Skipped entirely once the step is settled, so a carrier who connected or
+     * deliberately declined is never shown it.
+     */
+    private function shareable(): ?array
+    {
+        if ($this->eld_connected_at !== null || $this->eld_skipped_at !== null) {
+            return null;
+        }
+
+        $connection = app(EldConnectionService::class)->shareableFor($this->resource);
+
+        if (! $connection) {
+            return null;
+        }
+
+        return [
+            'provider' => $connection->provider,
+            'vehicles' => $connection->vehicle_count,
+            'drivers' => $connection->driver_count,
+        ];
     }
 
     /**
