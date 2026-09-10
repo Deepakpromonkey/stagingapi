@@ -1,0 +1,65 @@
+name: Deploy API
+
+on:
+  push:
+    branches:
+      - main
+
+# Two deploys at once would put two `composer install` runs into the same
+# vendor/ directory. Queue them rather than racing, and never cancel one
+# mid-flight — a half-applied deploy is worse than a slow one.
+concurrency:
+  group: deploy-api-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_KEY }}
+          port: ${{ secrets.EC2_PORT }}
+          script_stop: true
+          command_timeout: 20m
+          script: |
+            set -e
+
+            cd ${{ secrets.PROJECT_PATH }}
+
+            echo "==> Deploying over $(git rev-parse --short HEAD)"
+
+            # Serve 503 for the rest of this script rather than answering
+            # requests against code whose dependencies and schema are only
+            # half-updated. Tolerated on failure: if vendor/ is broken from a
+            # previous bad deploy the app cannot boot far enough to go down,
+            # and that is exactly when the deploy most needs to continue.
+            php artisan down --retry=15 || true
+
+            # .env, storage/ and the uploads under it are gitignored, so
+            # nothing the server owns is touched here. Deliberately no
+            # `git clean`: storage/app holds files the repository has never
+            # seen, and clean does not know they matter.
+            git fetch origin
+            git reset --hard origin/main
+
+            composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+            php artisan migrate --force
+
+            php artisan storage:link || true
+
+            # Rebuilt, not just cleared. A cleared cache makes the first
+            # request after every deploy pay for the whole config and route
+            # tree, which is the request most likely to be a real user.
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+
+            php artisan up
+
+            echo "==> Now at $(git rev-parse --short HEAD)"

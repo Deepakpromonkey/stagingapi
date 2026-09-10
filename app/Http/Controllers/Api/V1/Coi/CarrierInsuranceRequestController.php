@@ -1,0 +1,154 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1\Coi;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Coi\RaiseInsuranceRequest;
+use App\Http\Resources\CoiInsuranceRequestResource;
+use App\Models\CoiInsuranceRequest;
+use App\Models\CoiInsuranceResponse;
+use App\Services\Coi\CarrierInsuranceRequestService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use RuntimeException;
+
+/**
+ * The broker side of "chase this carrier's agent for a current COI".
+ *
+ * Everything here is scoped to the caller's company, the same way the shortlist
+ * and the connect requests are: a colleague who opens the same carrier profile
+ * sees the request someone else raised, and nobody sees another broker's.
+ */
+class CarrierInsuranceRequestController extends Controller
+{
+    public function __construct(
+        private readonly CarrierInsuranceRequestService $requests,
+    ) {}
+
+    /**
+     * The open or most recent request for one DOT — what the insurance card
+     * asks for when it renders.
+     */
+    public function show(Request $request, int $dot): JsonResponse
+    {
+        $insuranceRequest = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
+            ->where('dot_number', $dot)
+            ->with('latestResponse')
+            ->latest('id')
+            ->first();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $insuranceRequest
+                ? 'Insurance request retrieved.'
+                : 'No insurance request has been raised for this carrier.',
+            'data' => $insuranceRequest
+                ? new CoiInsuranceRequestResource($insuranceRequest)
+                : null,
+        ]);
+    }
+
+    /**
+     * Every request the company has raised. Ordered newest first, because the
+     * only reason to open this list is to see what is still outstanding.
+     */
+    public function index(Request $request): JsonResponse
+    {
+        $requests = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
+            ->when($request->filled('status'), fn ($query) => $query->where('status', $request->string('status')))
+            ->with('latestResponse')
+            ->latest('id')
+            ->paginate(min((int) $request->integer('per_page', 25), 100));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Insurance requests retrieved.',
+            'data' => CoiInsuranceRequestResource::collection($requests->items()),
+            'meta' => [
+                'current_page' => $requests->currentPage(),
+                'last_page' => $requests->lastPage(),
+                'total' => $requests->total(),
+            ],
+        ]);
+    }
+
+    /**
+     * Raise one. Idempotent per company and DOT — see the service.
+     */
+    public function store(RaiseInsuranceRequest $request): JsonResponse
+    {
+        try {
+            $insuranceRequest = $this->requests->raise(
+                $request->user(),
+                $request->integer('dot_number'),
+                $request->input('carrier_name'),
+                $request->input('carrier_mc'),
+            );
+        } catch (RuntimeException $e) {
+            /*
+             | 422 rather than 500: the usual cause is that the certificate on
+             | file carries no agency address, which is a fact about the data
+             | and something the broker can act on by uploading a better COI.
+             */
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+
+        $insuranceRequest->load('latestResponse');
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Insurance details have been requested from the carrier\'s agency.',
+            'data' => new CoiInsuranceRequestResource($insuranceRequest),
+        ], 201);
+    }
+
+    /**
+     * The reply itself — what the "view response" link opens.
+     *
+     * Scoped through the request's company, so the uuid alone is not enough to
+     * read another broker's correspondence.
+     */
+    public function response(Request $request, string $uuid): JsonResponse
+    {
+        $response = CoiInsuranceResponse::where('uuid', $uuid)
+            ->whereHas('request', fn ($query) => $query->where('company_id', $request->user()->company_id))
+            ->with('request')
+            ->first();
+
+        if ($response === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Response not found.',
+            ], 404);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Response retrieved.',
+            'data' => [
+                'uuid' => $response->uuid,
+                'from_email' => $response->from_email,
+                'from_name' => $response->from_name,
+                'subject' => $response->subject,
+                'received_at' => $response->received_at?->toIso8601String(),
+
+                // The body as it arrived. The card renders the text; the HTML
+                // is there for a reader that wants the original formatting.
+                'body_text' => $response->body_text,
+                'body_html' => $response->body_html,
+
+                'extracted_expiry_date' => $response->extracted_expiry_date?->toDateString(),
+
+                // Kept visible on purpose: a broker acting on an extracted date
+                // should be able to see exactly what was extracted, and from
+                // what, without asking anyone.
+                'llm_response' => $response->llm_response,
+
+                'request' => new CoiInsuranceRequestResource($response->request),
+            ],
+        ]);
+    }
+}
