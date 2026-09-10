@@ -43,6 +43,29 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 
 /*
 |--------------------------------------------------------------------------
+| ELD / telematics
+|--------------------------------------------------------------------------
+|
+| Refreshes the fleets of carriers that are actually under load. Terminal bills
+| for data synced rather than for vehicles and drivers held, so polling every
+| carrier who ever finished onboarding would run up a bill for fleets nobody is
+| looking at — the command scopes itself to carriers with an active shipment and
+| goes quiet again when the load is delivered.
+|
+| The first import after a carrier connects does not come from here: it is
+| dispatched on the spot by the Link exchange. Nor does the routine case of new
+| data arriving — Terminal's sync.completed and vehicle.added webhooks queue a
+| pass as it happens. This is the floor under both of those, for the connection
+| whose webhook was never delivered.
+|
+*/
+Schedule::command('eld:sync-active')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
 | Queue
 |--------------------------------------------------------------------------
 |
@@ -57,10 +80,12 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 |
 | --stop-when-empty means this normally exits in well under a second and does
 | nothing at all when there is nothing to do. If it dies, the next minute
-| starts a fresh one - which is more supervision than it had before.
+| starts a fresh one — which is more supervision than it had before.
 |
 | `default` is named first because Laravel drains queues in order, and a broker
-| waiting on a request should not queue behind a VIN batch. The connection is
+| waiting on a request should not queue behind a VIN batch or a fleet import.
+| `eld` is last for the same reason: a first sync after a carrier connects can
+| run for minutes on a large fleet, and nothing is waiting on it. The connection
 | named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
 | would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
 |
@@ -71,7 +96,7 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 | supervisor, run a long-lived `queue:work` instead and delete this.
 |
 */
-Schedule::command('queue:work database --queue=default,vin --stop-when-empty --max-time=50')
+Schedule::command('queue:work database --queue=default,vin,eld --stop-when-empty --max-time=50')
     ->everyMinute()
     ->withoutOverlapping(2)
     ->runInBackground()

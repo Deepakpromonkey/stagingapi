@@ -33,6 +33,68 @@ class SmsSender
     private const ACCEPTED = ['queued', 'sending', 'sent', 'delivered'];
 
     /**
+     * Numbers whose country must not be decided by the caller.
+     *
+     * Each flow normalises to E.164 against one configured dial code —
+     * `carrier_connect.default_dial_code` for onboarding, `signup` for the
+     * rest — and on production both are `+1`. A ten digit Indian number given
+     * to any of them comes out as `+1` plus the same ten digits, which is a
+     * real US number belonging to somebody else. Pinning the country here
+     * fixes it once, at the point every message already passes through,
+     * rather than in each flow's own normaliser.
+     *
+     * These are test handsets. Remove an entry once the number is stored in
+     * full `+91` form everywhere it is read from.
+     */
+    private const FORCED_COUNTRY = [
+        ['national' => '8076734039', 'dial' => '+91'],
+    ];
+
+    /**
+     * Pins a listed number to its real country, whatever shape it arrives in.
+     *
+     * Matches the bare national number and any already-prefixed form, because
+     * the case this exists to correct is a number that has *already* been
+     * given the wrong dial code upstream.
+     *
+     * Only the prefixes this application itself produces are accepted. A
+     * trailing-digit match on its own would also rewrite a foreign number
+     * that happens to end the same way — +44 8076734039, say — and that is
+     * somebody else's handset.
+     */
+    public static function forceCountry(string $to): string
+    {
+        $digits = preg_replace('/\D/', '', $to);
+
+        // An IDD prefix written out in full, as 0091... rather than +91...
+        $digits = preg_replace('/^00/', '', $digits);
+
+        foreach (self::FORCED_COUNTRY as $number) {
+            $national = $number['national'];
+
+            if (! str_ends_with($digits, $national)) {
+                continue;
+            }
+
+            $prefix = substr($digits, 0, -strlen($national));
+
+            /*
+            | Nothing at all, the right country already, or the `+1` that both
+            | `carrier_connect.default_dial_code` and `signup.default_dial_code`
+            | stamp on a bare ten digit number in production — which is the
+            | case this whole method exists to undo.
+            */
+            $dial = ltrim($number['dial'], '+');
+
+            if (in_array($prefix, ['', $dial, '0' . $dial, '1'], true)) {
+                return $number['dial'] . $national;
+            }
+        }
+
+        return $to;
+    }
+
+    /**
      * Whether credentials are present.
      *
      * Callers check this before sending so each can decide what an
@@ -46,10 +108,16 @@ class SmsSender
     }
 
     /**
-     * @param  string  $context  What is being sent, for the log line — e.g. "signup OTP".
+     * @param string $context What is being sent, for the log line — e.g. "signup OTP".
      */
     public function send(string $to, string $body, string $context): bool
     {
+        // Force known test numbers to the correct country code.
+        $to = self::forceCountry($to);
+
+        // Redirect SMS in staging/local if SMS_OVERRIDE_TO is configured.
+        [$to, $body] = $this->applyOverride($to, $body, $context);
+
         $payload = array_filter([
             'from' => config('services.telnyx.from'),
             'messaging_profile_id' => config('services.telnyx.messaging_profile_id'),
@@ -68,7 +136,7 @@ class SmsSender
                 ->post(self::ENDPOINT, $payload);
 
             if ($response->failed()) {
-                Log::error('Telnyx rejected the '.$context, [
+                Log::error('Telnyx rejected the ' . $context, [
                     'to' => self::mask($to),
                     'status' => $response->status(),
 
@@ -89,7 +157,7 @@ class SmsSender
             $status = $response->json('data.to.0.status');
 
             if (! in_array($status, self::ACCEPTED, true)) {
-                Log::error('Telnyx accepted the request but did not send the '.$context, [
+                Log::error('Telnyx accepted the request but did not send the ' . $context, [
                     'to' => self::mask($to),
                     'message_status' => $status,
                     'errors' => $response->json('data.errors'),
@@ -100,13 +168,51 @@ class SmsSender
 
             return true;
         } catch (\Throwable $e) {
-            Log::error('Telnyx SMS threw sending the '.$context, [
+            Log::error('Telnyx SMS threw sending the ' . $context, [
                 'to' => self::mask($to),
                 'error' => $e->getMessage(),
             ]);
 
             return false;
         }
+    }
+
+    /**
+     * Redirects every message to one handset, for testing.
+     *
+     * Staging carries real carrier records with real phone numbers on them, and
+     * walking the onboarding wizard means passing a phone check the tester
+     * cannot receive. Rather than editing a carrier's number to their own —
+     * which changes the data being tested and leaves the wrong number behind —
+     * `SMS_OVERRIDE_TO` sends the lot to one number and says who each was for.
+     *
+     * Unset in production, where this must never be on: it would divert real
+     * carriers' one-time codes to whoever the number belongs to. It is logged
+     * as a warning on every send so an environment that has it on by accident
+     * says so loudly rather than quietly misdelivering.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function applyOverride(string $to, string $body, string $context): array
+    {
+        $override = trim((string) config('services.telnyx.override_to'));
+
+        if ($override === '' || $override === $to) {
+            return [$to, $body];
+        }
+
+        Log::warning('SMS override is on; redirecting the ' . $context, [
+            'intended' => self::mask($to),
+            'sent_to' => self::mask($override),
+        ]);
+
+        /*
+        | Which carrier the code belongs to, so a tester running several
+        | onboardings at once can tell the messages apart. Masked, because the
+        | point is to identify the recipient and not to put a full phone number
+        | into somebody else's message history.
+        */
+        return [$override, '[test → ' . self::mask($to) . '] ' . $body];
     }
 
     /**
@@ -117,6 +223,6 @@ class SmsSender
     {
         return strlen($phone) <= 4
             ? $phone
-            : str_repeat('*', strlen($phone) - 4).substr($phone, -4);
+            : str_repeat('*', strlen($phone) - 4) . substr($phone, -4);
     }
 }

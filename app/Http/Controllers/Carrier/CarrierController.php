@@ -222,7 +222,9 @@ class CarrierController extends Controller
         $crashesTotal,
         $crashFatalities,
         $crashInjuries,
-        $crashesTowAway
+        $crashesTowAway,
+        // Optional so the profile keeps calling this exactly as before.
+        ?int $inspectionCount = null
     ) {
         /*
         |--------------------------------------------------------------------------
@@ -264,7 +266,8 @@ class CarrierController extends Controller
             $detail,
             $vehicleOosPct,
             $driverOosPct,
-            $carrier
+            $carrier,
+            $inspectionCount
         );
 
         $identity = $this->calculateIdentity(
@@ -297,7 +300,8 @@ class CarrierController extends Controller
             $carrier,
             $sms,
             $vehicleOosPct,
-            $driverOosPct
+            $driverOosPct,
+            $inspectionCount
         );
 
         $operations = $this->calculateOperations(
@@ -714,7 +718,12 @@ class CarrierController extends Controller
         $detail,
         $vehicleOosPct,
         $driverOosPct,
-        $carrier
+        $carrier,
+        // Search pages pass this in already counted. Loading the relation just
+        // to count it costs 20k+ hydrated rows for a large carrier, so the
+        // caller is allowed to answer instead. Null keeps the old behaviour
+        // for the profile, where the rows are loaded anyway.
+        ?int $inspectionCount = null
     ) {
         $score = 24;
 
@@ -956,7 +965,7 @@ class CarrierController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        $inspectionCount = $carrier->inspections->count();
+        $inspectionCount = $inspectionCount ?? $carrier->inspections->count();
 
         if ($inspectionCount == 0) {
 
@@ -2174,7 +2183,9 @@ class CarrierController extends Controller
         $carrier,
         $sms,
         $vehicleOosPct,
-        $driverOosPct
+        $driverOosPct,
+        // See calculateSafety() — pre-counted by the search path.
+        ?int $inspectionCount = null
     ) {
         $score = 8;
 
@@ -2191,7 +2202,7 @@ class CarrierController extends Controller
         $inspTotal = (int) ($sms?->insp_total ?? 0);
 
         if ($inspTotal === 0) {
-            $inspTotal = $carrier->inspections->count();
+            $inspTotal = $inspectionCount ?? $carrier->inspections->count();
         }
 
         if ($inspTotal === 0) {
@@ -2517,6 +2528,9 @@ class CarrierController extends Controller
         'nbr_power_unit',
         'driver_total',
         'carrier_operation',
+        // Scoring inputs: DOT age and the MCS-150 filing year.
+        'add_date',
+        'mcs150_date',
     ];
 
     /**
@@ -2648,11 +2662,18 @@ class CarrierController extends Controller
      */
     private function runCarrierSearch(callable $filter, int $page, int $perPage, string $sortDir, string $cacheKey): array
     {
+        // One row past the page, so "is there another page" is answered by the
+        // page query itself. forPage() derives the offset from the page size,
+        // so the offset is set by hand rather than passing $perPage + 1 to it.
         $ids = $filter(Carrier::query())
             ->orderBy('legal_name', $sortDir)
             ->orderBy('id')
-            ->forPage($page, $perPage)
+            ->skip(($page - 1) * $perPage)
+            ->take($perPage + 1)
             ->pluck('id');
+
+        $hasMore = $ids->count() > $perPage;
+        $ids = $ids->take($perPage);
 
         $rows = $ids->isEmpty()
             ? collect()
@@ -2662,37 +2683,494 @@ class CarrierController extends Controller
                 ->orderBy('id')
                 ->get();
 
-        return [$rows, $this->carrierSearchTotal($filter, $page, $perPage, $ids->count(), $cacheKey)];
+        return [
+            $rows,
+            $hasMore,
+            $this->carrierSearchTotal($filter, $page, $perPage, $ids->count(), $hasMore, $cacheKey),
+        ];
     }
 
     /**
-     * Total row count for a search, without paying for it on every request.
-     *
-     * A short page is the last page, so the total falls out of the offset and
-     * no COUNT runs at all — which covers every DOT / MC / phone / email lookup.
-     * Name searches use LIKE '%term%', which MySQL can only answer with a full
-     * index scan (~5s over 2M rows), so that count is cached: the carrier
-     * database is refreshed by batch load, not live writes.
+     * How long a search's total row count stays usable. The carrier database
+     * is a scheduled bulk load rather than a live write path, so a count
+     * cannot move between two searches minutes — or hours — apart.
      */
-    private function carrierSearchTotal(callable $filter, int $page, int $perPage, int $rowCount, string $cacheKey): int
+    private const SEARCH_TOTAL_TTL_HOURS = 6;
+
+    /**
+     * Total row count for a search, never on the request path.
+     *
+     * A last page needs no COUNT at all: the total falls out of the offset and
+     * the rows in hand, which covers every DOT / MC / phone / email lookup and
+     * the tail of a name search.
+     *
+     * Otherwise the count comes from cache, and a cold cache returns null —
+     * "not known yet" — rather than making the broker wait. `LIKE '%term%'`
+     * can only be counted by scanning the whole index (~12s over 4.48M rows),
+     * which was the single slowest thing in a company-name search and bought
+     * nothing but a number in the results header. The scan instead runs once
+     * after the response has been flushed, so the next page of the same search
+     * reads it from the cache.
+     *
+     * Paging does not depend on this: `has_more_pages` comes from the page
+     * query fetching one row past the page.
+     */
+    private function carrierSearchTotal(callable $filter, int $page, int $perPage, int $rowCount, bool $hasMore, string $cacheKey): ?int
     {
-        if ($rowCount < $perPage) {
+        if (! $hasMore) {
             return ($page - 1) * $perPage + $rowCount;
         }
 
-        return (int) Cache::remember(
-            'carrier_search_total:'.md5($cacheKey),
-            now()->addMinutes(10),
-            fn () => $filter(Carrier::query())->toBase()->getCountForPagination()
+        $key = 'carrier_search_total:'.md5($cacheKey);
+
+        $cached = Cache::get($key);
+
+        if ($cached !== null) {
+            return (int) $cached;
+        }
+
+        // One warm-up per term at a time. Without the lock every request for a
+        // popular term queues its own 12s scan behind the response and holds a
+        // PHP worker for it.
+        if (Cache::add($key.':warming', 1, now()->addMinutes(2))) {
+
+            app()->terminating(function () use ($filter, $key) {
+
+                try {
+                    Cache::put(
+                        $key,
+                        (int) $filter(Carrier::query())->toBase()->getCountForPagination(),
+                        now()->addHours(self::SEARCH_TOTAL_TTL_HOURS),
+                    );
+                } catch (\Throwable $e) {
+                    Log::warning('Carrier search total warm-up failed', ['error' => $e->getMessage()]);
+                } finally {
+                    Cache::forget($key.':warming');
+                }
+
+            });
+        }
+
+        return null;
+    }
+
+    /**
+     * Years since a DOT number was issued.
+     *
+     * Lifted out of detail() unchanged so that a search row and the carrier
+     * profile derive the age — and therefore the score — identically. The feed
+     * writes dates as '01-JUN-74', which Carbon cannot parse on its own.
+     */
+    private function dotAgeFrom($addDate): ?int
+    {
+        if (! $addDate) {
+            return null;
+        }
+
+        try {
+            // Handle FMCSA dates like 01-JUN-74
+            if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($addDate))) {
+
+                $year = substr($addDate, -2);
+
+                // FMCSA data started long before 2000,
+                // so convert 74 → 1974, 06 → 2006
+                $century = $year > date('y') ? '19' : '20';
+
+                $fixedDate = substr($addDate, 0, -2).$century.$year;
+
+                $parsedDate = Carbon::createFromFormat('d-M-Y', strtoupper($fixedDate));
+
+            } else {
+
+                $parsedDate = Carbon::parse($addDate);
+
+            }
+
+            return (int) $parsedDate->diffInYears(now());
+
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * How long a computed search score stays usable.
+     *
+     * The carrier database is a bulk FMCSA load on a schedule, not a live
+     * write path, so a score cannot change between two searches minutes apart.
+     */
+    private const SEARCH_SCORE_TTL_HOURS = 6;
+
+    /**
+     * DT scores for the carriers on one search page, keyed by carrier id.
+     *
+     * This is the expensive part of the search response and it is deliberate:
+     * a broker searching a carrier for the first time has no stored score, and
+     * showing a dash there was the whole complaint. Three things keep it from
+     * behaving like the old /blocked endpoint:
+     *
+     *  - Every relation is eager-loaded across the whole page at once, so the
+     *    cost is a fixed twelve statements no matter how many rows came back —
+     *    never one query per carrier.
+     *  - inspections and crashes are never loaded as rows. The score only
+     *    needs counts out of them and a large carrier has tens of thousands,
+     *    so the database counts instead. Those two aggregates depend on the
+     *    covering indexes idx_dot_vin_type and idx_dot_vin2_type on
+     *    sms_input_inspection, the table behind the inspections view; without
+     *    them the distinct-VIN count measured 102s for one page, and with them
+     *    3.5s for the ten busiest carriers in the feed.
+     *  - Each score is cached by DOT number, so only a carrier nobody has
+     *    searched for recently is paid for.
+     *
+     * The same calculateCarrierTrustScore() the profile calls produces the
+     * number, so the score on the card matches the score on the profile.
+     *
+     * @param  \Illuminate\Support\Collection  $rows
+     * @return array<int, int>
+     */
+    private function computeSearchScores(Collection $rows): array
+    {
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $scores = [];
+
+        foreach ($rows as $carrier) {
+
+            $cached = Cache::get('carrier_dt_score:'.$carrier->dot_number);
+
+            if ($cached !== null) {
+                $scores[$carrier->id] = (int) $cached;
+            }
+        }
+
+        // reject() rather than a plain collect(), so what comes back is still
+        // an Eloquent collection and can eager-load relations.
+        $pending = $rows->reject(fn (Carrier $carrier) => array_key_exists($carrier->id, $scores));
+
+        if ($pending->isEmpty()) {
+            return $scores;
+        }
+
+        $pending->load([
+            'carrierDetail',
+            'smsMeasures',
+            'authority',
+            'oosOrders',
+            'authorityOrders',
+            'insuranceFilings',
+            'insuranceFilingsPending',
+            'insuranceFilingsHistory',
+
+            // Column-limited on purpose — the authority pillar reads four
+            // fields off it and nothing else. dot_number stays because the
+            // eager load matches rows back on it.
+            'authorityHistory:dot_number,op_auth_type,original_action_desc,orig_served_date,disp_action_desc',
+        ]);
+
+        // inspections and crashes are deliberately NOT eager-loaded. The
+        // busiest carrier in the feed has 22,482 inspection rows, and
+        // hydrating those for ten carriers took minutes when measured. The
+        // score only needs counts out of them, so the database counts.
+        $dots = $pending->pluck('dot_number')->all();
+
+        $inspectionStats = $this->inspectionStatsFor($dots);
+        $crashStats = $this->crashStatsFor($dots);
+
+        foreach ($pending as $carrier) {
+
+            $score = $this->trustScoreForRow(
+                $carrier,
+                $inspectionStats[$carrier->dot_number] ?? [],
+                $crashStats[$carrier->dot_number] ?? [],
+            );
+
+            if ($score === null) {
+                continue;
+            }
+
+            Cache::put(
+                'carrier_dt_score:'.$carrier->dot_number,
+                $score,
+                now()->addHours(self::SEARCH_SCORE_TTL_HOURS),
+            );
+
+            $scores[$carrier->id] = $score;
+        }
+
+        return $scores;
+    }
+
+    /**
+     * Inspection totals for a page of carriers, keyed by DOT number.
+     *
+     * Returns the row count plus the distinct power units and trailers seen
+     * roadside. Counting distinct VINs is the same rule the profile applies in
+     * PHP — a truck stopped nine times is one unit — but done in SQL, because
+     * the rows themselves are never needed and there can be tens of thousands
+     * of them per carrier.
+     *
+     * The two unit slots are stacked with UNION ALL so one VIN recorded in
+     * either slot counts once. Comparisons are left to the column collation,
+     * which is case-insensitive, matching the strtoupper() the profile uses.
+     *
+     * @param  array<int, mixed>  $dots
+     * @return array<int|string, array{insp_total:int, observed_units:int, observed_trailers:int}>
+     */
+    private function inspectionStatsFor(array $dots): array
+    {
+        if (! $dots) {
+            return [];
+        }
+
+        $connection = DB::connection($this->carrierConnection());
+
+        $placeholders = implode(',', array_fill(0, count($dots), '?'));
+
+        $totals = $connection
+            ->table('inspections')
+            ->selectRaw('dot_number, COUNT(*) AS insp_total')
+            ->whereIn('dot_number', $dots)
+            ->groupBy('dot_number')
+            ->pluck('insp_total', 'dot_number');
+
+        // The feed's own vocabulary for a self-driven unit; everything towed
+        // is matched on the words that appear in the trailer types.
+        $power = [
+            'TRUCK TRACTOR',
+            'STRAIGHT TRUCK',
+            'BUS',
+            'SCHOOL BUS',
+            'MOTOR COACH',
+            'PASSENGER VAN',
+            'LIMOUSINE',
+        ];
+
+        $powerPlaceholders = implode(',', array_fill(0, count($power), '?'));
+
+        $sql = <<<SQL
+            SELECT dot_number,
+                   COUNT(DISTINCT CASE WHEN unit_type IN ({$powerPlaceholders}) THEN unit_vin END) AS observed_units,
+                   COUNT(DISTINCT CASE WHEN unit_type LIKE '%TRAILER%'
+                                          OR unit_type LIKE '%CHASSIS%'
+                                          OR unit_type LIKE '%DOLLY%'
+                                       THEN unit_vin END) AS observed_trailers
+            FROM (
+                SELECT dot_number, vin AS unit_vin, unit_type_desc AS unit_type
+                FROM inspections
+                WHERE dot_number IN ({$placeholders}) AND vin IS NOT NULL AND vin <> ''
+                UNION ALL
+                SELECT dot_number, vin2 AS unit_vin, unit_type_desc2 AS unit_type
+                FROM inspections
+                WHERE dot_number IN ({$placeholders}) AND vin2 IS NOT NULL AND vin2 <> ''
+            ) AS slots
+            GROUP BY dot_number
+            SQL;
+
+        $units = $connection->select($sql, [...$power, ...$dots, ...$dots]);
+
+        $stats = [];
+
+        foreach ($units as $row) {
+            $stats[$row->dot_number] = [
+                'observed_units' => (int) $row->observed_units,
+                'observed_trailers' => (int) $row->observed_trailers,
+            ];
+        }
+
+        foreach ($totals as $dot => $total) {
+            $stats[$dot]['insp_total'] = (int) $total;
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Crash totals for a page of carriers, keyed by DOT number.
+     *
+     * tow_away is a tinyint(1) holding 0 or 1, so `= 1` here is the same test
+     * as the boolean cast the profile filters on.
+     *
+     * @param  array<int, mixed>  $dots
+     * @return array<int|string, array{crashes_total:int, fatalities:int, injuries:int, tow_away:int}>
+     */
+    private function crashStatsFor(array $dots): array
+    {
+        if (! $dots) {
+            return [];
+        }
+
+        return DB::connection($this->carrierConnection())
+            ->table('crashes')
+            ->selectRaw('dot_number,
+                         COUNT(*) AS crashes_total,
+                         COALESCE(SUM(fatalities), 0) AS fatalities,
+                         COALESCE(SUM(injuries), 0) AS injuries,
+                         COALESCE(SUM(tow_away = 1), 0) AS tow_away')
+            ->whereIn('dot_number', $dots)
+            ->groupBy('dot_number')
+            ->get()
+            ->keyBy('dot_number')
+            ->map(fn ($row) => [
+                'crashes_total' => (int) $row->crashes_total,
+                'fatalities' => (int) $row->fatalities,
+                'injuries' => (int) $row->injuries,
+                'tow_away' => (int) $row->tow_away,
+            ])
+            ->all();
+    }
+
+    /** The connection the carrier tables live on. */
+    private function carrierConnection(): string
+    {
+        return (new Carrier)->getConnectionName();
+    }
+
+    /**
+     * Run the trust score for one already-loaded search row.
+     *
+     * Assembles the same inputs detail() assembles, off relations that are
+     * already in memory, and hands them to the shared calculator.
+     */
+    private function trustScoreForRow(Carrier $carrier, array $inspectionStats, array $crashStats): ?int
+    {
+        $detail = $carrier->carrierDetail;
+        $sms = $carrier->smsMeasures;
+        $auth = $carrier->authority;
+
+        // OOS percentages come off sms_measures, exactly as on the profile.
+        $vehicleInspTotal = (int) ($sms?->vehicle_insp_total ?? 0);
+        $vehicleOosTotal = (int) ($sms?->vehicle_oos_insp_total ?? 0);
+        $driverInspTotal = (int) ($sms?->driver_insp_total ?? 0);
+        $driverOosTotal = (int) ($sms?->driver_oos_insp_total ?? 0);
+
+        $vehicleOosPct = $vehicleInspTotal > 0 ? round($vehicleOosTotal / $vehicleInspTotal * 100, 2) : null;
+        $driverOosPct = $driverInspTotal > 0 ? round($driverOosTotal / $driverInspTotal * 100, 2) : null;
+
+        // Power units and trailers actually seen roadside — distinct VINs
+        // across both inspection slots, counted in SQL rather than in PHP.
+        $observedUnits = (int) ($inspectionStats['observed_units'] ?? 0);
+        $observedTrailers = (int) ($inspectionStats['observed_trailers'] ?? 0);
+
+        // Age of each authority type, from the oldest GRANTED history row.
+        $getAuthorityAge = function (string $key) use ($carrier) {
+
+            $types = Fmcsa::authorityType($key);
+
+            $granted = $carrier->authorityHistory
+                ->filter(fn ($h) => in_array(strtoupper((string) $h->op_auth_type), $types, true)
+                    && strtoupper((string) $h->original_action_desc) === 'GRANTED')
+                ->sortBy(fn ($h) => Fmcsa::dateKey($h->orig_served_date) ?: PHP_INT_MAX)
+                ->first();
+
+            $served = Fmcsa::date($granted?->orig_served_date);
+
+            return $served ? (int) $served->diffInYears(now()) : null;
+        };
+
+        $mcs150Year = null;
+
+        if ($carrier->mcs150_date) {
+            try {
+                $mcs150Year = (int) Carbon::parse($carrier->mcs150_date)->year;
+            } catch (\Throwable) {
+            }
+        }
+
+        $trustScore = $this->calculateCarrierTrustScore(
+            $carrier,
+            $detail,
+            $sms,
+            $auth,
+            $vehicleOosPct,
+            $driverOosPct,
+            $getAuthorityAge('common'),
+            $getAuthorityAge('contract'),
+            $getAuthorityAge('broker'),
+            $this->dotAgeFrom($carrier->add_date ?? $detail?->add_date),
+            $mcs150Year,
+            $observedUnits,
+            $observedTrailers,
+            (int) ($crashStats['crashes_total'] ?? 0),
+            (int) ($crashStats['fatalities'] ?? 0),
+            (int) ($crashStats['injuries'] ?? 0),
+            (int) ($crashStats['tow_away'] ?? 0),
+            (int) ($inspectionStats['insp_total'] ?? 0),
         );
+
+        return isset($trustScore['overall_score'])
+            ? (int) $trustScore['overall_score']
+            : null;
+    }
+
+    /**
+     * DT score for every row on a search page.
+     *
+     * Computed live so a first-time search shows a real number. If the carrier
+     * database is unreachable or the calculation throws, the search response
+     * still goes out — falling back to the last score this company was shown,
+     * and to null after that, rather than failing the whole request.
+     *
+     * @param  \Illuminate\Support\Collection  $rows
+     * @return array<int, int>
+     */
+    private function searchRowScores(Collection $rows): array
+    {
+        $stored = $this->storedDtScores($rows);
+
+        try {
+            return $this->computeSearchScores($rows) + $stored;
+        } catch (\Throwable $e) {
+            Log::warning('Carrier search scoring failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return $stored;
+        }
+    }
+
+    /**
+     * The DT scores this company has already seen, keyed by carrier id.
+     *
+     * The score is only ever computed on the profile endpoint, so this is the
+     * last score the company was actually shown for that carrier — carriers
+     * nobody here has opened yet have none, and the row carries a null. The
+     * lookup is against the application database (search_histories), not the
+     * EC2 carrier database, and is scoped to the ids on this page.
+     *
+     * Guest search (`/guest-pay/carrier/search`) runs unauthenticated, so
+     * there is no company to scope to and every row is scoreless.
+     *
+     * @param  \Illuminate\Support\Collection  $rows
+     * @return array<int, int>
+     */
+    private function storedDtScores(Collection $rows): array
+    {
+        $companyId = auth()->user()?->company_id;
+
+        if (! $companyId || $rows->isEmpty()) {
+            return [];
+        }
+
+        return SearchHistory::query()
+            ->where('company_id', $companyId)
+            ->whereIn('carrier_id', $rows->pluck('id')->all())
+            ->whereNotNull('dt_score')
+            ->pluck('dt_score', 'carrier_id')
+            ->map(fn ($score) => (int) $score)
+            ->all();
     }
 
     /**
      * Shape a carrier row for the search response.
      */
-    private function transformSearchRow(Carrier $carrier): array
+    private function transformSearchRow(Carrier $carrier, ?int $dtScore = null): array
     {
         return [
+
+            'dt_score' => $dtScore,
 
             'id' => $carrier->id,
             'row_id' => $carrier->row_id,
@@ -2745,7 +3223,7 @@ class CarrierController extends Controller
         $perPage = max(1, min(100, (int) $request->query('per_page', 10)));
         $page = max(1, (int) $request->query('page', 1));
 
-        [$rows, $total] = $this->runCarrierSearch(
+        [$rows, $hasMore, $total] = $this->runCarrierSearch(
             fn (EloquentBuilder $query) => $this->applyCarrierSearchFilter($query, $search, $searchedBy),
             $page,
             $perPage,
@@ -2753,13 +3231,21 @@ class CarrierController extends Controller
             "search|{$searchedBy}|".mb_strtolower($search),
         );
 
+        $scores = $this->searchRowScores($rows);
+
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
+            // Null while the count is still warming — the results header shows
+            // "10+" for it rather than a wrong number, and paging runs off
+            // has_more_pages, which is always exact.
             'total' => $total,
-            'last_page' => max(1, (int) ceil($total / $perPage)),
-            'has_more_pages' => ($page * $perPage) < $total,
-            'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow($carrier))->values(),
+            'last_page' => $total === null ? null : max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => $hasMore,
+            'data' => $rows->map(fn (Carrier $carrier) => $this->transformSearchRow(
+                $carrier,
+                $scores[$carrier->id] ?? null,
+            ))->values(),
         ]);
     }
 
@@ -2809,7 +3295,7 @@ class CarrierController extends Controller
             return $query->where('legal_name', 'LIKE', "%{$search}%");
         };
 
-        [$rows, $total] = $this->runCarrierSearch(
+        [$rows, $hasMore, $total] = $this->runCarrierSearch(
             $filter,
             $page,
             $perPage,
@@ -2817,17 +3303,22 @@ class CarrierController extends Controller
             'search2|'.mb_strtolower($search),
         );
 
+        $scores = $this->searchRowScores($rows);
+
         return response()->json([
             'current_page' => $page,
             'per_page' => $perPage,
+            // Null while the count is still warming — the results header shows
+            // "10+" for it rather than a wrong number, and paging runs off
+            // has_more_pages, which is always exact.
             'total' => $total,
-            'last_page' => max(1, (int) ceil($total / $perPage)),
-            'has_more_pages' => ($page * $perPage) < $total,
-            'data' => $rows->map(function (Carrier $carrier) {
+            'last_page' => $total === null ? null : max(1, (int) ceil($total / $perPage)),
+            'has_more_pages' => $hasMore,
+            'data' => $rows->map(function (Carrier $carrier) use ($scores) {
                 // search2 has always returned the raw FMCSA rating code here
                 // rather than the label search() uses.
                 return array_merge(
-                    $this->transformSearchRow($carrier),
+                    $this->transformSearchRow($carrier, $scores[$carrier->id] ?? null),
                     ['risk_level' => $carrier->safety_rating],
                 );
             })->values(),
@@ -3001,37 +3492,7 @@ class CarrierController extends Controller
 
         // dot_age — days since DOT number was issued
 
-        $dotAge = null;
-        $addDate = $carrier->add_date ?? $detail?->add_date;
-
-        if ($addDate) {
-            try {
-
-                // Handle FMCSA dates like 01-JUN-74
-                if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($addDate))) {
-
-                    $year = substr($addDate, -2);
-
-                    // FMCSA data started long before 2000,
-                    // so convert 74 → 1974, 06 → 2006
-                    $century = $year > date('y') ? '19' : '20';
-
-                    $fixedDate = substr($addDate, 0, -2).$century.$year;
-
-                    $parsedDate = Carbon::createFromFormat('d-M-Y', strtoupper($fixedDate));
-
-                } else {
-
-                    $parsedDate = Carbon::parse($addDate);
-
-                }
-
-                $dotAge = (int) $parsedDate->diffInYears(now());
-
-            } catch (\Throwable $e) {
-                $dotAge = null;
-            }
-        }
+        $dotAge = $this->dotAgeFrom($carrier->add_date ?? $detail?->add_date);
 
         // mcs150_year — year of last MCS-150 filing
         $mcs150Year = null;

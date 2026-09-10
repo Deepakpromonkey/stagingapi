@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Eld\EldConnection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
@@ -65,6 +66,14 @@ class CarrierConnectRequest extends Model
         'stripe_express_account',
         'stripe_verified_at',
         'bank_skipped_at',
+
+        // Added in main branch (ELD onboarding).
+        'eld_connection_id',
+        'eld_link_state',
+        'eld_link_state_at',
+        'eld_connected_at',
+        'eld_skipped_at',
+
         'uses_factoring_company',
         'factoring_company_name',
         'factoring_document_disk',
@@ -98,6 +107,10 @@ class CarrierConnectRequest extends Model
 
         'didit_session_id',
         'didit_response',
+
+        // The Link nonce is what proves a return from Terminal is the one we
+        // sent the carrier on. Exposing it would make that check worthless.
+        'eld_link_state',
     ];
 
     protected $casts = [
@@ -114,10 +127,18 @@ class CarrierConnectRequest extends Model
         'identity_skipped_at' => 'datetime',
         'stripe_verified_at' => 'datetime',
         'bank_skipped_at' => 'datetime',
+
+        // Added in main branch.
+        'eld_link_state_at' => 'datetime',
+        'eld_connected_at' => 'datetime',
+        'eld_skipped_at' => 'datetime',
+
         'factoring_answered_at' => 'datetime',
         'questionnaire_completed_at' => 'datetime',
+        'documents_completed_at' => 'datetime',
         'signed_at' => 'datetime',
         'portal_account_provisioned_at' => 'datetime',
+
         'didit_response' => 'array',
         'didit_risk_flagged' => 'boolean',
         'uses_factoring_company' => 'boolean',
@@ -152,9 +173,22 @@ class CarrierConnectRequest extends Model
     {
         return $this->hasMany(CarrierConnectAnswer::class, 'carrier_connect_request_id');
     }
- public function documents()
+
+    public function documents()
     {
         return $this->hasMany(CarrierConnectDocument::class, 'carrier_connect_request_id');
+    }
+
+    /**
+     * The carrier's telematics connection.
+     *
+     * Shared: the same connection may be reached from several brokers' connect
+     * requests, because a carrier links their provider account once and grants
+     * each broker access to it separately.
+     */
+    public function eldConnection()
+    {
+        return $this->belongsTo(EldConnection::class, 'eld_connection_id');
     }
 
     public function scopeForCompany(Builder $query, int $companyId): Builder

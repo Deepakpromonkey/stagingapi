@@ -101,11 +101,22 @@ DOT numbers with 2-4 rows), plus 26,310 rows with an empty `dot_number`.
 | `COUNT(*)` with `legal_name LIKE '%SWIFT%' OR dba_name LIKE '%SWIFT%'` | 15.3s |
 | the same page query with `LIMIT 10` | 0.3s |
 
-The application now caches that count for 10 minutes and skips it entirely for
-DOT / MC / phone / email lookups, which is what made search usable without
-touching this database.
+**The count is no longer on the request path at all (2026-09-07).** The page
+query fetches one row past the page, so `has_more_pages` is exact without any
+COUNT, and paging never waits on one. A cold count returns `total: null` and
+`last_page: null` — the results header shows "10+ results" — while the scan
+runs once in a terminating callback after the response has been flushed, under
+a two-minute `:warming` lock so a popular term does not queue one scan per
+request. It is cached for 6 hours (was 10 minutes; the data is a scheduled bulk
+load, so the old TTL bought nothing). The second search for a term, and every
+later page of the same search, shows the exact total.
 
-A FULLTEXT index would make the count itself fast:
+That takes a cold company-name search from ~12s to the cost of the page query
+alone. DOT / MC / phone / email lookups never counted in the first place.
+
+A FULLTEXT index would make the count itself fast, and would be the way to
+make the page query fast too if `LIKE '%term%'` on 4.48M rows stops being
+acceptable:
 
 ```sql
 ALTER TABLE carriers ADD FULLTEXT INDEX ft_carriers_name (legal_name, dba_name);
@@ -261,3 +272,46 @@ trusting shortlists or search history.
 | Name search, cold count | ~7.5s | ~12s (4.48M rows, not 2.07M) |
 | Carrier profile | ~15.5s | ~17s |
 
+
+## Covering indexes for the search DT score (added 2026-09-07)
+
+Search now scores every row inline, which needs three numbers out of the
+inspection data per carrier: the row count, and the distinct VINs seen as power
+units and as trailers. `inspections` is a view over `sms_input_inspection`
+(5.2M rows, 1.4GB), and the distinct-VIN aggregate could only be answered with
+a temporary table plus MRR row lookups — **102s** for one page of ten large
+carriers, returning ten rows.
+
+Two covering indexes were added to the base table, one per inspection unit
+slot, so the aggregate is answered from the index alone (`Using index`):
+
+```sql
+ALTER TABLE sms_input_inspection
+  ADD INDEX idx_dot_vin_type  (dot_number, vin,  unit_type_desc),
+  ALGORITHM=INPLACE, LOCK=NONE;
+
+ALTER TABLE sms_input_inspection
+  ADD INDEX idx_dot_vin2_type (dot_number, vin2, unit_type_desc2),
+  ALGORITHM=INPLACE, LOCK=NONE;
+```
+
+Each took ~55s to build online, with reads and writes uninterrupted. **These
+have to be recreated if the carrier database is reloaded from scratch** —
+without them a search that returns a large carrier stalls for minutes.
+
+Do not shorten them to prefix indexes: `COUNT(DISTINCT vin)` cannot be answered
+from a prefix, and the plan falls back to row lookups.
+
+### Measured, ten busiest carriers in the feed (worst case, over a remote link)
+
+| | Before | After |
+|---|---|---|
+| distinct-VIN aggregate | 102.6s | 3.5s |
+| whole page scored, cold | 221s | 13.7s |
+| whole page scored, cached | — | ~1ms |
+
+Most of the remaining 13.7s is per-query network latency from a developer
+laptop (~550ms × 12 statements); on the application host the same page is
+dominated by the two aggregates instead. Scores were byte-identical before and
+after the index, and the SQL aggregate was checked against the profile's PHP
+logic on six carriers — same observed units, trailers and inspection totals.

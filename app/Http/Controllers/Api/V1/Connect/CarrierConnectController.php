@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1\Connect;
 use App\Http\Controllers\Api\V1\BaseController;
 use App\Http\Requests\Connect\CarrierConnectTokenRequest;
 use App\Http\Requests\Connect\CarrierDocumentRequest;
+use App\Http\Requests\Connect\CarrierEldVerifyRequest;
 use App\Http\Requests\Connect\CarrierEsignRequest;
 use App\Http\Requests\Connect\CarrierFactoringRequest;
 use App\Http\Requests\Connect\CarrierQuestionnaireRequest;
@@ -24,6 +25,7 @@ use App\Models\Carriers\Carrier;
 use App\Models\EmailTemplate;
 use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
+use App\Services\Eld\EldConnectionService;
 use App\Services\SmsSender;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Request;
@@ -56,6 +58,7 @@ class CarrierConnectController extends BaseController
 
     public function __construct(
         private CarrierAccountService $carrierAccountService,
+        private EldConnectionService $eldConnections,
         private SmsSender $sms
     ) {}
 
@@ -514,7 +517,10 @@ class CarrierConnectController extends BaseController
 
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
-        $connectRequest->load(['agreementDocument', 'documents']);
+        // eldConnection included so a carrier returning to the wizard sees the
+        // provider and the fleet counts on the ELD tile, rather than a bare
+        // tick with nothing behind it.
+        $connectRequest->load(['agreementDocument', 'documents', 'eldConnection']);
 
         return $this->success([
             'connect_request' => new CarrierConnectRequestResource($connectRequest),
@@ -1080,11 +1086,11 @@ class CarrierConnectController extends BaseController
     }
 
     /**
-     * Records that the carrier chose to move past the government ID or bank
-     * step without completing it.
+     * Records that the carrier chose to move past the government ID, ELD, or
+     * bank step without completing it.
      *
-     * Only these two are skippable. The phone check, the questionnaire and the
-     * agreement are not: the first is what proves we are talking to the
+     * Only these three are skippable. The phone check, the questionnaire and
+     * the agreement are not: the first is what proves we are talking to the
      * carrier, and the other two are the broker's own requirements.
      */
     public function skipStep(CarrierSkipStepRequest $request)
@@ -1108,6 +1114,19 @@ class CarrierConnectController extends BaseController
             return $this->respondWithRequest($connectRequest, 'Government ID step skipped.');
         }
 
+        if ($data['step'] === 'eld') {
+            // Same reasoning as the ID check: a carrier who has already linked
+            // a provider should not be able to throw that away by pressing the
+            // skip link on a stale page.
+            if ($connectRequest->eld_connected_at !== null) {
+                return $this->respondWithRequest($connectRequest, 'Your ELD is already connected.');
+            }
+
+            $connectRequest->forceFill(['eld_skipped_at' => now()])->save();
+
+            return $this->respondWithRequest($connectRequest, 'ELD step skipped.');
+        }
+
         if ($connectRequest->stripe_verified_at !== null) {
             return $this->respondWithRequest($connectRequest, 'Your bank account is already connected.');
         }
@@ -1118,7 +1137,126 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 4 — the broker's own questions
+    // Step 4 — ELD / telematics (Terminal)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Open the Terminal Link page for this carrier.
+     *
+     * The URL is minted here rather than in the browser because it carries the
+     * publishable key, the consent template for this broker, and a state nonce
+     * that has to be remembered server-side for the return leg to mean
+     * anything.
+     *
+     * The carrier signs in to their provider on Terminal's page. Their provider
+     * credentials never touch this application, which is exactly what the step
+     * promises them on screen.
+     */
+    public function connectEld(CarrierConnectTokenRequest $request)
+    {
+        $connectRequest = $this->resolveRequest($request->validated()['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        if (! $this->eldConnections->isConfigured()) {
+            Log::error('Terminal is not configured; cannot open the ELD connection page.');
+
+            return $this->error('ELD connection is unavailable right now.', null, 503);
+        }
+
+        $url = $this->eldConnections->linkUrlFor(
+            $connectRequest,
+
+            // Terminal appends `result`, `token` and `state`; the `eld` flag is
+            // ours, and is what tells the wizard which return leg this is.
+            $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=1'
+        );
+
+        if (! $url) {
+            return $this->error('Could not open the ELD connection page. Please try again.', null, 502);
+        }
+
+        return $this->success(['url' => $url], 'ELD connection started.');
+    }
+
+    /**
+     * Share a connection the carrier already made with this broker.
+     *
+     * A carrier hauling for several brokers links their provider once. The
+     * second broker still needs the carrier's consent — the wizard names them
+     * on the button — but not another trip through the provider's login, since
+     * the token already exists and Terminal would only dedupe back onto the
+     * same connection.
+     */
+    public function shareEld(CarrierConnectTokenRequest $request)
+    {
+        $connectRequest = $this->resolveRequest($request->validated()['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $connection = $this->eldConnections->share($connectRequest);
+
+        if (! $connection) {
+            return $this->error(
+                'There is no connected ELD to share. Please connect one.',
+                null,
+                422
+            );
+        }
+
+        return $this->respondWithRequest(
+            $connectRequest->refresh(),
+            ($connection->provider ? $connection->provider.' shared' : 'ELD shared')
+                .' with '.($connectRequest->company?->company_name ?? 'this broker').'.'
+        );
+    }
+
+    /**
+     * Finish the connection the carrier just made.
+     *
+     * Exchanges the single-use public token for the connection token, dedupes
+     * against a connection the carrier already has, records this broker's
+     * consent, and queues the first fleet import.
+     *
+     * The import is deliberately not waited on: a large fleet takes minutes,
+     * and the carrier has five more steps to get through.
+     */
+    public function verifyEld(CarrierEldVerifyRequest $request)
+    {
+        $data = $request->validated();
+
+        $connectRequest = $this->resolveRequest($data['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $connection = $this->eldConnections->completeFromPublicToken(
+            $connectRequest,
+            $data['public_token'],
+            $data['state']
+        );
+
+        if (! $connection) {
+            return $this->error(
+                'Could not finish connecting your ELD. Please try again.',
+                null,
+                422
+            );
+        }
+
+        return $this->respondWithRequest(
+            $connectRequest->refresh(),
+            'ELD connected. Your fleet is importing in the background.'
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 5 — the broker's own questions
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -1276,7 +1414,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 5 — documents (W-9, COI)
+    // Step 6 — documents (W-9, COI)
     // ─────────────────────────────────────────────────────────────────────────
 
     public function uploadDocument(CarrierDocumentRequest $request)
@@ -1368,7 +1506,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 6 — e-sign
+    // Step 7 — e-sign
     // ─────────────────────────────────────────────────────────────────────────
 
     public function esign(CarrierEsignRequest $request)
@@ -1485,7 +1623,9 @@ class CarrierConnectController extends BaseController
     ) {
         return $this->success(
             new CarrierConnectRequestResource(
-                $connectRequest->load(['agreementDocument', 'documents'])
+                // eldConnection comes along so the ELD tile can report the
+                // provider and the import's progress without a second call.
+                $connectRequest->load(['agreementDocument', 'documents', 'eldConnection'])
             ),
             $message,
             $code

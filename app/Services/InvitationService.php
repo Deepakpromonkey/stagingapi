@@ -45,6 +45,10 @@ class InvitationService
                 'first_name' => $data['first_name'],
                 'last_name' => $data['last_name'] ?? null,
                 'phone' => $data['phone'] ?? null,
+
+                // Added in main branch.
+                'country_code' => $data['country_code'] ?? null,
+
                 'email' => strtolower($data['email']),
                 'password' => $this->unusablePassword(),
                 'is_owner' => false,
@@ -188,7 +192,7 @@ class InvitationService
     protected function acceptUrl(Invitation $invitation): string
     {
         return rtrim((string) config('app.frontend_url'), '/')
-            .'/accept-invitation?token='.urlencode($invitation->token);
+            . '/accept-invitation?token=' . urlencode($invitation->token);
     }
 
     /**
