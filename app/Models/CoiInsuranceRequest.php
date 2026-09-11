@@ -21,6 +21,22 @@ use Illuminate\Support\Str;
  */
 class CoiInsuranceRequest extends Model
 {
+    /**
+     * The questions a broker can put to an agency.
+     *
+     * A fixed list rather than free text: every one of them maps to something
+     * the reply is read for, and a question nothing can read the answer to is
+     * a question not worth asking a stranger.
+     */
+    public const ASKS = [
+        'expiry' => 'The policy expiry date.',
+        'limits' => 'Limits for auto liability and cargo.',
+        'schedule' => 'Whether the auto liability is written Any Auto or Scheduled Autos, and if scheduled, the VINs currently on the policy.',
+        'exclusions' => 'Any cargo exclusions, deductibles, or commodity sub-limits that apply beneath the general cargo limit.',
+        'insurer' => 'The insurer behind the policy, and the policy number.',
+        'holder' => 'That the certificate is made out to the holder named below, showing our MC and USDOT.',
+    ];
+
     public const STATUS_PENDING = 'pending';
 
     public const STATUS_RESPONDED = 'responded';
@@ -53,6 +69,9 @@ class CoiInsuranceRequest extends Model
         'status',
         'reply_token',
         'subject',
+        'asks',
+        'holder_name',
+        'ask_note',
         'message_id',
         'insurance_expiry_date',
         'verification',
@@ -72,6 +91,7 @@ class CoiInsuranceRequest extends Model
     protected $casts = [
         'dot_number' => 'integer',
         'insurance_expiry_date' => 'date',
+        'asks' => 'array',
         'verification' => 'array',
         'coverage' => 'array',
         'trust' => 'array',

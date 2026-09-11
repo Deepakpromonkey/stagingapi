@@ -38,32 +38,33 @@
         </table>
 
         {{--
-            The certificate alone does not answer the questions a load is
-            actually held on, so they are asked outright.
-
-            The schedule matters most. On an Any Auto policy every unit the
-            carrier runs is covered and there is nothing to list; on Scheduled
-            Autos only the units named on the policy are insured, and a truck
-            that is not on it is uninsured however good the certificate looks.
-            A broker cannot tell which kind it is from a certificate, so the
-            question has to be asked.
+            Only the questions this request actually asked. Rendered from the
+            row rather than hard-coded, so what the agency was asked and what
+            the reply is read against cannot drift apart.
         --}}
-        <p style="margin:0 0 8px;">So that we do not have to come back to you, please confirm:</p>
+        @php($asks = $request->asks ?: array_keys(\App\Models\CoiInsuranceRequest::ASKS))
 
-        <ol style="margin:0 0 16px; padding-left:20px;">
-            <li style="margin-bottom:4px;">The policy expiry date.</li>
-            <li style="margin-bottom:4px;">Limits for auto liability and cargo.</li>
-            <li style="margin-bottom:4px;">
-                Whether the auto liability is written <strong>Any Auto</strong> or
-                <strong>Scheduled Autos</strong>. If scheduled, please list the VINs
-                currently on the policy.
-            </li>
-            <li style="margin-bottom:4px;">
-                Any cargo exclusions, deductibles, or commodity sub-limits that
-                apply beneath the general cargo limit.
-            </li>
-            <li>The insurer behind the policy, and the policy number.</li>
-        </ol>
+        @if (count($asks))
+            <p style="margin:0 0 8px;">So that we do not have to come back to you, please confirm:</p>
+
+            <ol style="margin:0 0 16px; padding-left:20px;">
+                @foreach ($asks as $ask)
+                    @if (isset(\App\Models\CoiInsuranceRequest::ASKS[$ask]))
+                        <li style="margin-bottom:4px;">
+                            {{ \App\Models\CoiInsuranceRequest::ASKS[$ask] }}
+
+                            @if ($ask === 'holder' && $request->holder_name)
+                                <br><strong>{{ $request->holder_name }}</strong>
+                            @endif
+                        </li>
+                    @endif
+                @endforeach
+            </ol>
+        @endif
+
+        @if ($request->ask_note)
+            <p style="margin:0 0 16px;">{{ $request->ask_note }}</p>
+        @endif
 
         <p style="margin:0 0 16px;">Appreciate your quick response.</p>
 

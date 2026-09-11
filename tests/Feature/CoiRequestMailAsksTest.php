@@ -21,16 +21,46 @@ class CoiRequestMailAsksTest extends TestCase
         PortableMigrations::migrateFreshUsing insteadof RefreshDatabase;
     }
 
-    private function rendered(): string
+    private function rendered(?array $asks = null, ?string $holder = null, ?string $note = null): string
     {
         $request = new CoiInsuranceRequest([
             'dot_number' => 3712558,
             'carrier_name' => 'Delgado Bros Transport Inc',
             'carrier_mc' => '1355901',
+            'asks' => $asks ?? array_keys(CoiInsuranceRequest::ASKS),
+            'holder_name' => $holder,
+            'ask_note' => $note,
         ]);
         $request->subject = CoiInsuranceRequest::buildSubject('Delgado Bros Transport Inc', 3712558);
 
         return (new CarrierInsuranceRequestMail($request))->render();
+    }
+
+    public function test_a_broker_can_ask_for_only_what_they_need(): void
+    {
+        $body = $this->rendered(['schedule']);
+
+        $this->assertStringContainsString('Scheduled Autos', $body);
+
+        // Nothing they did not ask for.
+        $this->assertStringNotContainsString('sub-limits', $body);
+        $this->assertStringNotContainsString('policy number', $body);
+    }
+
+    public function test_the_holder_ask_names_the_holder(): void
+    {
+        // Sequence 13: a certificate made out to the wrong name is the
+        // agency's error only if the right one was given to them.
+        $body = $this->rendered(['holder'], 'Warrior Trucking LLC');
+
+        $this->assertStringContainsString('Warrior Trucking LLC', $body);
+    }
+
+    public function test_a_broker_can_add_a_question_of_their_own(): void
+    {
+        $body = $this->rendered(['expiry'], null, 'Does the cargo form cover frozen seafood?');
+
+        $this->assertStringContainsString('frozen seafood', $body);
     }
 
     public function test_it_asks_which_kind_of_auto_policy_it_is(): void

@@ -84,6 +84,11 @@ class CarrierInsuranceRequestController extends Controller
                 $request->integer('dot_number'),
                 $request->input('carrier_name'),
                 $request->input('carrier_mc'),
+                [
+                    'asks' => $request->input('asks'),
+                    'holder_name' => $request->input('holder_name'),
+                    'ask_note' => $request->input('ask_note'),
+                ],
             );
         } catch (RuntimeException $e) {
             /*

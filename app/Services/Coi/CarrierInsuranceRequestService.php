@@ -35,7 +35,7 @@ class CarrierInsuranceRequestService
      * page any number of the broker's team may have open, and an agency that
      * receives the same request four times answers none of them.
      */
-    public function raise(User $user, int $dotNumber, ?string $carrierName = null, ?string $carrierMc = null): CoiInsuranceRequest
+    public function raise(User $user, int $dotNumber, ?string $carrierName = null, ?string $carrierMc = null, array $options = []): CoiInsuranceRequest
     {
         $existing = CoiInsuranceRequest::where('company_id', $user->company_id)
             ->where('dot_number', $dotNumber)
@@ -105,6 +105,15 @@ class CarrierInsuranceRequestService
             'recipient_source' => $source,
             'status' => CoiInsuranceRequest::STATUS_PENDING,
             'subject' => CoiInsuranceRequest::buildSubject($identity['name'], $dotNumber),
+
+            /*
+             | No selection means ask everything. A short mail that has to be
+             | sent twice costs the agency's patience, which is the scarce
+             | resource here.
+             */
+            'asks' => $options['asks'] ?? array_keys(CoiInsuranceRequest::ASKS),
+            'holder_name' => $options['holder_name'] ?? $user->company?->company_name,
+            'ask_note' => $options['ask_note'] ?? null,
         ]);
 
         $this->send($request);
