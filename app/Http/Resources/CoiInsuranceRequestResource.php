@@ -40,6 +40,10 @@ class CoiInsuranceRequestResource extends JsonResource
             // date has actually been read.
             'verification' => $this->verification,
 
+            // Whether the certificate can be believed at all — the prior
+            // question to whether it agrees with the filing.
+            'trust' => $this->trust,
+
             'sent_at' => $this->sent_at?->toIso8601String(),
             'responded_at' => $this->responded_at?->toIso8601String(),
             'resolved_at' => $this->resolved_at?->toIso8601String(),

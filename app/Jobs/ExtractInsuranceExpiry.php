@@ -6,6 +6,7 @@ use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
 use App\Services\Coi\CarrierInsuranceRequestService;
 use App\Services\Coi\CoiFilingVerifier;
+use App\Services\Coi\CoiTrustCheck;
 use App\Services\Coi\InboundEmailPayload;
 use App\Services\Coi\InsuranceExpiryExtractor;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -44,7 +45,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $this->onQueue(config('coi_insurance.queue', 'default'));
     }
 
-    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier): void
+    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier, CoiTrustCheck $trust): void
     {
         $response = CoiInsuranceResponse::with('request')->find($this->responseId);
 
@@ -87,6 +88,16 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
          | is only read if the request is still open — so it goes to awaiting,
          | not failed, and keeps no resolved_at.
          */
+        /*
+         | Asked of every reply, not only the ones carrying a date. The reply
+         | that says "we did not issue that certificate" has no date in it at
+         | all, and it is the most important thing anyone will read on this
+         | request.
+         */
+        $request->forceFill([
+            'trust' => $trust->check($response->from_email, $result['details'] ?? []),
+        ])->save();
+
         if ($result['expiry_date']) {
             /*
              | A date is not a clearance. The same certificate has to agree
