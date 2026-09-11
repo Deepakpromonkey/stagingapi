@@ -245,9 +245,19 @@ class CarrierInsuranceRequestService
             return false;
         }
 
+        /*
+         | The test recipient applies here exactly as it does to a first send.
+         | Without it a re-route would take an address out of a stranger's mail
+         | and write to it — which is the one thing COI_FORCE_RECIPIENT exists
+         | to prevent, and the sequences that re-route are the ones whose
+         | replies carry somebody else's address.
+         */
+        $forced = config('coi_insurance.force_recipient');
+
         $request->forceFill([
-            'recipient_email' => $address,
-            'recipient_source' => 'reply',
+            'recipient_email' => $forced ?: $address,
+            'recipient_source' => $forced ? 'test:reply' : 'reply',
+            'rerouted_to' => $address,
             'reroute_count' => $request->reroute_count + 1,
 
             /*

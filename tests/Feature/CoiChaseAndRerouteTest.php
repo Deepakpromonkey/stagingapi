@@ -103,6 +103,9 @@ class CoiChaseAndRerouteTest extends TestCase
     {
         Mail::fake();
 
+        // Production behaviour: no test recipient standing in the way.
+        config(['coi_insurance.force_recipient' => null]);
+
         $request = $this->request(['chase_count' => 2, 'last_chase_at' => now()]);
 
         $rerouted = app(CarrierInsuranceRequestService::class)->rerouteIfAsked($request, [
@@ -124,9 +127,35 @@ class CoiChaseAndRerouteTest extends TestCase
         Mail::assertQueued(CarrierInsuranceRequestMail::class);
     }
 
+    public function test_a_reroute_on_staging_still_goes_to_the_test_recipient(): void
+    {
+        Mail::fake();
+
+        // The whole point of the test recipient: the sequences that re-route
+        // are the ones whose replies carry a stranger's address.
+        config(['coi_insurance.force_recipient' => 'tester@dollartraq.test']);
+
+        $request = $this->request();
+
+        app(CarrierInsuranceRequestService::class)->rerouteIfAsked($request, [
+            'alternate_email' => 'certs@somebodyelse.example',
+            'signals' => ['out_of_office'],
+        ]);
+
+        $request->refresh();
+
+        $this->assertSame('tester@dollartraq.test', $request->recipient_email);
+        $this->assertSame('test:reply', $request->recipient_source);
+
+        // Where it would have gone is still recorded, or a staging run would
+        // report that every re-route resolved perfectly.
+        $this->assertSame('certs@somebodyelse.example', $request->rerouted_to);
+    }
+
     public function test_an_address_without_an_instruction_is_not_followed(): void
     {
         Mail::fake();
+        config(['coi_insurance.force_recipient' => null]);
 
         $request = $this->request();
 

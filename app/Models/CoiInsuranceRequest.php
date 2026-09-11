@@ -63,6 +63,7 @@ class CoiInsuranceRequest extends Model
         'chase_count',
         'last_chase_at',
         'reroute_count',
+        'rerouted_to',
         'responded_at',
         'resolved_at',
         'last_error',
