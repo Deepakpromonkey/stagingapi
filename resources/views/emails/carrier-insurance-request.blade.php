@@ -37,6 +37,34 @@
             </tr>
         </table>
 
+        {{--
+            The certificate alone does not answer the questions a load is
+            actually held on, so they are asked outright.
+
+            The schedule matters most. On an Any Auto policy every unit the
+            carrier runs is covered and there is nothing to list; on Scheduled
+            Autos only the units named on the policy are insured, and a truck
+            that is not on it is uninsured however good the certificate looks.
+            A broker cannot tell which kind it is from a certificate, so the
+            question has to be asked.
+        --}}
+        <p style="margin:0 0 8px;">So that we do not have to come back to you, please confirm:</p>
+
+        <ol style="margin:0 0 16px; padding-left:20px;">
+            <li style="margin-bottom:4px;">The policy expiry date.</li>
+            <li style="margin-bottom:4px;">Limits for auto liability and cargo.</li>
+            <li style="margin-bottom:4px;">
+                Whether the auto liability is written <strong>Any Auto</strong> or
+                <strong>Scheduled Autos</strong>. If scheduled, please list the VINs
+                currently on the policy.
+            </li>
+            <li style="margin-bottom:4px;">
+                Any cargo exclusions, deductibles, or commodity sub-limits that
+                apply beneath the general cargo limit.
+            </li>
+            <li>The insurer behind the policy, and the policy number.</li>
+        </ol>
+
         <p style="margin:0 0 16px;">Appreciate your quick response.</p>
 
         <p style="margin:0;">Thanks and Regards<br>DollarTraq Team</p>
