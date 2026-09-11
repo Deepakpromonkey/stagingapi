@@ -215,6 +215,10 @@ class CarrierInsuranceRequestController extends Controller
 
                 'extracted_expiry_date' => $reply->extracted_expiry_date?->toDateString(),
 
+                // The rest of what the model read out of this reply: limits,
+                // exclusions, commodity sub-limits, who it was made out to.
+                'extracted' => $reply->extracted,
+
                 // Shown on purpose: a broker acting on an extracted date should
                 // be able to see what was extracted, and from what.
                 'llm_response' => $reply->llm_response,

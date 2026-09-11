@@ -13,6 +13,7 @@ use Illuminate\Support\Str;
 class CoiInsuranceResponse extends Model
 {
     protected $fillable = [
+        'extracted',
         'uuid',
         'coi_insurance_request_id',
         'from_email',
@@ -28,6 +29,7 @@ class CoiInsuranceResponse extends Model
 
     protected $casts = [
         'raw_payload' => 'array',
+        'extracted' => 'array',
         'extracted_expiry_date' => 'date',
         'received_at' => 'datetime',
     ];

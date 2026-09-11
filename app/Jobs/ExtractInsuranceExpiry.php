@@ -74,6 +74,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $response->forceFill([
             'llm_response' => $result['raw'],
             'extracted_expiry_date' => $result['expiry_date'],
+            'extracted' => $result['details'] ?? null,
         ])->save();
 
         /*
