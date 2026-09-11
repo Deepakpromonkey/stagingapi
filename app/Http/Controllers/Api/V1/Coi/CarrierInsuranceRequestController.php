@@ -202,6 +202,19 @@ class CarrierInsuranceRequestController extends Controller
             'body_text' => null,
             'extracted_expiry_date' => null,
             'llm_response' => null,
+
+            /*
+            | What this request actually asked for. The mail body is built from
+            | a template at send time and never stored, and since the broker
+            | chooses the questions there is no longer a single "standard
+            | request" to describe — so the questions themselves travel instead.
+            */
+            'asks' => array_values(array_map(
+                fn ($ask) => CoiInsuranceRequest::ASKS[$ask] ?? $ask,
+                $insuranceRequest->asks ?? [],
+            )),
+            'ask_note' => $insuranceRequest->ask_note,
+            'holder_name' => $insuranceRequest->holder_name,
         ]];
 
         foreach ($insuranceRequest->responses as $reply) {
