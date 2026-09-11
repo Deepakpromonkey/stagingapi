@@ -104,6 +104,92 @@ class CoiInsuranceRequest extends Model
         return in_array($this->status, [self::STATUS_PENDING, self::STATUS_RESPONDED], true);
     }
 
+    /*
+    | The request as a path rather than a single status.
+    |
+    | A broker chasing a slow agency wants to know where the request got to,
+    | not only where it stopped: "sent, no reply in nine days" and "sent,
+    | replied, still being read" both show as open on the card, and the two
+    | mean very different things to someone deciding whether to chase again.
+    |
+    | Every step is derived from facts already on the row or its replies, so
+    | this stays true without a second source to keep in step. Steps are
+    | returned in order, each marked reached or not, and the last reached one
+    | is the request's current position.
+    */
+    public function statePath(): array
+    {
+        $replies = $this->relationLoaded('responses')
+            ? $this->responses
+            : $this->responses()->oldest('received_at')->get();
+
+        $firstReply = $replies->first();
+
+        $path = [
+            [
+                'state' => 'REQUEST_SENT',
+                'label' => 'Request sent',
+                'detail' => $this->recipient_email,
+                'at' => $this->sent_at?->toIso8601String(),
+                'reached' => $this->sent_at !== null,
+            ],
+            [
+                'state' => 'REPLY_RECEIVED',
+                'label' => 'Agency replied',
+                'detail' => $firstReply?->from_email,
+                'at' => $firstReply?->received_at?->toIso8601String(),
+                'reached' => $firstReply !== null,
+            ],
+        ];
+
+        /*
+        | The two ways out that are not a certificate. Neither can follow a
+        | reply being read, so they replace the tail of the path rather than
+        | extending it.
+        */
+        if ($this->status === self::STATUS_FAILED) {
+            $path[] = [
+                'state' => 'FAILED',
+                'label' => 'Could not be delivered',
+                'detail' => $this->last_error,
+                'at' => $this->resolved_at?->toIso8601String(),
+                'reached' => true,
+            ];
+
+            return $path;
+        }
+
+        if ($this->status === self::STATUS_EXPIRED) {
+            $path[] = [
+                'state' => 'NO_RESPONSE',
+                'label' => 'No response',
+                'detail' => 'The agency did not reply.',
+                'at' => $this->resolved_at?->toIso8601String(),
+                'reached' => true,
+            ];
+
+            return $path;
+        }
+
+        $path[] = [
+            'state' => 'READING_REPLY',
+            'label' => 'Reading the reply',
+            'detail' => null,
+            'at' => $this->responded_at?->toIso8601String(),
+            'reached' => $this->responded_at !== null,
+        ];
+
+        $path[] = [
+            'state' => 'VERIFIED',
+            'label' => 'Expiry date read',
+            'detail' => $this->insurance_expiry_date?->toFormattedDateString(),
+            'at' => $this->resolved_at?->toIso8601String(),
+            'reached' => $this->status === self::STATUS_SUCCESS,
+        ];
+
+        return $path;
+    }
+
     /**
      * The address the agency replies to: the shared inbox, sub-addressed with
      * this carrier's DOT and this request's token.

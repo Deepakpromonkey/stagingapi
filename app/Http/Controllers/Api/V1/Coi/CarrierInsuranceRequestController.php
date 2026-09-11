@@ -151,4 +151,84 @@ class CarrierInsuranceRequestController extends Controller
             ],
         ]);
     }
+
+    /**
+     * The whole correspondence for one request — what the Track button opens.
+     *
+     * The card polls `show` on a timer, so the reply bodies deliberately do
+     * not travel with it; they are fetched here, once, when a broker actually
+     * opens the thread.
+     *
+     * Scoped through the company like `response`, so the uuid alone is not
+     * enough to read another broker's correspondence.
+     */
+    public function thread(Request $request, string $uuid): JsonResponse
+    {
+        $insuranceRequest = CoiInsuranceRequest::where('uuid', $uuid)
+            ->where('company_id', $request->user()->company_id)
+            ->with(['user', 'responses' => fn ($query) => $query->oldest('received_at')])
+            ->first();
+
+        if ($insuranceRequest === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Insurance request not found.',
+            ], 404);
+        }
+
+        /*
+        | The outbound mail opens the thread. Its body is not stored — it is
+        | built from a template at send time — so the subject and the address
+        | it went to are what there is to show, and they are the two things a
+        | broker checks when an agency says it never received anything.
+        */
+        $messages = [[
+            'direction' => 'outbound',
+            'uuid' => null,
+            'from_name' => trim(
+                ($insuranceRequest->user?->first_name ?? '')
+                .' '.($insuranceRequest->user?->last_name ?? '')
+            ) ?: null,
+            'from_email' => $insuranceRequest->replyToAddress(),
+            'to_email' => $insuranceRequest->recipient_email,
+            'subject' => $insuranceRequest->subject,
+            'at' => $insuranceRequest->sent_at?->toIso8601String(),
+            'body_text' => null,
+            'extracted_expiry_date' => null,
+            'llm_response' => null,
+        ]];
+
+        foreach ($insuranceRequest->responses as $reply) {
+            $messages[] = [
+                'direction' => 'inbound',
+                'uuid' => $reply->uuid,
+                'from_name' => $reply->from_name,
+                'from_email' => $reply->from_email,
+                'to_email' => $insuranceRequest->replyToAddress(),
+                'subject' => $reply->subject,
+                'at' => $reply->received_at?->toIso8601String(),
+
+                // The text as it arrived; the card falls back to stripping the
+                // HTML when an agency sends no plain-text part.
+                'body_text' => $reply->body_text
+                    ?: ($reply->body_html ? strip_tags($reply->body_html) : null),
+
+                'extracted_expiry_date' => $reply->extracted_expiry_date?->toDateString(),
+
+                // Shown on purpose: a broker acting on an extracted date should
+                // be able to see what was extracted, and from what.
+                'llm_response' => $reply->llm_response,
+            ];
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Insurance request thread retrieved.',
+            'data' => [
+                'request' => new CoiInsuranceRequestResource($insuranceRequest),
+                'messages' => $messages,
+                'state_path' => $insuranceRequest->statePath(),
+            ],
+        ]);
+    }
 }

@@ -464,6 +464,7 @@ Route::prefix('v1')->group(function () {
         Route::get('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'index']);
         Route::post('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'store']);
         Route::get('/carrier-insurance-requests/responses/{uuid}', [CarrierInsuranceRequestController::class, 'response']);
+        Route::get('/carrier-insurance-requests/{uuid}/thread', [CarrierInsuranceRequestController::class, 'thread']);
         Route::get('/carriers/{dot}/insurance-request', [CarrierInsuranceRequestController::class, 'show'])
             ->where('dot', '[0-9]+');
 
