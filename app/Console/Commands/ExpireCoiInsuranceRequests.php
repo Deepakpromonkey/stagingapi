@@ -42,7 +42,28 @@ class ExpireCoiInsuranceRequests extends Command
                 'updated_at' => now(),
             ]);
 
-        $this->info($expired.' request(s) expired.');
+        /*
+         | An `awaiting` request has been answered — the agency just has not
+         | sent the certificate yet. Without this it would stay open forever on
+         | a promise nobody kept.
+         |
+         | The clock runs from the last reply, not from the original send: an
+         | agency that wrote back on day 13 has not gone quiet, and expiring it
+         | the next morning would be wrong.
+         */
+        $abandoned = CoiInsuranceRequest::where('status', CoiInsuranceRequest::STATUS_AWAITING)
+            ->where(function ($query) use ($cutoff) {
+                $query->where('responded_at', '<', $cutoff)
+                    ->orWhere(fn ($q) => $q->whereNull('responded_at')->where('updated_at', '<', $cutoff));
+            })
+            ->update([
+                'status' => CoiInsuranceRequest::STATUS_EXPIRED,
+                'resolved_at' => now(),
+                'last_error' => 'The agency replied but never sent the certificate, within '.$days.' days.',
+                'updated_at' => now(),
+            ]);
+
+        $this->info($expired.' request(s) expired, '.$abandoned.' abandoned after a reply.');
 
         return self::SUCCESS;
     }

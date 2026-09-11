@@ -58,6 +58,7 @@ class CoiInsuranceRequestResource extends JsonResource
             CoiInsuranceRequest::STATUS_PENDING => 'Pending',
             CoiInsuranceRequest::STATUS_RESPONDED => 'Reading reply',
             CoiInsuranceRequest::STATUS_SUCCESS => 'Received',
+            CoiInsuranceRequest::STATUS_AWAITING => 'Awaiting certificate',
             CoiInsuranceRequest::STATUS_EXPIRED => 'No response',
             default => 'Failed',
         };

@@ -77,18 +77,27 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         ])->save();
 
         /*
-         | A reply that carries no date is a real answer, not a failure to
-         | process — the agency said the policy is gone, or wrote back asking
-         | who we are. It resolves the request as failed so the card stops
-         | saying "pending", and the mail itself is one click away.
+         | A reply that carries no date is a real answer, but not the end of
+         | the conversation: the agency needs the insured's authorization
+         | first, the renewal has not been bound yet, or it asked who the
+         | holder is. The certificate arrives in the next mail, and that mail
+         | is only read if the request is still open — so it goes to awaiting,
+         | not failed, and keeps no resolved_at.
          */
+        if ($result['expiry_date']) {
+            $request->forceFill([
+                'status' => CoiInsuranceRequest::STATUS_SUCCESS,
+                'insurance_expiry_date' => $result['expiry_date'],
+                'resolved_at' => now(),
+                'last_error' => null,
+            ])->save();
+
+            return;
+        }
+
         $request->forceFill([
-            'status' => $result['expiry_date']
-                ? CoiInsuranceRequest::STATUS_SUCCESS
-                : CoiInsuranceRequest::STATUS_FAILED,
-            'insurance_expiry_date' => $result['expiry_date'],
-            'resolved_at' => now(),
-            'last_error' => $result['expiry_date'] ? null : 'The reply did not state an insurance expiry date.',
+            'status' => CoiInsuranceRequest::STATUS_AWAITING,
+            'last_error' => 'The reply did not state an insurance expiry date.',
         ])->save();
     }
 

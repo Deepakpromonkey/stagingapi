@@ -14,6 +14,10 @@ use Illuminate\Support\Str;
  * The lifecycle is one-way: pending -> responded -> success, with failed and
  * expired as the two ways out. Nothing moves a row backwards, so a second
  * reply on an already-resolved request is stored but does not re-open it.
+ *
+ * `awaiting` sits between those: the agency answered without a date, so the
+ * request is still live and the next reply is still read. It leaves only by
+ * succeeding or by the sweep giving up on it.
  */
 class CoiInsuranceRequest extends Model
 {
@@ -22,6 +26,16 @@ class CoiInsuranceRequest extends Model
     public const STATUS_RESPONDED = 'responded';
 
     public const STATUS_SUCCESS = 'success';
+
+    /*
+    | The agency replied, and the reply carried no date — it asked who we are,
+    | said the renewal is still with underwriting, or was an out-of-office.
+    |
+    | Not a failure: the certificate is usually in the next mail. Treating it
+    | as one closed the request, and the follow-up carrying the actual date
+    | was then stored and never read.
+    */
+    public const STATUS_AWAITING = 'awaiting';
 
     public const STATUS_FAILED = 'failed';
 
@@ -101,7 +115,11 @@ class CoiInsuranceRequest extends Model
 
     public function isOpen(): bool
     {
-        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_RESPONDED], true);
+        return in_array($this->status, [
+            self::STATUS_PENDING,
+            self::STATUS_RESPONDED,
+            self::STATUS_AWAITING,
+        ], true);
     }
 
     /*
@@ -180,6 +198,31 @@ class CoiInsuranceRequest extends Model
                 'detail' => 'The agency did not reply.',
                 'at' => $this->resolved_at?->toIso8601String(),
                 'reached' => true,
+            ];
+
+            return $path;
+        }
+
+        /*
+        | Answered, but not with a date. The path stops here and stays here
+        | until the agency sends the certificate — so it reads as waiting on
+        | someone else, which is what it is, rather than as finished.
+        */
+        if ($this->status === self::STATUS_AWAITING) {
+            $path[] = [
+                'state' => 'AWAITING_DETAILS',
+                'label' => 'Replied, waiting on the certificate',
+                'detail' => $this->last_error,
+                'at' => $this->responded_at?->toIso8601String(),
+                'reached' => true,
+            ];
+
+            $path[] = [
+                'state' => 'VERIFIED',
+                'label' => 'Expiry date read',
+                'detail' => null,
+                'at' => null,
+                'reached' => false,
             ];
 
             return $path;
