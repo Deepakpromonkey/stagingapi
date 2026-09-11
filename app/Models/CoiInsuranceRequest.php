@@ -147,14 +147,28 @@ class CoiInsuranceRequest extends Model
         | reply being read, so they replace the tail of the path rather than
         | extending it.
         */
+        /*
+        | Failed covers two different endings: the mail never got out, and the
+        | agency answered without stating a date. Calling both "could not be
+        | delivered" tells a broker the opposite of what happened in the second
+        | case, which is the more common of the two — so the reply decides.
+        */
         if ($this->status === self::STATUS_FAILED) {
-            $path[] = [
-                'state' => 'FAILED',
-                'label' => 'Could not be delivered',
-                'detail' => $this->last_error,
-                'at' => $this->resolved_at?->toIso8601String(),
-                'reached' => true,
-            ];
+            $path[] = $firstReply === null
+                ? [
+                    'state' => 'FAILED',
+                    'label' => 'Could not be delivered',
+                    'detail' => $this->last_error,
+                    'at' => $this->resolved_at?->toIso8601String(),
+                    'reached' => true,
+                ]
+                : [
+                    'state' => 'NO_DATE_IN_REPLY',
+                    'label' => 'Replied, no expiry date',
+                    'detail' => $this->last_error,
+                    'at' => $this->resolved_at?->toIso8601String(),
+                    'reached' => true,
+                ];
 
             return $path;
         }

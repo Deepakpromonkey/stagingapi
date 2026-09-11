@@ -171,6 +171,62 @@ class CoiInsuranceThreadTest extends TestCase
         $this->assertSame(['REQUEST_SENT', 'REPLY_RECEIVED', 'NO_RESPONSE'], $states);
     }
 
+    public function test_a_reply_without_a_date_does_not_read_as_undelivered(): void
+    {
+        $company = $this->company();
+        $user = $this->brokerUser($company);
+
+        // The agency wrote back saying the policy is gone. Delivered, replied,
+        // resolved as failed — which is not the same as never arriving.
+        $request = $this->insuranceRequest($company, $user, [
+            'status' => CoiInsuranceRequest::STATUS_FAILED,
+            'last_error' => 'The reply did not state an insurance expiry date.',
+            'responded_at' => now()->subMinutes(5),
+            'resolved_at' => now(),
+        ]);
+
+        CoiInsuranceResponse::create([
+            'coi_insurance_request_id' => $request->id,
+            'from_email' => 'lortega@dswig.com',
+            'body_text' => 'That policy cancelled on 03/01 for non-payment.',
+            'received_at' => now()->subMinutes(5),
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $path = $this->getJson("/api/v1/carrier-insurance-requests/{$request->uuid}/thread")
+            ->assertOk()
+            ->json('data.state_path');
+
+        $this->assertSame(
+            ['REQUEST_SENT', 'REPLY_RECEIVED', 'NO_DATE_IN_REPLY'],
+            array_column($path, 'state')
+        );
+    }
+
+    public function test_a_send_failure_with_no_reply_reads_as_undelivered(): void
+    {
+        $company = $this->company();
+        $user = $this->brokerUser($company);
+
+        $request = $this->insuranceRequest($company, $user, [
+            'status' => CoiInsuranceRequest::STATUS_FAILED,
+            'last_error' => 'SMTP: mailbox unavailable.',
+            'resolved_at' => now(),
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $path = $this->getJson("/api/v1/carrier-insurance-requests/{$request->uuid}/thread")
+            ->assertOk()
+            ->json('data.state_path');
+
+        $this->assertSame(
+            ['REQUEST_SENT', 'REPLY_RECEIVED', 'FAILED'],
+            array_column($path, 'state')
+        );
+    }
+
     public function test_a_thread_is_not_readable_from_another_company(): void
     {
         $owner = $this->company('Northwind Logistics');
