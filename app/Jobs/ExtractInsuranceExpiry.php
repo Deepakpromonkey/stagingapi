@@ -99,6 +99,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
                 'status' => CoiInsuranceRequest::STATUS_SUCCESS,
                 'insurance_expiry_date' => $result['expiry_date'],
                 'verification' => $verifier->verify($request, $result['details'] ?? []),
+                'coverage' => $this->coverageFrom($result['details'] ?? []),
                 'verified_at' => now(),
                 'resolved_at' => now(),
                 'last_error' => null,
@@ -121,6 +122,26 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
             'status' => CoiInsuranceRequest::STATUS_AWAITING,
             'last_error' => 'The reply did not state an insurance expiry date.',
         ])->save();
+    }
+
+    /**
+     * The terms a dispatcher asks about, lifted out of the reading.
+     *
+     * Only the parts a tender turns on. The rest of the reading stays on the
+     * reply, where it belongs.
+     *
+     * @param  array<string, mixed>  $details
+     * @return array<string, mixed>
+     */
+    private function coverageFrom(array $details): array
+    {
+        return [
+            'coverages' => $details['coverages'] ?? [],
+            'exclusions' => $details['exclusions'] ?? [],
+            'sub_limits' => $details['sub_limits'] ?? [],
+            'scheduled_vins' => $details['scheduled_vins'] ?? [],
+            'read_at' => now()->toIso8601String(),
+        ];
     }
 
     /**

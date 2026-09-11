@@ -22,6 +22,7 @@ use RuntimeException;
 class CarrierInsuranceRequestController extends Controller
 {
     public function __construct(
+        private readonly \App\Services\Coi\CoiCoverageCheck $coverage,
         private readonly CarrierInsuranceRequestService $requests,
     ) {}
 
@@ -232,6 +233,66 @@ class CarrierInsuranceRequestController extends Controller
                 'request' => new CoiInsuranceRequestResource($insuranceRequest),
                 'messages' => $messages,
                 'state_path' => $insuranceRequest->statePath(),
+            ],
+        ]);
+    }
+
+    /**
+     * Can this carrier take this load — asked once, about one load.
+     *
+     * Deliberately separate from the carrier's verification status. A seafood
+     * load over a commodity sub-limit is a bad load for this carrier today,
+     * not a bad carrier, and answering it by touching the profile would hold
+     * every other load they are perfectly insured for.
+     */
+    public function coverageCheck(Request $request, int $dot): JsonResponse
+    {
+        $validated = $request->validate([
+            'vin' => ['nullable', 'string', 'max:32'],
+            'commodity' => ['nullable', 'string', 'max:120'],
+            'value' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        if (empty($validated['vin']) && empty($validated['commodity'])) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Give a vin, a commodity, or both.',
+            ], 422);
+        }
+
+        $companyId = $request->user()->company_id;
+        $checks = [];
+
+        if (! empty($validated['vin'])) {
+            $checks['unit'] = $this->coverage->unitScheduled($companyId, $dot, $validated['vin']);
+        }
+
+        if (! empty($validated['commodity'])) {
+            $checks['commodity'] = $this->coverage->commodityCovered(
+                $companyId,
+                $dot,
+                $validated['commodity'],
+                (float) ($validated['value'] ?? 0),
+            );
+        }
+
+        /*
+        | One answer for the dispatcher on top of the detail. A load is held if
+        | any single check says so — the unit not being on the policy and the
+        | commodity being over its sub-limit are both reasons on their own.
+        */
+        $blocking = ['not_scheduled', 'under_insured'];
+        $held = (bool) array_intersect(
+            array_column($checks, 'verdict'),
+            $blocking,
+        );
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $held ? 'This load should be held.' : 'Nothing found against this load.',
+            'data' => [
+                'hold' => $held,
+                'checks' => $checks,
             ],
         ]);
     }

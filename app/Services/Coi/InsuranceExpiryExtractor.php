@@ -43,6 +43,7 @@ class InsuranceExpiryExtractor
           ],
           "exclusions": [string],
           "sub_limits": [{"commodity": string, "limit": number}],
+          "scheduled_vins": [{"vin": string, "description": string or null}],
           "alternate_email": string or null,
           "signals": [string],
           "summary": string
@@ -66,6 +67,10 @@ class InsuranceExpiryExtractor
           be actionable. Include deductibles that a broker would need to know.
         - sub_limits: a lower limit that applies to a named commodity or
           situation only, beneath the general cargo limit.
+        - scheduled_vins: the units listed on a scheduled-auto policy. Copy each
+          VIN exactly as written, including its length — a VIN that has been
+          transcribed short is worth knowing about. `description` is the year
+          and model if the mail gives one.
         - holder_name: the certificate holder the mail says the certificate was
           made out to, if it names one.
         - alternate_email: a different address the mail asks you to write to
@@ -194,6 +199,7 @@ class InsuranceExpiryExtractor
                 fn ($e) => is_string($e) && trim($e) !== '',
             )),
             'sub_limits' => $this->listOf($decoded['sub_limits'] ?? null),
+            'scheduled_vins' => $this->listOf($decoded['scheduled_vins'] ?? null),
             'signals' => array_values(array_filter(
                 $this->listOf($decoded['signals'] ?? null),
                 fn ($s) => is_string($s) && trim($s) !== '',
