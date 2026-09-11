@@ -202,6 +202,71 @@ class CarrierInsuranceRequestService
     }
 
     /**
+     * Some replies exist only to name someone else.
+     *
+     * An out-of-office pointing at a service inbox (20), a producer saying the
+     * account moved agencies (06), a broker-of-record who only handles
+     * physical damage on a direct policy (17). None of them is going to send a
+     * certificate, and all three name the address that will.
+     *
+     * The request keeps its identity and its reply token, so the re-sent mail
+     * stays in one thread and the whole correspondence reads as one chase
+     * rather than three orphaned ones.
+     *
+     * @param  array<string, mixed>  $details
+     */
+    public function rerouteIfAsked(CoiInsuranceRequest $request, array $details): bool
+    {
+        $address = $details['alternate_email'] ?? null;
+        $signals = $details['signals'] ?? [];
+
+        if (! is_string($address) || ! is_array($signals)) {
+            return false;
+        }
+
+        $address = strtolower(trim($address));
+
+        if ($address === '' || ! filter_var($address, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        // An address alone is not an instruction — an agency signing off with
+        // its own contact details is not asking to be written to again.
+        if (! array_intersect($signals, ['out_of_office', 'wrong_agency', 'direct_writer'])) {
+            return false;
+        }
+
+        // Writing back to the address that just told us to go elsewhere.
+        if ($address === strtolower((string) $request->recipient_email)) {
+            return false;
+        }
+
+        if ($request->reroute_count >= (int) config('coi_insurance.reroute.max', 2)) {
+            return false;
+        }
+
+        $request->forceFill([
+            'recipient_email' => $address,
+            'recipient_source' => 'reply',
+            'reroute_count' => $request->reroute_count + 1,
+
+            /*
+             | Back to pending, and the chase clock restarts: the new address
+             | has not been asked yet, and the timers sequence 20 keeps running
+             | are the original request's, not a new one's.
+             */
+            'status' => CoiInsuranceRequest::STATUS_PENDING,
+            'chase_count' => 0,
+            'last_chase_at' => null,
+            'last_error' => null,
+        ])->save();
+
+        $this->send($request);
+
+        return true;
+    }
+
+    /**
      * Three ways in, tried strongest first.
      *
      * The token is the only one that is genuinely unambiguous. The DOT in the

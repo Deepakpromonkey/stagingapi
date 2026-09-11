@@ -119,3 +119,17 @@ Schedule::command('coi:expire-requests')
     ->dailyAt('04:15')
     ->withoutOverlapping()
     ->onOneServer();
+
+/*
+| Asks the silent agencies again.
+|
+| Hourly rather than daily because the interval it enforces is measured in
+| hours: a daily run would turn a 24-hour cadence into anything between 24 and
+| 48 depending on when the request happened to be raised. The command itself
+| decides what is due, so running it often is cheap and running it rarely is
+| what loses the cadence.
+*/
+Schedule::command('coi:chase-requests')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();

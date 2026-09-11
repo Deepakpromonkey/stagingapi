@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
+use App\Services\Coi\CarrierInsuranceRequestService;
 use App\Services\Coi\InboundEmailPayload;
 use App\Services\Coi\InsuranceExpiryExtractor;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -42,7 +43,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $this->onQueue(config('coi_insurance.queue', 'default'));
     }
 
-    public function handle(InsuranceExpiryExtractor $extractor): void
+    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service): void
     {
         $response = CoiInsuranceResponse::with('request')->find($this->responseId);
 
@@ -93,6 +94,16 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
                 'last_error' => null,
             ])->save();
 
+            return;
+        }
+
+        /*
+         | Before settling into awaiting: some dateless replies exist only to
+         | name a better address. Re-routing sends the request on and puts it
+         | back to pending, so waiting on this agency would be waiting on the
+         | wrong one.
+         */
+        if ($service->rerouteIfAsked($request, $result['details'] ?? [])) {
             return;
         }
 

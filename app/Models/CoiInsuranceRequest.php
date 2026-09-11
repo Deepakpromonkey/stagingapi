@@ -56,6 +56,9 @@ class CoiInsuranceRequest extends Model
         'message_id',
         'insurance_expiry_date',
         'sent_at',
+        'chase_count',
+        'last_chase_at',
+        'reroute_count',
         'responded_at',
         'resolved_at',
         'last_error',
@@ -65,6 +68,7 @@ class CoiInsuranceRequest extends Model
         'dot_number' => 'integer',
         'insurance_expiry_date' => 'date',
         'sent_at' => 'datetime',
+        'last_chase_at' => 'datetime',
         'responded_at' => 'datetime',
         'resolved_at' => 'datetime',
     ];

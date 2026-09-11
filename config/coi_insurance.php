@@ -112,6 +112,43 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Chasing a silent agency
+    |--------------------------------------------------------------------------
+    |
+    | A certificate request that gets no answer is asked again, twice, and then
+    | left alone. Three mails from a stranger is a follow-up; the fourth is the
+    | reason the address stops answering any of them.
+    |
+    | The clock runs from the last send, so a chase does not fire the moment
+    | the previous one lands.
+    |
+    */
+
+    'chase' => [
+        'after_hours' => (int) env('COI_CHASE_AFTER_HOURS', 24),
+        'max' => (int) env('COI_CHASE_MAX', 2),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Re-routing to the address that can actually answer
+    |--------------------------------------------------------------------------
+    |
+    | Some replies exist only to name someone else: an out-of-office pointing at
+    | a service inbox, a producer saying the account moved, a broker-of-record
+    | who cannot issue on a direct policy. Those are re-sent to the address the
+    | reply names, and the request keeps its identity so the thread stays whole.
+    |
+    | Capped so a pair of agencies forwarding to each other cannot loop.
+    |
+    */
+
+    'reroute' => [
+        'max' => (int) env('COI_REROUTE_MAX', 2),
+    ],
+
     'connection' => env('COI_QUEUE_CONNECTION', 'database'),
     'queue' => env('COI_QUEUE', 'default'),
 

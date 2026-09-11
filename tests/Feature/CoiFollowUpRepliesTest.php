@@ -102,7 +102,8 @@ class CoiFollowUpRepliesTest extends TestCase
         // The extractor found nothing, which is what sequence 04's first reply
         // looks like.
         (new ExtractInsuranceExpiry($response->id))->handle(
-            new FakeExpiryExtractor(null)
+            new FakeExpiryExtractor(null),
+            app(CarrierInsuranceRequestService::class),
         );
 
         $request->refresh();
