@@ -36,6 +36,10 @@ class CoiInsuranceRequestResource extends JsonResource
 
             'insurance_expiry_date' => $this->insurance_expiry_date?->toDateString(),
 
+            // How the certificate compared to the FMCSA filing. Null until a
+            // date has actually been read.
+            'verification' => $this->verification,
+
             'sent_at' => $this->sent_at?->toIso8601String(),
             'responded_at' => $this->responded_at?->toIso8601String(),
             'resolved_at' => $this->resolved_at?->toIso8601String(),

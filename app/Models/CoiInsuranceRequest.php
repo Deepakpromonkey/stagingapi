@@ -55,6 +55,8 @@ class CoiInsuranceRequest extends Model
         'subject',
         'message_id',
         'insurance_expiry_date',
+        'verification',
+        'verified_at',
         'sent_at',
         'chase_count',
         'last_chase_at',
@@ -67,6 +69,8 @@ class CoiInsuranceRequest extends Model
     protected $casts = [
         'dot_number' => 'integer',
         'insurance_expiry_date' => 'date',
+        'verification' => 'array',
+        'verified_at' => 'datetime',
         'sent_at' => 'datetime',
         'last_chase_at' => 'datetime',
         'responded_at' => 'datetime',

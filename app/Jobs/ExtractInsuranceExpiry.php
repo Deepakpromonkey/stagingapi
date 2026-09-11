@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
 use App\Services\Coi\CarrierInsuranceRequestService;
+use App\Services\Coi\CoiFilingVerifier;
 use App\Services\Coi\InboundEmailPayload;
 use App\Services\Coi\InsuranceExpiryExtractor;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -43,7 +44,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $this->onQueue(config('coi_insurance.queue', 'default'));
     }
 
-    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service): void
+    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier): void
     {
         $response = CoiInsuranceResponse::with('request')->find($this->responseId);
 
@@ -87,9 +88,18 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
          | not failed, and keeps no resolved_at.
          */
         if ($result['expiry_date']) {
+            /*
+             | A date is not a clearance. The same certificate has to agree
+             | with what FMCSA shows before a broker can rely on it, and the
+             | two disagree often enough — filing lag, a pending cancellation
+             | already rescinded — that the comparison is recorded alongside
+             | the date rather than left to whoever opens the card.
+             */
             $request->forceFill([
                 'status' => CoiInsuranceRequest::STATUS_SUCCESS,
                 'insurance_expiry_date' => $result['expiry_date'],
+                'verification' => $verifier->verify($request, $result['details'] ?? []),
+                'verified_at' => now(),
                 'resolved_at' => now(),
                 'last_error' => null,
             ])->save();

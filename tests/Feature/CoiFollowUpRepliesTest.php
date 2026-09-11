@@ -104,6 +104,7 @@ class CoiFollowUpRepliesTest extends TestCase
         (new ExtractInsuranceExpiry($response->id))->handle(
             new FakeExpiryExtractor(null),
             app(CarrierInsuranceRequestService::class),
+            app(\App\Services\Coi\CoiFilingVerifier::class),
         );
 
         $request->refresh();
