@@ -72,6 +72,15 @@ trait DtTrustScoreV3
         |--------------------------------------------------------------------------
         */
 
+        /*
+        | The shortlist counts inspection rows in SQL and hands the total in,
+        | precisely so this path never hydrates them — the busiest carrier in
+        | the feed has 22,482. Fall back to the relation only when no count
+        | was passed (the profile, where it is already loaded).
+        */
+
+        $inspectionTotal = $inspectionCount ?? $carrier->inspections->count();
+
         $groups = [
 
             'authority_compliance' => $this->dtEvaluateAuthority($carrier, $detail, $auth, $dotAge, $authorityAgeCommon),
@@ -82,11 +91,11 @@ trait DtTrustScoreV3
 
             'crash_history' => $this->dtEvaluateCrash($carrier, $crashesTotal, $crashFatalities, $crashInjuries, $crashesTowAway),
 
-            'inspection_quality' => $this->dtEvaluateInspection($carrier, $sms),
+            'inspection_quality' => $this->dtEvaluateInspection($carrier, $sms, $inspectionTotal),
 
             'identity_fraud' => $this->dtEvaluateIdentity($carrier, $detail),
 
-            'operations_experience' => $this->dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers),
+            'operations_experience' => $this->dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers, $inspectionTotal),
 
         ];
 
@@ -156,7 +165,8 @@ trait DtTrustScoreV3
             $sms,
             $auth,
             $dotAge,
-            $mcs150Year
+            $mcs150Year,
+            $inspectionTotal
         );
 
         if (! $fail && $confidenceCap !== null && $score > $confidenceCap) {
@@ -292,8 +302,16 @@ trait DtTrustScoreV3
         /*
         | Authority status — 'A' / 'I' / 'N' since the Motus load, but SAFER
         | responses and older rows also carry 'ACTIVE' and 'AUTHORIZED FOR
-        | Property'. Fire only when BOTH statuses are positively inactive;
-        | one unknown means the rule abstains and the score caps instead.
+        | Property'.
+        |
+        | AUTH-01 fires only when BOTH statuses are positively inactive.
+        | Anything less is not a clearance: per the breakdown §3 ("if either
+        | is blank/unreadable, the rule abstains and the score caps at 84
+        | instead — unknown != inactive") and §6 ("no usable authority row at
+        | all, or one status readable, one not"), an unreadable status caps
+        | at 84 and raises authority_record_missing for manual review. An
+        | active common authority alongside a blank contract status is still
+        | a half-read record, so it caps too.
         */
 
         $common = $this->dtAuthorityActive($auth?->common_stat);
@@ -308,23 +326,21 @@ trait DtTrustScoreV3
 
             $g['flags'][] = 'authority_record_missing';
 
-        } elseif ($common !== true && $contract !== true && ($common === false || $contract === false)) {
+        } elseif ($common === false && $contract === false) {
 
-            if ($common === false && $contract === false) {
+            $this->dtFire($g, 'AUTH-01', 'fail', 'Common and Contract Authority are both inactive.', [
+                'code' => 'AUTHORITY_INACTIVE',
+                'message' => 'Common and Contract Authority are both inactive.',
+            ]);
 
-                $this->dtFire($g, 'AUTH-01', 'fail', 'Common and Contract Authority are both inactive.', [
-                    'code' => 'AUTHORITY_INACTIVE',
-                    'message' => 'Common and Contract Authority are both inactive.',
-                ]);
+        } elseif ($common === null || $contract === null) {
 
-            } else {
+            // Exactly one status readable — abstain on AUTH-01, but cap.
+            $g['unknown'][] = 'authority_status_partial';
 
-                // One inactive, one unreadable — abstain but cap.
-                $g['unknown'][] = 'authority_status_partial';
+            $g['caps'][] = ['cap' => 84, 'reason' => 'Authority status partially unreadable.'];
 
-                $g['caps'][] = ['cap' => 84, 'reason' => 'Authority status partially unreadable.'];
-
-            }
+            $g['flags'][] = 'authority_record_missing';
 
         }
 
@@ -786,6 +802,30 @@ trait DtTrustScoreV3
 
                     $over[] = $basic;
 
+                }
+
+            }
+
+            $g['params']['basics_over_threshold'] = count($over);
+
+            /*
+            | One BASIC over is a Medium finding in its own right. Two or
+            | more is SMS-MULTI *instead* — the single hard stop replaces
+            | the per-BASIC rules rather than stacking on top of them, so
+            | rules_fired reads as one reason and not three.
+            */
+
+            if (count($over) >= 2) {
+
+                $this->dtFire($g, 'SMS-MULTI', 'fail', 'Two or more BASICs at or above the intervention threshold.', [
+                    'code' => 'MULTIPLE_BASIC_THRESHOLDS',
+                    'message' => count($over).' BASICs at or above the intervention threshold.',
+                ]);
+
+            } else {
+
+                foreach ($over as $basic) {
+
                     $this->dtFire(
                         $g,
                         'SMS-'.strtoupper($basic),
@@ -794,17 +834,6 @@ trait DtTrustScoreV3
                     );
 
                 }
-
-            }
-
-            $g['params']['basics_over_threshold'] = count($over);
-
-            if (count($over) >= 2) {
-
-                $this->dtFire($g, 'SMS-MULTI', 'fail', 'Two or more BASICs at or above the intervention threshold.', [
-                    'code' => 'MULTIPLE_BASIC_THRESHOLDS',
-                    'message' => count($over).' BASICs at or above the intervention threshold.',
-                ]);
 
             }
 
@@ -969,14 +998,14 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateInspection($carrier, $sms): array
+    private function dtEvaluateInspection($carrier, $sms, int $inspectionTotal): array
     {
         $g = $this->dtGroup();
 
         $inspTotal = (int) ($sms?->insp_total ?? 0);
 
         if ($inspTotal === 0) {
-            $inspTotal = $carrier->inspections->count();
+            $inspTotal = $inspectionTotal;
         }
 
         /*
@@ -1151,7 +1180,7 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers): array
+    private function dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers, int $inspectionTotal): array
     {
         $g = $this->dtGroup();
 
@@ -1182,9 +1211,7 @@ trait DtTrustScoreV3
 
         $reportedUnits = (int) ($carrier->nbr_power_unit ?? 0);
 
-        $inspectionCount = $carrier->inspections->count();
-
-        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionCount >= 5) {
+        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionTotal >= 5) {
 
             $this->dtFire($g, 'OPS-11', 'low', 'Reported power units, none observed at roadside.');
 
@@ -1305,6 +1332,11 @@ trait DtTrustScoreV3
     /**
      * Latest uncancelled filing amount for a coverage kind, in DOLLARS
      * (the filing columns store thousands). Null when no matching filing.
+     *
+     * "Latest" is by effective_date, not by amount: a carrier can leave an
+     * older, larger, still-uncancelled filing on record, and ranking by
+     * amount would quietly score that stale number instead of the coverage
+     * actually in force — which is what INS-02 is asking about.
      */
     private function dtLatestFilingAmount($carrier, string $kind): ?float
     {
@@ -1318,7 +1350,7 @@ trait DtTrustScoreV3
 
                 return Fmcsa::date($f->cancl_effective_date)?->isFuture() ?? false;
             })
-            ->sortByDesc(fn ($f) => (float) ($f->max_cov_amount ?? $f->min_cov_amount ?? 0))
+            ->sortByDesc(fn ($f) => Fmcsa::dateKey($f->effective_date))
             ->first();
 
         if ($filing === null) {
@@ -1413,8 +1445,18 @@ trait DtTrustScoreV3
 
                 $vin = null;
 
-                $vins = $carrier->inspections
-                    ->pluck('vin')
+                /*
+                | Use the relation when the profile has already loaded it,
+                | and pull the bare column otherwise — the shortlist leaves
+                | inspections unloaded on purpose, and hydrating them here
+                | just to read one field undoes that.
+                */
+
+                $vins = ($carrier->relationLoaded('inspections')
+                        ? $carrier->inspections->pluck('vin')
+                        : Inspection::query()
+                            ->where('dot_number', $dot)
+                            ->pluck('vin'))
                     ->filter(fn ($v) => strlen((string) $v) === 17)
                     ->unique()
                     ->take(200);
@@ -1554,12 +1596,12 @@ trait DtTrustScoreV3
      * actually populated. The caps are the v1.1 starting shape and are
      * UNCALIBRATED — run 20-30 known carriers before trusting them.
      */
-    private function dtDataConfidence($carrier, $detail, $sms, $auth, $dotAge, $mcs150Year): array
+    private function dtDataConfidence($carrier, $detail, $sms, $auth, $dotAge, $mcs150Year, int $inspectionTotal): array
     {
         $inspTotal = (int) ($sms?->insp_total ?? 0);
 
         if ($inspTotal === 0) {
-            $inspTotal = $carrier->inspections->count();
+            $inspTotal = $inspectionTotal;
         }
 
         $inputs = [

@@ -129,6 +129,7 @@ class StubQuery
     public function whereIn($col, $v): self
     { if ($this->firstColumn === null) $this->firstColumn = $col; return $this; }
     public function distinct(): self { return $this; }
+    public function pluck($col): \Col { return new \Col([]); }
     public function count($col = null): int
     {
         $map = ['telephone' => 'phone', 'email_address' => 'email', 'phy_state' => 'address', 'vin' => 'vin'];
@@ -153,6 +154,7 @@ class Rec
     public function __get($k) { return $this->a[$k] ?? null; }
     public function __isset($k) { return isset($this->a[$k]); }
     public function getAttribute($k) { return $this->a[$k] ?? null; }
+    public function relationLoaded($k): bool { return isset($this->a[$k]); }
 }
 
 /* ------------------------------------------------- the composed class */
@@ -171,7 +173,10 @@ class FakeController
 
     private const SMS_BASICS = ['unsafe_driv', 'hos_driv', 'driv_fit', 'contr_subst', 'veh_maint'];
 
-    private const MAIL_DROP_PATTERNS = ['PMB ', 'P.O. BOX', 'PO BOX', 'MAILBOX'];
+    private const MAIL_DROP_PATTERNS = [
+        'UPS STORE', 'REGUS', 'WEWORK', 'PMB ', 'POSTAL ANNEX',
+        'MAIL BOXES ETC', 'MAILBOX', 'REGISTERED AGENT', 'VIRTUAL OFFICE', 'SUITE #',
+    ];
 
     private function insuranceFilingMatches($filing, string $kind): bool
     {
@@ -300,14 +305,19 @@ function run(FakeController $c, array $o = []): array
         array_key_exists('detail', $o) ? $o['detail'] : detail(),
         array_key_exists('sms', $o) ? $o['sms'] : sms(),
         array_key_exists('auth', $o) ? $o['auth'] : auth(),
-        $o['vehicleOosPct'] ?? 12.5,
-        $o['driverOosPct'] ?? 0.0,
+        array_key_exists('vehicleOosPct', $o) ? $o['vehicleOosPct'] : 12.5,
+        array_key_exists('driverOosPct', $o) ? $o['driverOosPct'] : 0.0,
         51, null, null,
-        $o['dotAge'] ?? 52,
-        $o['mcs150Year'] ?? (int) date('Y'),
+        // array_key_exists, not ??: these two are meaningful as an explicit
+        // null (the engine treats an unknown DOT age / MCS-150 year very
+        // differently from a known one), and ?? would quietly restore the
+        // default and score a scenario the test never asked for.
+        array_key_exists('dotAge', $o) ? $o['dotAge'] : 52,
+        array_key_exists('mcs150Year', $o) ? $o['mcs150Year'] : (int) date('Y'),
         $o['observedUnits'] ?? 2,
         $o['observedTrailers'] ?? 1,
-        $o['crashesTotal'] ?? 0, $o['crashFatalities'] ?? 0, $o['crashInjuries'] ?? 0, $o['crashesTowAway'] ?? 0
+        $o['crashesTotal'] ?? 0, $o['crashFatalities'] ?? 0, $o['crashInjuries'] ?? 0, $o['crashesTowAway'] ?? 0,
+        $o['inspectionCount'] ?? null
     );
 }
 
@@ -454,6 +464,171 @@ check('pillar payload keeps the seven keys + shape',
     array_keys($p) === ['safety_roadside', 'identity_fraud', 'insurance_financial', 'authority_compliance', 'crash_history', 'inspection_quality', 'operations_experience']
     && isset($p['safety_roadside']['weight'], $p['safety_roadside']['score'], $p['safety_roadside']['status'], $p['safety_roadside']['deductions'], $p['safety_roadside']['parameters']),
     json_encode(array_keys($p)));
+
+/* 21. INS-02 reads the filing in force, not the biggest one on record.
+   A stale-but-uncancelled $1M filing sits alongside the live $300k one;
+   ranking by amount would score the $1M and clear a carrier who is short. */
+$r = run($c, [
+    'carrier' => carrier(['insuranceFilings' => \collect([
+        new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '01000', 'effective_date' => d(900), 'cancl_effective_date' => null]),
+        new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '00300', 'effective_date' => d(30), 'cancl_effective_date' => null]),
+    ])]),
+    'auth' => auth(['bipd_file' => '00300']),
+]);
+check('latest BIPD filing wins over the largest -> 18 BIPD_INSUFFICIENT',
+    $r['overall_score'] === 18 && collect($r['knockout']['reasons'])->contains(fn ($x) => $x['code'] === 'BIPD_INSUFFICIENT'),
+    json_encode([$r['overall_score'], $r['knockout']]));
+
+/* 22. SMS-MULTI replaces the per-BASIC Mediums rather than stacking on them. */
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2, 'hos_driv_measure' => 5.5])]);
+$ids = array_column($r['v3']['rules_fired'], 'id');
+check('SMS-MULTI fires instead of the per-BASIC Mediums',
+    in_array('SMS-MULTI', $ids, true)
+    && ! collect($ids)->contains(fn ($id) => str_starts_with($id, 'SMS-') && $id !== 'SMS-MULTI')
+    && $r['v3']['risk_points'] === 10000,
+    json_encode([$ids, $r['v3']['risk_points']]));
+
+/* 23. One BASIC over still reports that BASIC by name. */
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2])]);
+check('one BASIC over still names the BASIC',
+    array_column($r['v3']['rules_fired'], 'id') === ['SMS-UNSAFE_DRIV'] && $r['v3']['risk_points'] === 250,
+    json_encode(array_column($r['v3']['rules_fired'], 'id')));
+
+/* 24. The shortlist's SQL inspection count is honoured in place of the
+   relation, which that path deliberately leaves unloaded. */
+$thin = carrier(['nbr_power_unit' => 3, 'inspections' => \collect([])]);
+$r = run($c, ['carrier' => $thin, 'sms' => null, 'observedUnits' => 0, 'inspectionCount' => 9]);
+check('passed inspection count drives OPS-11 with no inspections loaded',
+    collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'OPS-11'),
+    json_encode(array_column($r['v3']['rules_fired'], 'id')));
+
+/* ---------------------------------------------------------------------
+ | The four worked examples from the founder breakdown, §10. These pin the
+ | end-to-end number, not just one rule, so a change anywhere in the chain
+ | (points -> curve -> caps -> legacy shape) shows up here.
+ * ------------------------------------------------------------------- */
+
+/* 25. §10 A — the Rundlett test: established, clean, thin inspection file.
+   Zero rules fire; 7 of 8 confidence inputs present (only '>=5 inspections'
+   is false) => 0.88, which is above the 0.85 cap line, so nothing clips. */
+$thinFile = ['insp_total' => 3, 'vehicle_insp_total' => 3, 'driver_insp_total' => 3,
+    'unsafe_driv_insp_w_viol' => 0, 'hos_driv_insp_w_viol' => 0, 'driv_fit_insp_w_viol' => 0,
+    'contr_subst_insp_w_viol' => 0, 'veh_maint_insp_w_viol' => 0];
+$r = run($c, ['sms' => sms($thinFile), 'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0]);
+check('§10 A: clean carrier -> 100 / Preferred / Approved / A, conf 0.88 uncapped',
+    $r['overall_score'] === 100 && $r['grade'] === 'A' && $r['status'] === 'Approved'
+    && $r['v3']['band']['key'] === 'preferred' && $r['v3']['rules_fired'] === []
+    && $r['v3']['data_confidence'] === 0.88 && $r['v3']['score_cap_applied'] === null,
+    json_encode([$r['overall_score'], $r['grade'], $r['status'], $r['v3']['data_confidence'], $r['v3']['score_cap_applied']]));
+
+/* 26. §10 B — 60-day authority caps at 65; the same carrier at day 10 caps
+   at 45 with senior approval. One raw score, two different clips. */
+$sixty = run($c, ['carrier' => carrier(['authorityHistory' => \collect([
+    new Rec(['op_auth_type' => 'COMMON', 'original_action_desc' => 'GRANTED', 'disp_action_desc' => 'GRANTED', 'orig_served_date' => d(60)])])])]);
+$ten = run($c, ['carrier' => carrier(['authorityHistory' => \collect([
+    new Rec(['op_auth_type' => 'COMMON', 'original_action_desc' => 'GRANTED', 'disp_action_desc' => 'GRANTED', 'orig_served_date' => d(10)])])])]);
+check('§10 B: day 60 -> 65 + documented_review, day 10 -> 45 + senior_approval',
+    $sixty['overall_score'] === 65 && in_array('documented_review_required', $sixty['v3']['flags'], true)
+    && $ten['overall_score'] === 45 && in_array('senior_approval_required', $ten['v3']['flags'], true),
+    json_encode([$sixty['overall_score'], $sixty['v3']['flags'], $ten['overall_score'], $ten['v3']['flags']]));
+
+/* 27. §10 C — pending cancellation (Review 1,000) plus one BASIC over
+   (Medium 250) = 1,250 points => 53, and the broker sees exactly two lines. */
+$r = run($c, [
+    'carrier' => carrier(['insuranceFilings' => \collect([
+        new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '01000', 'effective_date' => d(200), 'cancl_effective_date' => (new \DateTimeImmutable('+20 days'))->format('d-M-y')]),
+    ])]),
+    'sms' => sms(['unsafe_driv_measure' => 6.2]),
+]);
+$ids = array_column($r['v3']['rules_fired'], 'id');
+sort($ids);
+check('§10 C: INS-10 + SMS-UNSAFE_DRIV = 1250 pts -> 53, two rules listed',
+    $r['v3']['risk_points'] === 1250 && $r['overall_score'] === 53
+    && $r['v3']['status'] === 'Unacceptable-Review' && $r['v3']['band']['key'] === 'review_required'
+    && $ids === ['INS-10', 'SMS-UNSAFE_DRIV'],
+    json_encode([$r['v3']['risk_points'], $r['overall_score'], $ids]));
+
+/* 28. §10 D — Conditional alone disqualifies: pillars empty, no override. */
+$r = run($c, ['detail' => detail(['safety_rating' => 'C'])]);
+check('§10 D: Conditional -> 18 / Rejected / F / disqualified, pillars empty',
+    $r['overall_score'] === 18 && $r['status'] === 'Rejected' && $r['grade'] === 'F'
+    && $r['v3']['band']['key'] === 'disqualified' && $r['pillars'] === []
+    && $r['knockout']['triggered'] === true && $r['knockout']['cap_score'] === 18,
+    json_encode([$r['overall_score'], $r['status'], $r['grade'], $r['pillars']]));
+
+/* 29. §9 score fingerprints — the number alone should identify the cause. */
+$fingerprints = [
+    100 => ['nothing fired, full data', []],
+    94  => ['exactly one Low', ['auth' => auth(['bond_req' => 'Y'])]],
+    89  => ['exactly one Medium', ['sms' => sms(['unsafe_driv_measure' => 6.2])]],
+    84  => ['authority row missing/unreadable', ['auth' => null]],
+    54  => ['exactly one Review', ['carrier' => carrier(['insuranceFilings' => \collect([
+                new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '01000', 'cancl_effective_date' => (new \DateTimeImmutable('+20 days'))->format('d-M-y')]),
+            ])])]],
+    18  => ['hard stop', ['detail' => detail(['safety_rating' => 'U'])]],
+];
+$bad = [];
+foreach ($fingerprints as $expected => [$why, $opts]) {
+    $got = run($c, $opts)['overall_score'];
+    if ($got !== $expected) $bad[] = "{$why}: expected {$expected}, got {$got}";
+}
+check('§9 fingerprints: 100 / 94 / 89 / 84 / 54 / 18 land on their causes',
+    $bad === [], json_encode($bad));
+
+/* ---------------------------------------------------------------------
+ | Boundary cases. The scenarios above prove a rule fires; these prove it
+ | stops firing on the far side of the line, which is what actually pins a
+ | threshold down. Each one was written against a surviving mutant.
+ * ------------------------------------------------------------------- */
+
+/* 30. The 30/90-day authority lines, from both sides. */
+$ageCase = fn (int $days) => run($c, ['carrier' => carrier(['authorityHistory' => \collect([
+    new Rec(['op_auth_type' => 'COMMON', 'original_action_desc' => 'GRANTED', 'disp_action_desc' => 'GRANTED', 'orig_served_date' => d($days)])])])]);
+check('authority age: 29d -> 45, 30d -> 65, 89d -> 65, 95d -> uncapped 100',
+    $ageCase(29)['overall_score'] === 45
+    && $ageCase(30)['overall_score'] === 65
+    && $ageCase(89)['overall_score'] === 65
+    && $ageCase(95)['overall_score'] === 100,
+    json_encode([$ageCase(29)['overall_score'], $ageCase(30)['overall_score'], $ageCase(89)['overall_score'], $ageCase(95)['overall_score']]));
+
+/* 31. The 24-month crash window, just outside it. A fatal at ~30 months is
+   old news: CR-01 must not fire, and the carrier scores clean. */
+$justOut = carrier(['crashes' => \collect([new Rec(['report_date' => d(910), 'fatalities' => 1, 'injuries' => 0, 'tow_away' => false])])]);
+$justIn = carrier(['crashes' => \collect([new Rec(['report_date' => d(700), 'fatalities' => 1, 'injuries' => 0, 'tow_away' => false])])]);
+check('fatal crash: 700d (in window) -> 54, 910d (~30mo, out) -> 100',
+    run($c, ['carrier' => $justIn, 'crashesTotal' => 1, 'crashFatalities' => 1])['overall_score'] === 54
+    && run($c, ['carrier' => $justOut, 'crashesTotal' => 1, 'crashFatalities' => 1])['overall_score'] === 100,
+    json_encode([run($c, ['carrier' => $justIn])['overall_score'], run($c, ['carrier' => $justOut])['overall_score']]));
+
+/* 32. The 65% data-confidence line -> cap 70 (sheet §9: '~5 of 8 inputs').
+   Five inputs present, three missing, and no rule fires: the 70 is purely
+   the confidence clip, which is the fingerprint brokers are meant to read. */
+$fiveOfEight = carrier(['authorityHistory' => \collect([])]);
+$r = run($c, ['carrier' => $fiveOfEight, 'dotAge' => null, 'mcs150Year' => null]);
+check('confidence 5/8 = 0.63 -> cap 70, no rules fired',
+    $r['v3']['data_confidence'] === 0.63
+    && $r['overall_score'] === 70
+    && $r['v3']['rules_fired'] === []
+    && ($r['v3']['score_cap_applied']['cap'] ?? null) === 70.0,
+    json_encode([$r['v3']['data_confidence'], $r['overall_score'], $r['v3']['score_cap_applied'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 33. §3 / §6 — a half-read authority record caps at 84 even when the half
+   that IS readable says active. Unknown is not a clearance, so an active
+   common authority beside a blank contract status still lands in manual
+   review rather than scoring clean. Both-readable is untouched. */
+$authCase = fn (array $over) => run($c, ['auth' => auth($over)]);
+$partial = $authCase(['contract_stat' => '']);
+check('§3/§6: active common + blank contract -> 84 + authority_record_missing',
+    $partial['overall_score'] === 84
+    && in_array('authority_record_missing', $partial['v3']['flags'], true)
+    && $partial['v3']['needs_manual_review'] === true
+    && $partial['knockout']['triggered'] === false
+    && $authCase(['common_stat' => 'A', 'contract_stat' => 'N'])['overall_score'] === 100
+    && $authCase(['common_stat' => 'I', 'contract_stat' => ''])['overall_score'] === 84
+    && $authCase(['common_stat' => 'I', 'contract_stat' => 'N'])['overall_score'] === 18,
+    json_encode([$partial['overall_score'], $partial['v3']['flags'],
+        $authCase(['common_stat' => 'I', 'contract_stat' => ''])['overall_score'],
+        $authCase(['common_stat' => 'I', 'contract_stat' => 'N'])['overall_score']]));
 
 echo "\n{$pass} passed, {$fail} failed\n";
 exit($fail === 0 ? 0 : 1);
