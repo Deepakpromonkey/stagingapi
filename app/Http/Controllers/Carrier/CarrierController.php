@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Carrier;
 
 use App\Console\Commands\BuildCarrierChangeLogIndex;
+use App\Http\Controllers\Carrier\Concerns\DtTrustScoreV3;
 use App\Http\Controllers\Controller;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
@@ -38,6 +39,8 @@ use Illuminate\Support\Facades\Log;
 
 class CarrierController extends Controller
 {
+    use DtTrustScoreV3;
+
     /**
      * Rows one identifier may contribute, and distinct carriers the whole
      * endpoint may return. A carrier on a shared mail drop or a Gmail address
@@ -3079,7 +3082,7 @@ class CarrierController extends Controller
             }
         }
 
-        $trustScore = $this->calculateCarrierTrustScore(
+        $trustScore = $this->dtCalculateTrustScore(
             $carrier,
             $detail,
             $sms,
@@ -3816,7 +3819,7 @@ class CarrierController extends Controller
         // RESPONSE
         // ════════════════════════════════════════════════════════════════
 
-        $trustScore = $this->calculateCarrierTrustScore(
+        $trustScore = $this->dtCalculateTrustScore(
             $carrier,
             $detail,
             $sms,

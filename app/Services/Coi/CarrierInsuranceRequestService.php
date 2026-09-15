@@ -35,7 +35,7 @@ class CarrierInsuranceRequestService
      * page any number of the broker's team may have open, and an agency that
      * receives the same request four times answers none of them.
      */
-    public function raise(User $user, int $dotNumber, ?string $carrierName = null, ?string $carrierMc = null): CoiInsuranceRequest
+    public function raise(User $user, int $dotNumber, ?string $carrierName = null, ?string $carrierMc = null, array $options = []): CoiInsuranceRequest
     {
         $existing = CoiInsuranceRequest::where('company_id', $user->company_id)
             ->where('dot_number', $dotNumber)
@@ -105,6 +105,15 @@ class CarrierInsuranceRequestService
             'recipient_source' => $source,
             'status' => CoiInsuranceRequest::STATUS_PENDING,
             'subject' => CoiInsuranceRequest::buildSubject($identity['name'], $dotNumber),
+
+            /*
+             | No selection means ask everything. A short mail that has to be
+             | sent twice costs the agency's patience, which is the scarce
+             | resource here.
+             */
+            'asks' => $options['asks'] ?? array_keys(CoiInsuranceRequest::ASKS),
+            'holder_name' => $options['holder_name'] ?? $user->company?->company_name,
+            'ask_note' => $options['ask_note'] ?? null,
         ]);
 
         $this->send($request);
@@ -199,6 +208,81 @@ class CarrierInsuranceRequestService
 
             return $response;
         });
+    }
+
+    /**
+     * Some replies exist only to name someone else.
+     *
+     * An out-of-office pointing at a service inbox (20), a producer saying the
+     * account moved agencies (06), a broker-of-record who only handles
+     * physical damage on a direct policy (17). None of them is going to send a
+     * certificate, and all three name the address that will.
+     *
+     * The request keeps its identity and its reply token, so the re-sent mail
+     * stays in one thread and the whole correspondence reads as one chase
+     * rather than three orphaned ones.
+     *
+     * @param  array<string, mixed>  $details
+     */
+    public function rerouteIfAsked(CoiInsuranceRequest $request, array $details): bool
+    {
+        $address = $details['alternate_email'] ?? null;
+        $signals = $details['signals'] ?? [];
+
+        if (! is_string($address) || ! is_array($signals)) {
+            return false;
+        }
+
+        $address = strtolower(trim($address));
+
+        if ($address === '' || ! filter_var($address, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        // An address alone is not an instruction — an agency signing off with
+        // its own contact details is not asking to be written to again.
+        if (! array_intersect($signals, ['out_of_office', 'wrong_agency', 'direct_writer'])) {
+            return false;
+        }
+
+        // Writing back to the address that just told us to go elsewhere.
+        if ($address === strtolower((string) $request->recipient_email)) {
+            return false;
+        }
+
+        if ($request->reroute_count >= (int) config('coi_insurance.reroute.max', 2)) {
+            return false;
+        }
+
+        /*
+         | The test recipient applies here exactly as it does to a first send.
+         | Without it a re-route would take an address out of a stranger's mail
+         | and write to it — which is the one thing COI_FORCE_RECIPIENT exists
+         | to prevent, and the sequences that re-route are the ones whose
+         | replies carry somebody else's address.
+         */
+        $forced = config('coi_insurance.force_recipient');
+
+        $request->forceFill([
+            'recipient_email' => $forced ?: $address,
+            'recipient_source' => $forced ? 'test:reply' : 'reply',
+            'rerouted_to' => $address,
+            'reroute_count' => $request->reroute_count + 1,
+
+            /*
+             | Back to pending, and the chase clock restarts: the new address
+             | has not been asked yet, and the timers sequence 20 keeps running
+             | are the original request's, not a new one's.
+             */
+            'status' => CoiInsuranceRequest::STATUS_PENDING,
+            'chase_count' => 0,
+            'last_chase_at' => null,
+            'last_error' => null,
+        ])->save();
+
+        $this->send($request);
+
+        return true;
     }
 
     /**

@@ -4,6 +4,9 @@ namespace App\Jobs;
 
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
+use App\Services\Coi\CarrierInsuranceRequestService;
+use App\Services\Coi\CoiFilingVerifier;
+use App\Services\Coi\CoiTrustCheck;
 use App\Services\Coi\InboundEmailPayload;
 use App\Services\Coi\InsuranceExpiryExtractor;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -42,7 +45,7 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $this->onQueue(config('coi_insurance.queue', 'default'));
     }
 
-    public function handle(InsuranceExpiryExtractor $extractor): void
+    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier, CoiTrustCheck $trust): void
     {
         $response = CoiInsuranceResponse::with('request')->find($this->responseId);
 
@@ -74,22 +77,82 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $response->forceFill([
             'llm_response' => $result['raw'],
             'extracted_expiry_date' => $result['expiry_date'],
+            'extracted' => $result['details'] ?? null,
         ])->save();
 
         /*
-         | A reply that carries no date is a real answer, not a failure to
-         | process — the agency said the policy is gone, or wrote back asking
-         | who we are. It resolves the request as failed so the card stops
-         | saying "pending", and the mail itself is one click away.
+         | A reply that carries no date is a real answer, but not the end of
+         | the conversation: the agency needs the insured's authorization
+         | first, the renewal has not been bound yet, or it asked who the
+         | holder is. The certificate arrives in the next mail, and that mail
+         | is only read if the request is still open — so it goes to awaiting,
+         | not failed, and keeps no resolved_at.
+         */
+        /*
+         | Asked of every reply, not only the ones carrying a date. The reply
+         | that says "we did not issue that certificate" has no date in it at
+         | all, and it is the most important thing anyone will read on this
+         | request.
          */
         $request->forceFill([
-            'status' => $result['expiry_date']
-                ? CoiInsuranceRequest::STATUS_SUCCESS
-                : CoiInsuranceRequest::STATUS_FAILED,
-            'insurance_expiry_date' => $result['expiry_date'],
-            'resolved_at' => now(),
-            'last_error' => $result['expiry_date'] ? null : 'The reply did not state an insurance expiry date.',
+            'trust' => $trust->check($response->from_email, $result['details'] ?? []),
         ])->save();
+
+        if ($result['expiry_date']) {
+            /*
+             | A date is not a clearance. The same certificate has to agree
+             | with what FMCSA shows before a broker can rely on it, and the
+             | two disagree often enough — filing lag, a pending cancellation
+             | already rescinded — that the comparison is recorded alongside
+             | the date rather than left to whoever opens the card.
+             */
+            $request->forceFill([
+                'status' => CoiInsuranceRequest::STATUS_SUCCESS,
+                'insurance_expiry_date' => $result['expiry_date'],
+                'verification' => $verifier->verify($request, $result['details'] ?? []),
+                'coverage' => $this->coverageFrom($result['details'] ?? []),
+                'verified_at' => now(),
+                'resolved_at' => now(),
+                'last_error' => null,
+            ])->save();
+
+            return;
+        }
+
+        /*
+         | Before settling into awaiting: some dateless replies exist only to
+         | name a better address. Re-routing sends the request on and puts it
+         | back to pending, so waiting on this agency would be waiting on the
+         | wrong one.
+         */
+        if ($service->rerouteIfAsked($request, $result['details'] ?? [])) {
+            return;
+        }
+
+        $request->forceFill([
+            'status' => CoiInsuranceRequest::STATUS_AWAITING,
+            'last_error' => 'The reply did not state an insurance expiry date.',
+        ])->save();
+    }
+
+    /**
+     * The terms a dispatcher asks about, lifted out of the reading.
+     *
+     * Only the parts a tender turns on. The rest of the reading stays on the
+     * reply, where it belongs.
+     *
+     * @param  array<string, mixed>  $details
+     * @return array<string, mixed>
+     */
+    private function coverageFrom(array $details): array
+    {
+        return [
+            'coverages' => $details['coverages'] ?? [],
+            'exclusions' => $details['exclusions'] ?? [],
+            'sub_limits' => $details['sub_limits'] ?? [],
+            'scheduled_vins' => $details['scheduled_vins'] ?? [],
+            'read_at' => now()->toIso8601String(),
+        ];
     }
 
     /**

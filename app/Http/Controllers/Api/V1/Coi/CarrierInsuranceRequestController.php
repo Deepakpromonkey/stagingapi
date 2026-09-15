@@ -22,6 +22,7 @@ use RuntimeException;
 class CarrierInsuranceRequestController extends Controller
 {
     public function __construct(
+        private readonly \App\Services\Coi\CoiCoverageCheck $coverage,
         private readonly CarrierInsuranceRequestService $requests,
     ) {}
 
@@ -83,6 +84,11 @@ class CarrierInsuranceRequestController extends Controller
                 $request->integer('dot_number'),
                 $request->input('carrier_name'),
                 $request->input('carrier_mc'),
+                [
+                    'asks' => $request->input('asks'),
+                    'holder_name' => $request->input('holder_name'),
+                    'ask_note' => $request->input('ask_note'),
+                ],
             );
         } catch (RuntimeException $e) {
             /*
@@ -148,6 +154,163 @@ class CarrierInsuranceRequestController extends Controller
                 'llm_response' => $response->llm_response,
 
                 'request' => new CoiInsuranceRequestResource($response->request),
+            ],
+        ]);
+    }
+
+    /**
+     * The whole correspondence for one request — what the Track button opens.
+     *
+     * The card polls `show` on a timer, so the reply bodies deliberately do
+     * not travel with it; they are fetched here, once, when a broker actually
+     * opens the thread.
+     *
+     * Scoped through the company like `response`, so the uuid alone is not
+     * enough to read another broker's correspondence.
+     */
+    public function thread(Request $request, string $uuid): JsonResponse
+    {
+        $insuranceRequest = CoiInsuranceRequest::where('uuid', $uuid)
+            ->where('company_id', $request->user()->company_id)
+            ->with(['user', 'responses' => fn ($query) => $query->oldest('received_at')])
+            ->first();
+
+        if ($insuranceRequest === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Insurance request not found.',
+            ], 404);
+        }
+
+        /*
+        | The outbound mail opens the thread. Its body is not stored — it is
+        | built from a template at send time — so the subject and the address
+        | it went to are what there is to show, and they are the two things a
+        | broker checks when an agency says it never received anything.
+        */
+        $messages = [[
+            'direction' => 'outbound',
+            'uuid' => null,
+            'from_name' => trim(
+                ($insuranceRequest->user?->first_name ?? '')
+                .' '.($insuranceRequest->user?->last_name ?? '')
+            ) ?: null,
+            'from_email' => $insuranceRequest->replyToAddress(),
+            'to_email' => $insuranceRequest->recipient_email,
+            'subject' => $insuranceRequest->subject,
+            'at' => $insuranceRequest->sent_at?->toIso8601String(),
+            'body_text' => null,
+            'extracted_expiry_date' => null,
+            'llm_response' => null,
+
+            /*
+            | What this request actually asked for. The mail body is built from
+            | a template at send time and never stored, and since the broker
+            | chooses the questions there is no longer a single "standard
+            | request" to describe — so the questions themselves travel instead.
+            */
+            'asks' => array_values(array_map(
+                fn ($ask) => CoiInsuranceRequest::ASKS[$ask] ?? $ask,
+                $insuranceRequest->asks ?? [],
+            )),
+            'ask_note' => $insuranceRequest->ask_note,
+            'holder_name' => $insuranceRequest->holder_name,
+        ]];
+
+        foreach ($insuranceRequest->responses as $reply) {
+            $messages[] = [
+                'direction' => 'inbound',
+                'uuid' => $reply->uuid,
+                'from_name' => $reply->from_name,
+                'from_email' => $reply->from_email,
+                'to_email' => $insuranceRequest->replyToAddress(),
+                'subject' => $reply->subject,
+                'at' => $reply->received_at?->toIso8601String(),
+
+                // The text as it arrived; the card falls back to stripping the
+                // HTML when an agency sends no plain-text part.
+                'body_text' => $reply->body_text
+                    ?: ($reply->body_html ? strip_tags($reply->body_html) : null),
+
+                'extracted_expiry_date' => $reply->extracted_expiry_date?->toDateString(),
+
+                // The rest of what the model read out of this reply: limits,
+                // exclusions, commodity sub-limits, who it was made out to.
+                'extracted' => $reply->extracted,
+
+                // Shown on purpose: a broker acting on an extracted date should
+                // be able to see what was extracted, and from what.
+                'llm_response' => $reply->llm_response,
+            ];
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Insurance request thread retrieved.',
+            'data' => [
+                'request' => new CoiInsuranceRequestResource($insuranceRequest),
+                'messages' => $messages,
+                'state_path' => $insuranceRequest->statePath(),
+            ],
+        ]);
+    }
+
+    /**
+     * Can this carrier take this load — asked once, about one load.
+     *
+     * Deliberately separate from the carrier's verification status. A seafood
+     * load over a commodity sub-limit is a bad load for this carrier today,
+     * not a bad carrier, and answering it by touching the profile would hold
+     * every other load they are perfectly insured for.
+     */
+    public function coverageCheck(Request $request, int $dot): JsonResponse
+    {
+        $validated = $request->validate([
+            'vin' => ['nullable', 'string', 'max:32'],
+            'commodity' => ['nullable', 'string', 'max:120'],
+            'value' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        if (empty($validated['vin']) && empty($validated['commodity'])) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Give a vin, a commodity, or both.',
+            ], 422);
+        }
+
+        $companyId = $request->user()->company_id;
+        $checks = [];
+
+        if (! empty($validated['vin'])) {
+            $checks['unit'] = $this->coverage->unitScheduled($companyId, $dot, $validated['vin']);
+        }
+
+        if (! empty($validated['commodity'])) {
+            $checks['commodity'] = $this->coverage->commodityCovered(
+                $companyId,
+                $dot,
+                $validated['commodity'],
+                (float) ($validated['value'] ?? 0),
+            );
+        }
+
+        /*
+        | One answer for the dispatcher on top of the detail. A load is held if
+        | any single check says so — the unit not being on the policy and the
+        | commodity being over its sub-limit are both reasons on their own.
+        */
+        $blocking = ['not_scheduled', 'under_insured'];
+        $held = (bool) array_intersect(
+            array_column($checks, 'verdict'),
+            $blocking,
+        );
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $held ? 'This load should be held.' : 'Nothing found against this load.',
+            'data' => [
+                'hold' => $held,
+                'checks' => $checks,
             ],
         ]);
     }

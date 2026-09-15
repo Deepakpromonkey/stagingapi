@@ -36,6 +36,14 @@ class CoiInsuranceRequestResource extends JsonResource
 
             'insurance_expiry_date' => $this->insurance_expiry_date?->toDateString(),
 
+            // How the certificate compared to the FMCSA filing. Null until a
+            // date has actually been read.
+            'verification' => $this->verification,
+
+            // Whether the certificate can be believed at all — the prior
+            // question to whether it agrees with the filing.
+            'trust' => $this->trust,
+
             'sent_at' => $this->sent_at?->toIso8601String(),
             'responded_at' => $this->responded_at?->toIso8601String(),
             'resolved_at' => $this->resolved_at?->toIso8601String(),
@@ -58,6 +66,7 @@ class CoiInsuranceRequestResource extends JsonResource
             CoiInsuranceRequest::STATUS_PENDING => 'Pending',
             CoiInsuranceRequest::STATUS_RESPONDED => 'Reading reply',
             CoiInsuranceRequest::STATUS_SUCCESS => 'Received',
+            CoiInsuranceRequest::STATUS_AWAITING => 'Awaiting certificate',
             CoiInsuranceRequest::STATUS_EXPIRED => 'No response',
             default => 'Failed',
         };
