@@ -109,6 +109,20 @@ return [
         */
         'enabled' => filter_var(env('TERMINAL_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
 
+        /*
+        | Whether the Link flow carries an `external_id`. Off, and deliberately
+        | so: Terminal matches connections on the provider plus the provider's
+        | own account identifier, and an external id is not part of that match.
+        | It can only split a connection, never join one, so sending it on every
+        | link risks forking a carrier across two billable connections while
+        | buying nothing.
+        |
+        | The shared-login fork still works with this off — EldConnectionService
+        | sends the value explicitly for that case. This flag is an environment
+        | level undo, not a feature toggle.
+        */
+        'send_external_id' => filter_var(env('TERMINAL_SEND_EXTERNAL_ID', false), FILTER_VALIDATE_BOOLEAN),
+
         'environment' => env('TERMINAL_ENVIRONMENT', 'sandbox'),
 
         'secret_key' => env('TERMINAL_SECRET_KEY'),

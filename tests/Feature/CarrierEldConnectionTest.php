@@ -75,12 +75,12 @@ class CarrierEldConnectionTest extends TestCase
         ]);
     }
 
-    private function connectRequest(Company $company): CarrierConnectRequest
+    private function connectRequest(Company $company, string $dotNumber = '1234567'): CarrierConnectRequest
     {
         return CarrierConnectRequest::create([
             'uuid' => Str::uuid(),
             'company_id' => $company->id,
-            'carrier_dot_number' => '1234567',
+            'carrier_dot_number' => $dotNumber,
             'carrier_row_id' => '99001',
             'carrier_legal_name' => "Frank's Trucking",
             'carrier_email' => 'frank@franks.test',
@@ -145,16 +145,64 @@ class CarrierEldConnectionTest extends TestCase
         $this->assertStringContainsString('key=pk_sandbox_test', $url);
     }
 
-    public function test_the_link_url_is_keyed_to_the_carrier_so_terminal_can_dedupe(): void
+    public function test_the_ordinary_link_url_carries_no_external_id(): void
     {
         $request = $this->connectRequest($this->company());
 
         $url = $this->postJson('/api/v1/carrier-connect/eld/connect', ['token' => $request->token])
             ->json('data.url');
 
-        // Terminal matches on the provider account plus this value. Anything
-        // broker-specific here and the same fleet connects twice.
+        // Terminal matches on the provider plus the provider's own account
+        // identifier; an external id is not part of that match and can only
+        // ever split a connection, never join one. Sending it on every link
+        // would risk forking one carrier across two billable connections while
+        // preventing nothing.
+        $this->assertStringNotContainsString('external_id', $url);
+    }
+
+    public function test_the_shared_login_fork_sends_a_normalised_external_id(): void
+    {
+        $request = $this->connectRequest($this->company());
+
+        $url = app(EldConnectionService::class)->linkUrlFor(
+            $request,
+            'https://example.test/return',
+            forkOnExternalId: true,
+        );
+
         $this->assertStringContainsString('external_id=dot%3A1234567', $url);
+    }
+
+    /**
+     * The normalising is a billing control, not tidiness: external_id can only
+     * split a connection, so one carrier reaching Terminal under two spellings
+     * of the same DOT forks their fleet across two connections and is ingested
+     * and billed twice.
+     */
+    public function test_a_messy_dot_number_normalises_to_one_external_id(): void
+    {
+        $service = app(EldConnectionService::class);
+
+        $values = array_map(
+            fn (string $dot) => $service->externalIdFor(
+                new CarrierConnectRequest(['carrier_dot_number' => $dot]),
+            ),
+            ['1234567', ' 1234567 ', '01234567', 'DOT-1234567'],
+        );
+
+        $this->assertSame(['dot:1234567'], array_values(array_unique($values)));
+    }
+
+    public function test_a_carrier_with_no_usable_dot_gets_no_external_id_rather_than_a_bare_prefix(): void
+    {
+        $service = app(EldConnectionService::class);
+
+        foreach (['', '   ', 'n/a'] as $dot) {
+            $this->assertNull(
+                $service->externalIdFor(new CarrierConnectRequest(['carrier_dot_number' => $dot])),
+                "Expected no external id for a DOT of '{$dot}'.",
+            );
+        }
     }
 
     public function test_the_carrier_is_shown_the_consent_page_belonging_to_their_broker(): void

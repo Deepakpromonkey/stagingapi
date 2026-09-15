@@ -44,12 +44,29 @@ class TerminalClient
     /**
      * The hosted Link page a carrier is sent to.
      *
-     * `external_id` is doing real work here: Terminal's dedupe matches on the
-     * provider account plus this value, so keying it to the CARRIER means a
-     * second broker inviting the same carrier updates the existing connection
-     * instead of creating — and separately metering — a duplicate. Keying it
-     * per broker would defeat that, which is exactly the trap the guide warns
-     * about.
+     * `external_id` is normally absent, and the reasoning it used to carry here
+     * was wrong, so it is worth stating plainly: Terminal matches connections
+     * on the provider plus the provider's own account identifier. An external
+     * id is NOT part of that match. It can only ever split a connection, never
+     * join one — two different values against a single account fork it, while a
+     * value missing on either side still matches.
+     *
+     * So the duplicate this once claimed to prevent was never possible, and
+     * sending the field on every link risked causing one. Terminal confirmed
+     * the behaviour directly: a carrier connected through one broker who later
+     * goes through another broker's flow and signs into the same provider
+     * account lands on the existing connection, with nothing passed at link
+     * time.
+     *
+     * If a Sandbox test appears to contradict that, check Settings > General >
+     * Dedupe Connections. It is on by default in Production and OFF by default
+     * in Sandbox, so every Sandbox link yields a fresh connection until it is
+     * switched on. That default is what the original reasoning here was built
+     * on.
+     *
+     * The one case that does want a value is a single provider login covering
+     * two of our carriers; EldConnectionService::linkUrlFor() forks that
+     * deliberately.
      */
     public function linkUrl(array $params): string
     {

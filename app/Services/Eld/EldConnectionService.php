@@ -48,9 +48,21 @@ class EldConnectionService
      * the connection they already have, not to a fresh flow — a new connection
      * to the same provider account would either be deduped into the old one or,
      * worse, become a second billable copy of the same fleet.
+     *
+     * `$forkOnExternalId` is the shared-login escape hatch, and the only reason
+     * to send an external id at all. Two of our carriers occasionally sit
+     * behind one provider login; left alone Terminal resolves that login to a
+     * single connection covering both, which breaks the one-connection-per-
+     * carrier rule the rest of this service is built on. Passing true forks
+     * them deliberately. Pair it with non-overlapping vehicle include lists,
+     * set before the first sync: metering is per vehicle per connection, so two
+     * connections cost nothing extra as long as no truck lands on both.
      */
-    public function linkUrlFor(CarrierConnectRequest $connectRequest, string $redirectUrl): ?string
-    {
+    public function linkUrlFor(
+        CarrierConnectRequest $connectRequest,
+        string $redirectUrl,
+        bool $forkOnExternalId = false,
+    ): ?string {
         if (! $this->isConfigured()) {
             Log::error('Terminal is not configured; cannot open the ELD Link page.');
 
@@ -84,7 +96,22 @@ class EldConnectionService
             // consent screen, so it has to read as the broker asking.
             'name' => $connectRequest->company?->company_name,
 
-            'external_id' => $this->externalIdFor($connectRequest),
+            /*
+            | Deliberately absent on the ordinary flow. The job this used to do
+            | — stopping a second broker's Link flow creating a duplicate of a
+            | fleet we already pay for — is done by Terminal's own matching on
+            | the provider account, and does not depend on anything we send
+            | here. Sending it anyway buys nothing and risks a fork.
+            |
+            | Terminal confirmed the case this platform actually runs on: a
+            | carrier connected through one broker, sent through another
+            | broker's flow later, signing into the same provider account,
+            | resolves to the existing connection with no external id involved.
+            */
+            'external_id' => $this->shouldSendExternalId($forkOnExternalId)
+                ? $this->externalIdFor($connectRequest)
+                : null,
+
             'tags' => 'broker:'.$connectRequest->company_id,
             'template' => $template,
             'backfill_days' => config('services.terminal.backfill_days') ?: null,
@@ -92,16 +119,41 @@ class EldConnectionService
     }
 
     /**
-     * Terminal's dedupe key, alongside the provider account.
+     * The value that forks a connection, when we deliberately want one forked.
      *
-     * Deliberately the carrier's DOT number and nothing else. Put the broker in
-     * here and the same fleet connects, imports and bills once per broker; keep
-     * it to the carrier and the second broker's Link flow lands on the
-     * connection that already exists.
+     * Terminal matches on the provider plus the provider's own account
+     * identifier; `external_id` is not part of that match. It can only ever
+     * SPLIT a connection, never join one — two different values against one
+     * account fork it, and a value missing on either side still matches. So
+     * this is not a dedupe key and must not be treated as one.
+     *
+     * Which makes normalising it a billing concern rather than tidiness. The
+     * same carrier reaching this twice with `07654321` and `7654321 ` would
+     * produce two values, fork one fleet across two connections, and be
+     * ingested and billed twice. `carrier_dot_number` carries no validation on
+     * the connect-request path, so the normalising has to happen here: digits
+     * only, no leading zeros, and null rather than a bare `dot:` prefix when
+     * there is no usable number at all.
      */
-    public function externalIdFor(CarrierConnectRequest $connectRequest): string
+    /**
+     * Whether this Link flow should carry an external id at all.
+     *
+     * False for everything ordinary. The config flag exists so the behaviour
+     * can be restored from the environment without a deploy if Terminal's
+     * matching ever turns out not to cover a case we depend on — not because
+     * anyone should turn it on.
+     */
+    private function shouldSendExternalId(bool $forkOnExternalId): bool
     {
-        return 'dot:'.trim((string) $connectRequest->carrier_dot_number);
+        return $forkOnExternalId
+            || (bool) config('services.terminal.send_external_id');
+    }
+
+    public function externalIdFor(CarrierConnectRequest $connectRequest): ?string
+    {
+        $dot = ltrim(preg_replace('/\D/', '', (string) $connectRequest->carrier_dot_number), '0');
+
+        return $dot === '' ? null : 'dot:'.$dot;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -190,7 +242,14 @@ class EldConnectionService
             'carrier_dot_number' => $connectRequest->carrier_dot_number,
             'carrier_row_id' => $connectRequest->carrier_row_id,
             'carrier_legal_name' => $connectRequest->carrier_legal_name,
-            'external_id' => $payload['externalId'] ?? $this->externalIdFor($connectRequest),
+            /*
+            | Only ever what Terminal actually holds. This used to fall back to
+            | recomputing the value locally, which was harmless while we sent
+            | one on every link and actively misleading now that we do not: the
+            | column would claim an external id Terminal has never seen, and the
+            | next person debugging a fork would chase it.
+            */
+            'external_id' => $payload['externalId'] ?? null,
             'provider' => data_get($payload, 'provider.name') ?: data_get($payload, 'provider.code'),
             'connection_token' => $payload['token'],
             'status' => $this->mapStatus($payload['status'] ?? EldConnection::STATUS_CONNECTED),
