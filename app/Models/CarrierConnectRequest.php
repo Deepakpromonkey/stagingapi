@@ -66,11 +66,14 @@ class CarrierConnectRequest extends Model
         'stripe_express_account',
         'stripe_verified_at',
         'bank_skipped_at',
+
+        // Added in main branch (ELD onboarding).
         'eld_connection_id',
         'eld_link_state',
         'eld_link_state_at',
         'eld_connected_at',
         'eld_skipped_at',
+
         'uses_factoring_company',
         'factoring_company_name',
         'factoring_document_disk',
@@ -124,14 +127,18 @@ class CarrierConnectRequest extends Model
         'identity_skipped_at' => 'datetime',
         'stripe_verified_at' => 'datetime',
         'bank_skipped_at' => 'datetime',
+
+        // Added in main branch.
         'eld_link_state_at' => 'datetime',
         'eld_connected_at' => 'datetime',
         'eld_skipped_at' => 'datetime',
+
         'factoring_answered_at' => 'datetime',
         'questionnaire_completed_at' => 'datetime',
         'documents_completed_at' => 'datetime',
         'signed_at' => 'datetime',
         'portal_account_provisioned_at' => 'datetime',
+
         'didit_response' => 'array',
         'didit_risk_flagged' => 'boolean',
         'uses_factoring_company' => 'boolean',
@@ -166,7 +173,8 @@ class CarrierConnectRequest extends Model
     {
         return $this->hasMany(CarrierConnectAnswer::class, 'carrier_connect_request_id');
     }
- public function documents()
+
+    public function documents()
     {
         return $this->hasMany(CarrierConnectDocument::class, 'carrier_connect_request_id');
     }

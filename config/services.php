@@ -116,13 +116,19 @@ return [
 
         // Overridable, but derived from the environment by default so the two
         // cannot silently disagree.
-        'base_url' => env('TERMINAL_BASE_URL', env('TERMINAL_ENVIRONMENT', 'sandbox') === 'production'
-            ? 'https://api.withterminal.com/tsp/v1'
-            : 'https://api.sandbox.withterminal.com/tsp/v1'),
+        'base_url' => env(
+            'TERMINAL_BASE_URL',
+            env('TERMINAL_ENVIRONMENT', 'sandbox') === 'production'
+                ? 'https://api.withterminal.com/tsp/v1'
+                : 'https://api.sandbox.withterminal.com/tsp/v1'
+        ),
 
-        'link_url' => env('TERMINAL_LINK_URL', env('TERMINAL_ENVIRONMENT', 'sandbox') === 'production'
-            ? 'https://link.withterminal.com'
-            : 'https://link.sandbox.withterminal.com'),
+        'link_url' => env(
+            'TERMINAL_LINK_URL',
+            env('TERMINAL_ENVIRONMENT', 'sandbox') === 'production'
+                ? 'https://link.withterminal.com'
+                : 'https://link.sandbox.withterminal.com'
+        ),
 
         /*
         | Svix signing secret (`whsec_...`) from the webhook endpoint's page in
@@ -157,7 +163,10 @@ return [
         | every broker working with the carrier, so narrowing it further would
         | blind the brokers it was not narrowed for.
         */
-        'filter_active_only' => filter_var(env('TERMINAL_FILTER_ACTIVE_ONLY', true), FILTER_VALIDATE_BOOLEAN),
+        'filter_active_only' => filter_var(
+            env('TERMINAL_FILTER_ACTIVE_ONLY', true),
+            FILTER_VALIDATE_BOOLEAN
+        ),
 
         // Pause between retries of a failed Terminal call. Zero in tests, so a
         // failure case does not sit through a real backoff.

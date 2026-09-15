@@ -80,12 +80,12 @@ Schedule::command('eld:sync-active')
 |
 | --stop-when-empty means this normally exits in well under a second and does
 | nothing at all when there is nothing to do. If it dies, the next minute
-| starts a fresh one - which is more supervision than it had before.
+| starts a fresh one — which is more supervision than it had before.
 |
 | `default` is named first because Laravel drains queues in order, and a broker
 | waiting on a request should not queue behind a VIN batch or a fleet import.
 | `eld` is last for the same reason: a first sync after a carrier connects can
-| run for minutes on a large fleet, and nothing is waiting on it. The connection is
+| run for minutes on a large fleet, and nothing is waiting on it. The connection
 | named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
 | would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
 |

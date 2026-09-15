@@ -1086,11 +1086,11 @@ class CarrierConnectController extends BaseController
     }
 
     /**
-     * Records that the carrier chose to move past the government ID or bank
-     * step without completing it.
+     * Records that the carrier chose to move past the government ID, ELD, or
+     * bank step without completing it.
      *
-     * Only these two are skippable. The phone check, the questionnaire and the
-     * agreement are not: the first is what proves we are talking to the
+     * Only these three are skippable. The phone check, the questionnaire and
+     * the agreement are not: the first is what proves we are talking to the
      * carrier, and the other two are the broker's own requirements.
      */
     public function skipStep(CarrierSkipStepRequest $request)
@@ -1414,7 +1414,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 5 — documents (W-9, COI)
+    // Step 6 — documents (W-9, COI)
     // ─────────────────────────────────────────────────────────────────────────
 
     public function uploadDocument(CarrierDocumentRequest $request)
@@ -1506,7 +1506,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 6 — e-sign
+    // Step 7 — e-sign
     // ─────────────────────────────────────────────────────────────────────────
 
     public function esign(CarrierEsignRequest $request)
