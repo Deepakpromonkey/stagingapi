@@ -15,23 +15,38 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Advanced Filter Search for Carriers, Brokers and Shippers.
  *
- * WHY THIS VERSION IS DIFFERENT FROM THE "FULLY OPTIMIZED FINAL VERSION"
+ * FIX HISTORY (read this before "optimizing" anything below)
  * ----------------------------------------------------------------------
- * The previous version quietly re-introduced the exact problem an earlier
- * round of tuning had already solved: it searched a `carriers` table/view
- * and then ran a correlated whereExists() subquery against the 1.5M-row
- * `company_census_file` table for EVERY candidate row, just to check
- * cargo/safety flags. With a 25-mile radius that's maybe 50 subquery
- * checks (fast). With a 250-mile radius that's 3,500+ subquery checks,
- * each one potentially scanning company_census_file (catastrophic - this
- * is the "threshold flip" you were seeing).
+ * 1. Query the base table (company_census_file, aliased `carriers`)
+ *    directly instead of a `carriers` view + whereExists() back into
+ *    company_census_file for cargo/safety. That whereExists() ran once
+ *    PER CANDIDATE ROW against a 1.5M-row table - fine at 50 candidates
+ *    (25mi radius), catastrophic at 3,500+ (250mi radius).
+ * 2. Zip-radius temp table uses InnoDB (not MEMORY) so its miles index is
+ *    a real BTREE, not a HASH that can't support ORDER BY / range scans.
+ * 3. FORCE INDEX (idx_miles) on the temp table + FORCE INDEX
+ *    (idx_census_phy_zip5) on company_census_file, both inside a
+ *    STRAIGHT_JOIN, so MySQL can't decide to full-scan either side and the
+ *    output already comes out sorted by distance (no filesort needed).
+ * 4. Several places used SELECT aliases (hm_flag, nbr_power_unit, row_id,
+ *    id) in WHERE/ORDER BY clauses. Aliases only work in SELECT - fixed to
+ *    use the real column names (hm_ind, power_units, dot_number) for
+ *    filtering/sorting.
+ * 5. carrier_all_with_history and actpendinsur_all_with_history both store
+ *    dot_number as inconsistently zero-padded TEXT (e.g. "04516637" vs
+ *    "4516637" - even the padding length varies row to row). Both tables
+ *    also have a clean, indexed dot_int column - all matching against
+ *    those tables (filtering AND the active_authority/insurance_current
+ *    display badges) now uses dot_int instead.
+ * 6. Authority and insurance checks were correlated whereExists()
+ *    subqueries - re-run once per candidate carrier. Converted to
+ *    independent whereIn(subquery): "which DOT numbers qualify" can be
+ *    computed ONCE and reused, instead of once per candidate row.
  *
- * This version queries `company_census_file` directly (aliased as
- * `carriers` so most of the file didn't need to change) and checks cargo
- * and safety flags right on the row we already have - no subquery needed.
- * Combined with the zip-radius temp table + STRAIGHT_JOIN + FORCE INDEX on
- * the phy_zip5 index, execution cost now scales with the size of the
- * radius result set, not with the 1.5M rows in company_census_file.
+ * Comprehensive logging (see the timed() helper and the Log::info calls
+ * throughout) - every meaningful stage logs how long it took, so a slow
+ * request's cause shows up directly in storage/logs/laravel.log instead of
+ * requiring more guesswork.
  */
 class AdvancedCarrierSearchController extends Controller
 {
@@ -107,6 +122,8 @@ class AdvancedCarrierSearchController extends Controller
             'export_csv'      => 'nullable|boolean',
         ]);
 
+        Log::info('[CarrierSearch] Incoming request: ' . json_encode($request->all()));
+
         $isExport = $request->boolean('export_csv');
         $this->setStatementTimeout($isExport ? 0 : self::QUERY_TIMEOUT_MS);
 
@@ -128,6 +145,27 @@ class AdvancedCarrierSearchController extends Controller
         return DB::connection(self::CONN);
     }
 
+    /**
+     * Runs $fn(), logs how long it took, and returns whatever $fn()
+     * returned. On failure, logs how long it ran before failing and
+     * re-throws. Wrap any DB call here so a slow/timed-out request shows
+     * exactly which stage was the culprit in the logs.
+     */
+    private function timed(string $label, \Closure $fn)
+    {
+        $start = microtime(true);
+        try {
+            $result = $fn();
+            $ms = round((microtime(true) - $start) * 1000, 1);
+            Log::info("[CarrierSearch] {$label} took {$ms}ms");
+            return $result;
+        } catch (\Throwable $e) {
+            $ms = round((microtime(true) - $start) * 1000, 1);
+            Log::warning("[CarrierSearch] {$label} FAILED after {$ms}ms: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
     private function buildQuery(Request $request): Builder
     {
         $query = $this->conn()
@@ -143,6 +181,8 @@ class AdvancedCarrierSearchController extends Controller
         $this->applyFleet($query, $request);
         $this->applyInsurance($query, $request);
         $this->applyCensusFilters($query, $request);
+
+        Log::info('[CarrierSearch] Final SQL: ' . $query->toSql() . ' | Bindings: ' . json_encode($query->getBindings()));
 
         return $query;
     }
@@ -375,21 +415,25 @@ class AdvancedCarrierSearchController extends Controller
                 POWER(SIN(RADIANS(lng - ?) / 2), 2)
             )))';
 
-            $rows = $this->conn()->table('zip_centroids')
-                ->select('zip')
-                ->selectRaw("{$haversine} AS miles", [$lat, $lat, $lng])
-                ->whereBetween('lat', [$lat - $latFudge, $lat + $latFudge])
-                ->whereBetween('lng', [$lng - $lngFudge, $lng + $lngFudge])
-                ->havingRaw('miles <= ?', [$radius])
-                ->orderBy('miles')
-                ->limit(self::MAX_RADIUS_ZIPS)
-                ->get();
+            $rows = $this->timed('zip radius lookup', function () use ($haversine, $lat, $lng, $latFudge, $lngFudge, $radius) {
+                return $this->conn()->table('zip_centroids')
+                    ->select('zip')
+                    ->selectRaw("{$haversine} AS miles", [$lat, $lat, $lng])
+                    ->whereBetween('lat', [$lat - $latFudge, $lat + $latFudge])
+                    ->whereBetween('lng', [$lng - $lngFudge, $lng + $lngFudge])
+                    ->havingRaw('miles <= ?', [$radius])
+                    ->orderBy('miles')
+                    ->limit(self::MAX_RADIUS_ZIPS)
+                    ->get();
+            });
 
             $out = [];
             foreach ($rows as $row) {
                 $zip = str_pad((string) $row->zip, 5, '0', STR_PAD_LEFT);
                 $out[$zip] = round((float) $row->miles, 2);
             }
+
+            Log::info('[CarrierSearch] zip radius produced ' . count($out) . " zip codes for radius={$radius}mi");
 
             return $out;
         });
@@ -398,28 +442,30 @@ class AdvancedCarrierSearchController extends Controller
     private function createZipTempTable(array $zips): bool
     {
         try {
-            $this->conn()->statement('DROP TEMPORARY TABLE IF EXISTS ' . self::TMP_ZIP_TABLE);
+            $this->timed('build zip temp table (' . count($zips) . ' zips)', function () use ($zips) {
+                $this->conn()->statement('DROP TEMPORARY TABLE IF EXISTS ' . self::TMP_ZIP_TABLE);
 
-            // InnoDB, not MEMORY: on a MEMORY table, a plain KEY defaults to
-            // a HASH index, which cannot be used for ORDER BY / range scans -
-            // MySQL falls back to sorting the whole temp table by hand.
-            // InnoDB gives idx_miles a real BTREE structure.
-            $this->conn()->statement(
-                'CREATE TEMPORARY TABLE ' . self::TMP_ZIP_TABLE . ' (
-                    zip5  VARCHAR(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
-                    miles DECIMAL(7,2) NOT NULL,
-                    PRIMARY KEY (zip5),
-                    KEY idx_miles (miles)
-                ) ENGINE=InnoDB'
-            );
+                // InnoDB, not MEMORY: on a MEMORY table, a plain KEY defaults to
+                // a HASH index, which cannot be used for ORDER BY / range scans -
+                // MySQL falls back to sorting the whole temp table by hand.
+                // InnoDB gives idx_miles a real BTREE structure.
+                $this->conn()->statement(
+                    'CREATE TEMPORARY TABLE ' . self::TMP_ZIP_TABLE . ' (
+                        zip5  VARCHAR(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+                        miles DECIMAL(7,2) NOT NULL,
+                        PRIMARY KEY (zip5),
+                        KEY idx_miles (miles)
+                    ) ENGINE=InnoDB'
+                );
 
-            foreach (array_chunk($zips, 2000, true) as $chunk) {
-                $rows = [];
-                foreach ($chunk as $zip => $miles) {
-                    $rows[] = ['zip5' => $zip, 'miles' => $miles];
+                foreach (array_chunk($zips, 2000, true) as $chunk) {
+                    $rows = [];
+                    foreach ($chunk as $zip => $miles) {
+                        $rows[] = ['zip5' => $zip, 'miles' => $miles];
+                    }
+                    $this->conn()->table(self::TMP_ZIP_TABLE)->insert($rows);
                 }
-                $this->conn()->table(self::TMP_ZIP_TABLE)->insert($rows);
-            }
+            });
 
             return true;
         } catch (\Throwable $e) {
@@ -448,21 +494,23 @@ class AdvancedCarrierSearchController extends Controller
             return;
         }
 
-        $query->whereExists(function ($sub) use ($columns) {
-            $sub->select(DB::raw(1))
+        // Converted from a correlated whereExists() to an independent
+        // whereIn(subquery). This question - "which DOT numbers have this
+        // authority active" - doesn't actually depend on each candidate
+        // carrier row, so it can be answered ONCE. MySQL can materialize
+        // that answer into a small indexed list and reuse it for every
+        // candidate, instead of running a separate check per candidate row
+        // (which is what a correlated EXISTS does, and what caused the
+        // authority-filter timeouts even after removing the stray LIMIT 1).
+        $query->whereIn('carriers.dot_number', function ($sub) use ($columns) {
+            $sub->select('auth_hist.dot_int')
+                ->distinct()
                 ->from('carrier_all_with_history as auth_hist')
-                ->whereColumn('auth_hist.dot_int', 'carriers.dot_number')
                 ->where(function ($s) use ($columns) {
                     foreach ($columns as $col) {
                         $s->orWhere("auth_hist.{$col}", 'A');
                     }
                 });
-                // NOTE: no ->limit(1) here on purpose. EXISTS() already
-                // stops at the first match by definition - adding LIMIT 1
-                // does nothing useful but silently blocks MySQL from using
-                // its fast semi-join strategy, forcing a slow row-by-row
-                // check instead. This was the cause of the authority-filter
-                // timeouts.
         });
     }
 
@@ -533,22 +581,18 @@ class AdvancedCarrierSearchController extends Controller
 
         $minBipd = (float) $request->input('min_bipd');
 
-        $query->whereExists(function ($sub) use ($minBipd) {
-            $sub->select(DB::raw(1))
+        // Same reasoning as applyAuthority() above: "which DOT numbers have
+        // qualifying insurance" doesn't depend on each candidate row, so it
+        // can be answered once instead of per-row.
+        $query->whereIn('carriers.dot_number', function ($sub) use ($minBipd) {
+            $sub->select('ins.dot_int')
+                ->distinct()
                 ->from('actpendinsur_all_with_history as ins')
-                // ins.dot_number is inconsistently zero-padded text (e.g.
-                // "04516637" or "4516637" - lengths vary row to row).
-                // dot_int is the clean, indexed number - match on that.
-                ->whereColumn('ins.dot_int', 'carriers.dot_number')
                 ->where('ins.max_cov_amount', '>=', $minBipd)
                 ->where(function ($s) {
                     $s->where('ins.mod_col_1', 'LIKE', '%BIPD%')
                       ->orWhere('ins.ins_form_code', 'LIKE', '91%');
                 });
-                // NOTE: no ->limit(1) here on purpose - same reason as the
-                // authority check above. EXISTS() already stops at the
-                // first match; LIMIT 1 only blocks MySQL's fast semi-join
-                // strategy and forces a slow row-by-row check instead.
         });
     }
 
@@ -638,7 +682,7 @@ class AdvancedCarrierSearchController extends Controller
         }
 
         try {
-            $rows = $rowQuery->forPage($page, $perPage)->get();
+            $rows = $this->timed('main paginated fetch', fn () => $rowQuery->forPage($page, $perPage)->get());
         } catch (\Throwable $e) {
             return $this->timeoutResponse($e);
         }
@@ -679,10 +723,12 @@ class AdvancedCarrierSearchController extends Controller
                     ->select(DB::raw('1'))
                     ->limit(self::COUNT_CAP + 1);
 
-                return (int) $this->conn()
-                    ->table(DB::raw('(' . $inner->toSql() . ') as bounded'))
-                    ->mergeBindings($inner)
-                    ->count();
+                return $this->timed('bounded count query', function () use ($inner) {
+                    return (int) $this->conn()
+                        ->table(DB::raw('(' . $inner->toSql() . ') as bounded'))
+                        ->mergeBindings($inner)
+                        ->count();
+                });
             } catch (\Throwable $e) {
                 Log::warning('[CarrierSearch] bounded count failed: ' . $e->getMessage());
                 return self::COUNT_CAP + 1;
