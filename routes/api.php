@@ -32,6 +32,9 @@ use App\Http\Controllers\Api\V1\Subscription\StripeWebhookController;
 use App\Http\Controllers\Api\V1\Subscription\SubscriptionController;
 use App\Http\Controllers\Api\V1\User\UserController;
 use App\Http\Controllers\Carrier\CarrierController;
+
+use App\Http\Controllers\Api\V1\ContactController;
+
 use App\Http\Controllers\CarrierQuestionController;
 use App\Http\Controllers\SearchHistoryController;
 use App\Http\Controllers\Api\V1\Driver\DriverAuthController;
@@ -71,6 +74,8 @@ Route::prefix('v1')->group(function () {
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
+
+    Route::post('/contact-us', [ContactController::class, 'store']);
 
     // The pricing table shown right after signup. Public, because the plan
     // screen renders before the new account has finished authenticating.
