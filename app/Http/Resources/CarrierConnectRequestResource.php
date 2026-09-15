@@ -173,7 +173,6 @@ class CarrierConnectRequestResource extends JsonResource
                 'drivers' => $this->eldConnection->driver_count,
                 'last_sync_at' => $this->eldConnection->last_sync_at,
             ] : null),
-
             'factoring_answered' => $this->factoring_answered_at !== null,
             'questionnaire_completed' => $this->questionnaire_completed_at !== null,
             'documents_completed' => $this->documents_completed_at !== null,

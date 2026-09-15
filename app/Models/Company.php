@@ -84,6 +84,6 @@ class Company extends Model
             return null;
         }
 
-        return config('subscriptions.business_types.' . $this->business_type, $this->business_type);
+        return config('subscriptions.business_types.'.$this->business_type, $this->business_type);
     }
 }

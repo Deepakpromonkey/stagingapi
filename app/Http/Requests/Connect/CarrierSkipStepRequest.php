@@ -30,6 +30,7 @@ class CarrierSkipStepRequest extends FormRequest
                 'string',
                 'size:64',
             ],
+
             'step' => [
                 'required',
                 'string',

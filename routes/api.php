@@ -14,7 +14,6 @@ use App\Http\Controllers\Api\V1\CarrierPortal\CarrierProfileController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierUserController;
 use App\Http\Controllers\Api\V1\CarrierReportController;
 use App\Http\Controllers\Api\V1\CarrierShortlistController;
-use App\Http\Controllers\Api\V1\AdvancedSearch\AdvancedCarrierSearchController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
 use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
 use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
@@ -102,8 +101,6 @@ Route::prefix('v1')->group(function () {
     Route::post('/signup/otp/verify', [SignupOtpController::class, 'verify'])
         ->middleware('throttle:20,1');
 
-    // PHMSA, SmartWay, CARB compliance list import
-    Route::post('/carrier-compliance/import', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'importCsv']);
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
         Route::post('/verify-forgot-password-otp', [PasswordResetController::class, 'verifyResetOtp']);
@@ -165,8 +162,6 @@ Route::prefix('v1')->group(function () {
     });
 
     /*
-
-
     | Terminal (ELD / telematics) events.
     |
     | Server to server, so no session and no invitation token — the Svix
@@ -182,7 +177,6 @@ Route::prefix('v1')->group(function () {
     Route::post('/eld/terminal/webhook', [TerminalWebhookController::class, 'handle']);
 
     /*
-
     | Driver app.
     |
     | Drivers sign in with their phone number and a texted code — there is no
@@ -307,6 +301,7 @@ Route::prefix('v1')->group(function () {
         | NotificationController.
         */
         Route::get('/notifications', [NotificationController::class, 'index']);
+
         // Session
         Route::get('/me', [AuthController::class, 'me']);
         Route::post('/logout', [AuthController::class, 'logout']);
@@ -315,11 +310,6 @@ Route::prefix('v1')->group(function () {
 
         // csv import + export carriers
        Route::post('/carriers/bulk-import', [\App\Http\Controllers\Api\V1\CarrierImportController::class, 'bulkImport']);
-
-
-      
-
-
        
        Route::get('/carriers/export', [\App\Http\Controllers\Api\V1\CarrierExportController::class, 'export']);
 
@@ -429,11 +419,6 @@ Route::prefix('v1')->group(function () {
         // Carrier search (reads the EC2 carrier database)
         Route::get('/carrier/search', [CarrierController::class, 'search']);
 
- 
-        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
-
-
-
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 
             Route::get('/carrier/{dot}/trust-score', [CarrierController::class, 'index']);
@@ -448,8 +433,6 @@ Route::prefix('v1')->group(function () {
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
 
-            // Check DOT compliance (PHMSA, CARB, SmartWay)
-            Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
         });
 
         // OCR

@@ -25,10 +25,7 @@ class User extends Authenticatable
         'last_name',
         'email',
         'phone',
-
-        // Added in main branch.
         'country_code',
-
         'designation',
         'profile_image',
         'password',
@@ -52,7 +49,6 @@ class User extends Authenticatable
         'is_owner' => 'boolean',
         'status' => 'boolean',
         'two_factor_enabled' => 'boolean',
-
         // Nullable on purpose: null means "inherit the role's capability".
         'can_override_soft' => 'boolean',
         'can_override_gate' => 'boolean',
@@ -131,11 +127,7 @@ class User extends Authenticatable
 
     public function shortlistedCarriers()
     {
-        return $this->belongsToMany(
-            Carrier::class,
-            'carrier_shortlists',
-            'user_id',
-            'carrier_id'
-        )->withTimestamps();
+        return $this->belongsToMany(Carrier::class, 'carrier_shortlists', 'user_id', 'carrier_id')
+            ->withTimestamps();
     }
 }

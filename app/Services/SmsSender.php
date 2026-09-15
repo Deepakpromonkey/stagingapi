@@ -86,8 +86,8 @@ class SmsSender
             */
             $dial = ltrim($number['dial'], '+');
 
-            if (in_array($prefix, ['', $dial, '0' . $dial, '1'], true)) {
-                return $number['dial'] . $national;
+            if (in_array($prefix, ['', $dial, '0'.$dial, '1'], true)) {
+                return $number['dial'].$national;
             }
         }
 
@@ -108,14 +108,12 @@ class SmsSender
     }
 
     /**
-     * @param string $context What is being sent, for the log line — e.g. "signup OTP".
+     * @param  string  $context  What is being sent, for the log line — e.g. "signup OTP".
      */
     public function send(string $to, string $body, string $context): bool
     {
-        // Force known test numbers to the correct country code.
         $to = self::forceCountry($to);
 
-        // Redirect SMS in staging/local if SMS_OVERRIDE_TO is configured.
         [$to, $body] = $this->applyOverride($to, $body, $context);
 
         $payload = array_filter([
@@ -136,7 +134,7 @@ class SmsSender
                 ->post(self::ENDPOINT, $payload);
 
             if ($response->failed()) {
-                Log::error('Telnyx rejected the ' . $context, [
+                Log::error('Telnyx rejected the '.$context, [
                     'to' => self::mask($to),
                     'status' => $response->status(),
 
@@ -157,7 +155,7 @@ class SmsSender
             $status = $response->json('data.to.0.status');
 
             if (! in_array($status, self::ACCEPTED, true)) {
-                Log::error('Telnyx accepted the request but did not send the ' . $context, [
+                Log::error('Telnyx accepted the request but did not send the '.$context, [
                     'to' => self::mask($to),
                     'message_status' => $status,
                     'errors' => $response->json('data.errors'),
@@ -168,7 +166,7 @@ class SmsSender
 
             return true;
         } catch (\Throwable $e) {
-            Log::error('Telnyx SMS threw sending the ' . $context, [
+            Log::error('Telnyx SMS threw sending the '.$context, [
                 'to' => self::mask($to),
                 'error' => $e->getMessage(),
             ]);
@@ -191,7 +189,7 @@ class SmsSender
      * as a warning on every send so an environment that has it on by accident
      * says so loudly rather than quietly misdelivering.
      *
-     * @return array{0: string, 1: string}
+     * @return array{0: string, 1: string} the recipient and body to send
      */
     private function applyOverride(string $to, string $body, string $context): array
     {
@@ -201,7 +199,7 @@ class SmsSender
             return [$to, $body];
         }
 
-        Log::warning('SMS override is on; redirecting the ' . $context, [
+        Log::warning('SMS override is on; redirecting the '.$context, [
             'intended' => self::mask($to),
             'sent_to' => self::mask($override),
         ]);
@@ -212,7 +210,7 @@ class SmsSender
         | point is to identify the recipient and not to put a full phone number
         | into somebody else's message history.
         */
-        return [$override, '[test → ' . self::mask($to) . '] ' . $body];
+        return [$override, '[test → '.self::mask($to).'] '.$body];
     }
 
     /**
@@ -223,6 +221,6 @@ class SmsSender
     {
         return strlen($phone) <= 4
             ? $phone
-            : str_repeat('*', strlen($phone) - 4) . substr($phone, -4);
+            : str_repeat('*', strlen($phone) - 4).substr($phone, -4);
     }
 }
