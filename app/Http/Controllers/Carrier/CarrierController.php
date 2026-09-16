@@ -2920,7 +2920,7 @@ class CarrierController extends Controller
      * which is case-insensitive, matching the strtoupper() the profile uses.
      *
      * @param  array<int, mixed>  $dots
-     * @return array<int|string, array{insp_total:int, observed_units:int, observed_trailers:int}>
+     * @return array<int|string, array{insp_total:int, observed_units:int, observed_trailers:int, last_insp_date:string|null}>
      */
     private function inspectionStatsFor(array $dots): array
     {
@@ -2932,12 +2932,15 @@ class CarrierController extends Controller
 
         $placeholders = implode(',', array_fill(0, count($dots), '?'));
 
+        // MAX() rides along on the count's own GROUP BY, so INSP-03 costs
+        // nothing extra here. insp_date is a real DATE column, so MAX() is
+        // a date comparison, not the text sort the '24-APR-24' columns need.
         $totals = $connection
             ->table('inspections')
-            ->selectRaw('dot_number, COUNT(*) AS insp_total')
+            ->selectRaw('dot_number, COUNT(*) AS insp_total, MAX(insp_date) AS last_insp_date')
             ->whereIn('dot_number', $dots)
             ->groupBy('dot_number')
-            ->pluck('insp_total', 'dot_number');
+            ->get();
 
         // The feed's own vocabulary for a self-driven unit; everything towed
         // is matched on the words that appear in the trailer types.
@@ -2983,8 +2986,9 @@ class CarrierController extends Controller
             ];
         }
 
-        foreach ($totals as $dot => $total) {
-            $stats[$dot]['insp_total'] = (int) $total;
+        foreach ($totals as $row) {
+            $stats[$row->dot_number]['insp_total'] = (int) $row->insp_total;
+            $stats[$row->dot_number]['last_insp_date'] = $row->last_insp_date;
         }
 
         return $stats;
@@ -3101,6 +3105,7 @@ class CarrierController extends Controller
             (int) ($crashStats['injuries'] ?? 0),
             (int) ($crashStats['tow_away'] ?? 0),
             (int) ($inspectionStats['insp_total'] ?? 0),
+            $inspectionStats['last_insp_date'] ?? null,
         );
 
         return isset($trustScore['overall_score'])
@@ -3836,7 +3841,9 @@ class CarrierController extends Controller
             $crashesTotal,
             $crashFatalities,
             $crashInjuries,
-            $crashesTowAway
+            $crashesTowAway,
+            null,
+            $lastInspectionDate
         );
 
         // Store the score the broker actually saw against the view log.

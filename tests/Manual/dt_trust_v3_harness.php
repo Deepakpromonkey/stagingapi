@@ -258,7 +258,11 @@ function carrier(array $over = []): Rec
         'authorityHistory' => \collect([new Rec(['op_auth_type' => 'COMMON', 'original_action_desc' => 'GRANTED', 'disp_action_desc' => 'GRANTED', 'orig_served_date' => d(19000)])]),
         'authorityOrders' => \collect([]),
         'crashes' => \collect([]),
-        'inspections' => \collect([new Rec(['vin' => null]), new Rec(['vin' => null]), new Rec(['vin' => null])]),
+        'inspections' => \collect([
+            new Rec(['vin' => null, 'insp_date' => d(100)]),
+            new Rec(['vin' => null, 'insp_date' => d(200)]),
+            new Rec(['vin' => null, 'insp_date' => d(300)]),
+        ]),
     ], $over));
 }
 
@@ -317,7 +321,8 @@ function run(FakeController $c, array $o = []): array
         $o['observedUnits'] ?? 2,
         $o['observedTrailers'] ?? 1,
         $o['crashesTotal'] ?? 0, $o['crashFatalities'] ?? 0, $o['crashInjuries'] ?? 0, $o['crashesTowAway'] ?? 0,
-        $o['inspectionCount'] ?? null
+        $o['inspectionCount'] ?? null,
+        $o['lastInspectionDate'] ?? null
     );
 }
 
@@ -509,15 +514,24 @@ check('passed inspection count drives OPS-11 with no inspections loaded',
  * ------------------------------------------------------------------- */
 
 /* 25. §10 A — the Rundlett test: established, clean, thin inspection file.
-   Zero rules fire; 7 of 8 confidence inputs present (only '>=5 inspections'
-   is false) => 0.88, which is above the 0.85 cap line, so nothing clips. */
+   7 of 8 confidence inputs present (only '>=5 inspections' is false) =>
+   0.88, above the 0.85 cap line, so nothing clips.
+
+   v3.2 moves this worked example off 100: INSP-02 now treats "12+ months of
+   authority and still under five inspections" as a Low finding in its own
+   right, so the clean-but-thin file lands on 94 instead. That is the whole
+   point of the rule — it narrows the sufficiency cliff from 83-vs-100 to
+   83-vs-94 — but it does mean §10 A of the founder breakdown no longer
+   reads 100. Nothing else about the example changed: no cap, no knockout,
+   still Approved, still grade A, still Preferred. */
 $thinFile = ['insp_total' => 3, 'vehicle_insp_total' => 3, 'driver_insp_total' => 3,
     'unsafe_driv_insp_w_viol' => 0, 'hos_driv_insp_w_viol' => 0, 'driv_fit_insp_w_viol' => 0,
     'contr_subst_insp_w_viol' => 0, 'veh_maint_insp_w_viol' => 0];
 $r = run($c, ['sms' => sms($thinFile), 'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0]);
-check('§10 A: clean carrier -> 100 / Preferred / Approved / A, conf 0.88 uncapped',
-    $r['overall_score'] === 100 && $r['grade'] === 'A' && $r['status'] === 'Approved'
-    && $r['v3']['band']['key'] === 'preferred' && $r['v3']['rules_fired'] === []
+check('§10 A: clean-but-thin -> 94 / Preferred / Approved / A, conf 0.88 uncapped',
+    $r['overall_score'] === 94 && $r['grade'] === 'A' && $r['status'] === 'Approved'
+    && $r['v3']['band']['key'] === 'preferred'
+    && array_column($r['v3']['rules_fired'], 'id') === ['INSP-02']
     && $r['v3']['data_confidence'] === 0.88 && $r['v3']['score_cap_applied'] === null,
     json_encode([$r['overall_score'], $r['grade'], $r['status'], $r['v3']['data_confidence'], $r['v3']['score_cap_applied']]));
 
@@ -629,6 +643,189 @@ check('§3/§6: active common + blank contract -> 84 + authority_record_missing'
     json_encode([$partial['overall_score'], $partial['v3']['flags'],
         $authCase(['common_stat' => 'I', 'contract_stat' => ''])['overall_score'],
         $authCase(['common_stat' => 'I', 'contract_stat' => 'N'])['overall_score']]));
+
+/* ---------------------------------------------------------------------
+ | v3.2 — AUTH-11, AUTH-12, INS-13, INSP-02, INSP-03, tiered NET-04.
+ * ------------------------------------------------------------------- */
+
+function histRow(string $orig, string $disp, string $date): Rec
+{
+    return new Rec(['op_auth_type' => 'COMMON', 'original_action_desc' => $orig, 'disp_action_desc' => $disp, 'orig_served_date' => $date]);
+}
+
+$granted = histRow('GRANTED', 'GRANTED', d(19000));
+
+/* Proceedings carrier: the long-standing grant plus N cured revocation
+   proceedings, each 'INVOLUNTARY REVOCATION' initiated and then
+   'DISCONTINUED REVOCATION' — which AUTH-09's REVOK pattern never matched. */
+$proceedings = function (array $daysAgo) use ($granted) {
+    $rows = [$granted];
+    foreach ($daysAgo as $ago) { $rows[] = histRow('INVOLUNTARY REVOCATION', 'DISCONTINUED REVOCATION', d($ago)); }
+    return carrier(['authorityHistory' => \collect($rows)]);
+};
+
+/* 34. AUTH-11 — one cured proceeding inside the 36-month window. */
+$r = run($c, ['carrier' => $proceedings([180])]);
+check('AUTH-11: one proceeding in window -> Low, 94',
+    $r['overall_score'] === 94
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'AUTH-11' && $x['tier'] === 'low'),
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 35. AUTH-11 — the tiers: 2-3 is Medium, 4+ is Review. */
+$three = run($c, ['carrier' => $proceedings([200, 300, 400])]);
+$five = run($c, ['carrier' => $proceedings([150, 250, 350, 450, 550])]);
+check('AUTH-11: three -> Medium 89, five -> Review 54',
+    $three['overall_score'] === 89 && $five['overall_score'] === 54 && $five['status'] === 'Review',
+    json_encode([$three['overall_score'], $five['overall_score'], $five['status']]));
+
+/* 36. AUTH-11 — the window is real: four proceedings all older than 36
+   months score nothing at all. */
+$r = run($c, ['carrier' => $proceedings([1200, 1300, 1400, 1500])]);
+check('AUTH-11: four proceedings, all outside 36mo -> 100, no rule',
+    $r['overall_score'] === 100 && $r['v3']['rules_fired'] === [],
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 37. AUTH-11 does not double-count a COMPLETED revocation — that is
+   AUTH-09's Medium, and only AUTH-09's. */
+$completed = carrier(['authorityHistory' => \collect([$granted, histRow('INVOLUNTARY REVOCATION', 'REVOKED', d(180))])]);
+$r = run($c, ['carrier' => $completed]);
+check('completed revocation -> AUTH-09 only, not AUTH-11',
+    array_column($r['v3']['rules_fired'], 'id') === ['AUTH-09'] && $r['overall_score'] === 89,
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 38. AUTH-12 — broker authority beside carrier authority, healthy fleet:
+   Medium and a dual_authority flag, never a knockout. */
+$r = run($c, ['auth' => auth(['broker_stat' => 'A']), 'carrier' => carrier(['nbr_power_unit' => 15]), 'observedUnits' => 12]);
+check('AUTH-12: dual authority, 15-truck fleet -> Medium 89 + dual_authority',
+    $r['overall_score'] === 89 && $r['knockout']['triggered'] === false
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'AUTH-12' && $x['tier'] === 'medium')
+    && in_array('dual_authority', $r['v3']['flags'], true),
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id'), $r['v3']['flags']]));
+
+/* 39. AUTH-12 — each escalation marker on its own takes it to Review:
+   a 1-2 truck fleet, nothing observed roadside, or authority under 180 days. */
+$tiny = run($c, ['auth' => auth(['broker_stat' => 'A']), 'carrier' => carrier(['nbr_power_unit' => 2]), 'observedUnits' => 2]);
+$unseen = run($c, ['auth' => auth(['broker_stat' => 'A']), 'carrier' => carrier(['nbr_power_unit' => 15]), 'observedUnits' => 0]);
+$young = run($c, ['auth' => auth(['broker_stat' => 'A']), 'observedUnits' => 12,
+    'carrier' => carrier(['nbr_power_unit' => 15, 'authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(120))])])]);
+check('AUTH-12: 2 trucks / nothing observed / <180d each escalate to Review',
+    $tiny['overall_score'] === 54 && $unseen['overall_score'] === 54
+    && collect($young['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'AUTH-12' && $x['tier'] === 'review'),
+    json_encode([$tiny['overall_score'], $unseen['overall_score'], array_column($young['v3']['rules_fired'], 'id')]));
+
+/* 40. INS-13 — the authority row says BIPD is on file and BIPD filings
+   exist, but every one of them is already cancelled. That is a stale feed,
+   not a bare carrier: flag it for a human, score it zero, and do NOT let
+   INS-01 knock the carrier out on data we cannot trust. */
+$stale = carrier(['insuranceFilings' => \collect([
+    new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '00750', 'cancl_effective_date' => d(430)]),
+    new Rec(['ins_form_code' => '91X', 'ins_type_desc' => 'BIPD/PRIMARY', 'max_cov_amount' => '00750', 'cancl_effective_date' => d(800)]),
+])]);
+$r = run($c, ['carrier' => $stale]);
+check('INS-13: stale filings feed -> 100, flag + manual review, no knockout',
+    $r['overall_score'] === 100 && $r['knockout']['triggered'] === false
+    && in_array('insurance_feed_inconsistency', $r['v3']['flags'], true)
+    && $r['v3']['needs_manual_review'] === true
+    && $r['v3']['rules_fired'] === [],
+    json_encode([$r['overall_score'], $r['v3']['flags'], $r['knockout']]));
+
+/* 41. INS-13 stays quiet when the authority row agrees there is no BIPD —
+   that is a genuine gap, and INS-01 must still knock it out. */
+$bare = carrier(['insuranceFilings' => \collect([])]);
+$r = run($c, ['carrier' => $bare, 'auth' => auth(['bipd_file' => '00000'])]);
+check('INS-13: genuinely bare -> NO_BIPD knockout, no feed flag',
+    $r['overall_score'] === 18 && $r['knockout']['reasons'][0]['code'] === 'NO_BIPD'
+    && ! in_array('insurance_feed_inconsistency', $r['v3']['flags'], true),
+    json_encode([$r['overall_score'], $r['v3']['flags']]));
+
+/* 42. INSP-02 — the rule is about ESTABLISHED carriers. A carrier three
+   months into its authority with the same three inspections is a new
+   carrier, not a thin one, and INSP-02 must not fire on it. */
+$young = carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(60))])]);
+$r = run($c, ['carrier' => $young, 'sms' => sms(['insp_total' => 3])]);
+check('INSP-02: 60-day authority with 3 inspections -> no INSP-02',
+    ! collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'INSP-02'),
+    json_encode(array_column($r['v3']['rules_fired'], 'id')));
+
+/* 43. INSP-03 — history exists but the newest inspection is 400 days old. */
+$cold = carrier(['inspections' => \collect(array_map(
+    fn ($i) => new Rec(['vin' => null, 'insp_date' => d(400 + $i * 10)]), range(0, 4)))]);
+$r = run($c, ['carrier' => $cold]);
+check('INSP-03: newest inspection 400 days old -> Low, 94',
+    $r['overall_score'] === 94
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'INSP-03')
+    && $r['pillars']['inspection_quality']['parameters']['last_inspection_days_ago'] >= 400,
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 44. INSP-03 takes the date the shortlist passes in, so the shortlist and
+   the profile agree on the same carrier even though the shortlist never
+   loads a single inspection row. */
+$unloaded = carrier(['inspections' => \collect([])]);
+$fresh = run($c, ['carrier' => $unloaded, 'inspectionCount' => 9, 'lastInspectionDate' => d(30)]);
+$staleDate = run($c, ['carrier' => $unloaded, 'inspectionCount' => 9, 'lastInspectionDate' => d(500)]);
+check('INSP-03: passed-in date drives the rule with no inspections loaded',
+    ! collect($fresh['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'INSP-03')
+    && collect($staleDate['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'INSP-03'),
+    json_encode([array_column($fresh['v3']['rules_fired'], 'id'), array_column($staleDate['v3']['rules_fired'], 'id')]));
+
+/* 45. INSP-03 abstains rather than guessing when the date is unreadable —
+   an unknown input, which caps confidence, not a Low finding. */
+$undated = carrier(['inspections' => \collect([new Rec(['vin' => null, 'insp_date' => null])])]);
+$r = run($c, ['carrier' => $undated]);
+check('INSP-03: unreadable date -> unknown input, no rule fired',
+    ! collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'INSP-03')
+    && collect($r['v3']['unknown_inputs'])->contains(fn ($x) => $x['field'] === 'last_inspection_date'),
+    json_encode([array_column($r['v3']['rules_fired'], 'id'), $r['v3']['unknown_inputs']]));
+
+/* 46. NET-04 — the VIN tiers. Two other DOTs on the same truck is a leased
+   unit; five is a fleet running under somebody else's numbers. */
+$vinCarrier = fn () => carrier(['inspections' => \collect([new Rec(['vin' => '1FUJGLDR0CLBP8834', 'insp_date' => d(100)])])]);
+$net = fn (int $vin) => run($c, ['carrier' => $vinCarrier(),
+    'config' => ['trustscore.network_checks' => true], 'net' => ['vin' => $vin]]);
+$two = $net(2); $four = $net(4); $six = $net(6);
+check('NET-04: 2 -> Low 94, 4 -> Medium 89, 6 -> Review 54',
+    $two['overall_score'] === 94 && $four['overall_score'] === 89
+    && $six['overall_score'] === 54 && $six['status'] === 'Review',
+    json_encode([$two['overall_score'], $four['overall_score'], $six['overall_score']]));
+
+/* 47. NET-04 — a VIN nobody else has ever been inspected on is not a
+   finding, and must not fire the old blanket Medium. */
+$r = $net(0);
+check('NET-04: VIN shared with nobody -> no rule, 100',
+    $r['overall_score'] === 100 && $r['v3']['rules_fired'] === [],
+    json_encode([$r['overall_score'], array_column($r['v3']['rules_fired'], 'id')]));
+
+/* 48. Warrior — the staging composite that drove v3.2. HOS over the
+   threshold, violations on 60% of inspections, no roadside contact in over
+   a year, one cured revocation proceeding, broker authority beside carrier
+   authority on a two-truck fleet, and a VIN seen under two other DOTs.
+   Individually all survivable; together this is a manager override, not
+   the 83/Approved the carrier scored before. */
+$warrior = carrier([
+    'nbr_power_unit' => 2,
+    'authorityHistory' => \collect([
+        histRow('GRANTED', 'GRANTED', d(2325)),
+        histRow('INVOLUNTARY REVOCATION', 'DISCONTINUED REVOCATION', d(460)),
+    ]),
+    'inspections' => \collect(array_map(
+        fn ($i) => new Rec(['vin' => 'WARRIOR8VIN123456', 'insp_date' => d(400 + $i * 30)]), range(0, 4))),
+]);
+$r = run($c, [
+    'carrier' => $warrior,
+    'auth' => auth(['broker_stat' => 'A']),
+    'sms' => sms(['hos_driv_measure' => 6.2, 'insp_total' => 5, 'vehicle_insp_total' => 1, 'driver_insp_total' => 3,
+        'unsafe_driv_insp_w_viol' => 0, 'hos_driv_insp_w_viol' => 3, 'veh_maint_insp_w_viol' => 0]),
+    'config' => ['trustscore.network_checks' => true],
+    'net' => ['phone' => 0, 'email' => 0, 'address' => 0, 'vin' => 2],
+    'observedUnits' => 1,
+    'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0,
+]);
+check('Warrior composite -> 1750 pts, 51, review_required, dual_authority',
+    $r['v3']['risk_points'] === 1750 && $r['overall_score'] === 51
+    && $r['v3']['band']['key'] === 'review_required'
+    && in_array('dual_authority', $r['v3']['flags'], true),
+    json_encode([$r['v3']['risk_points'], $r['overall_score'], $r['v3']['band']['key'],
+        array_column($r['v3']['rules_fired'], 'id')]));
 
 echo "\n{$pass} passed, {$fail} failed\n";
 exit($fail === 0 ? 0 : 1);
