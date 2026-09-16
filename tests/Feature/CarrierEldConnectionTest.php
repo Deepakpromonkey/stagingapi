@@ -160,6 +160,25 @@ class CarrierEldConnectionTest extends TestCase
         $this->assertStringNotContainsString('external_id', $url);
     }
 
+    /**
+     * A billing control, not a default. Metering starts when GPS or HOS is
+     * called for a vehicle, and a backfill is that across the whole fleet the
+     * moment a carrier connects. Sending 0 explicitly is what keeps Terminal's
+     * own account default from deciding it — and most of our companies have no
+     * consent template carrying the same value.
+     */
+    public function test_the_link_always_states_the_backfill_even_when_it_is_zero(): void
+    {
+        config(['services.terminal.backfill_days' => 0]);
+
+        $request = $this->connectRequest($this->company());
+
+        $url = $this->postJson('/api/v1/carrier-connect/eld/connect', ['token' => $request->token])
+            ->json('data.url');
+
+        $this->assertStringContainsString('backfill_days=0', $url);
+    }
+
     public function test_the_shared_login_fork_sends_a_normalised_external_id(): void
     {
         $request = $this->connectRequest($this->company());

@@ -114,7 +114,21 @@ class EldConnectionService
 
             'tags' => 'broker:'.$connectRequest->company_id,
             'template' => $template,
-            'backfill_days' => config('services.terminal.backfill_days') ?: null,
+            /*
+            | Always sent, including the 0 that means "no history". This used to
+            | be `?: null`, which silently dropped exactly the value it most
+            | needed to send: 0 is falsy, so the intent never reached Terminal
+            | and their account default decided the backfill instead.
+            |
+            | That is a billing control. Metering starts when GPS or HOS is
+            | called for a vehicle, and a backfill is precisely that, across the
+            | whole fleet, the moment a carrier connects. The consent template
+            | carries the same 0, but only three of our companies have a
+            | template attached — the rest send no template at all, so this is
+            | the only thing standing between them and an unasked-for history
+            | pull.
+            */
+            'backfill_days' => (int) config('services.terminal.backfill_days'),
         ]);
     }
 
