@@ -81,6 +81,43 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Reply attachments
+    |--------------------------------------------------------------------------
+    |
+    | The certificate itself usually arrives as a PDF hanging off the reply, so
+    | the files are kept alongside the prose and shown on the card.
+    |
+    | Anyone can mail the inbox — the address rides on every request that goes
+    | out — so this is an allow-list, not a block-list: only what a certificate
+    | plausibly arrives as is stored, and everything else is dropped with a log
+    | line. The cap is per file; a reply carrying more than `max_per_reply` is
+    | truncated rather than refused.
+    |
+    */
+
+    'attachments' => [
+        'disk' => env('COI_ATTACHMENT_DISK', 's3'),
+
+        'max_bytes' => (int) env('COI_ATTACHMENT_MAX_BYTES', 15 * 1024 * 1024),
+        'max_per_reply' => (int) env('COI_ATTACHMENT_MAX_PER_REPLY', 10),
+
+        'allowed_types' => [
+            'application/pdf',
+            'image/png',
+            'image/jpeg',
+            'image/gif',
+            'image/tiff',
+            'image/webp',
+        ],
+
+        // Only consulted when the content sniffs as nothing in particular —
+        // a mail client that sends every file as octet-stream leaves the
+        // extension as the one piece of evidence there is.
+        'allowed_extensions' => ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'tif', 'tiff', 'webp'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Expiry extraction
     |--------------------------------------------------------------------------
     |

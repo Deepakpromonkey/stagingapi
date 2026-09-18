@@ -3,6 +3,7 @@
 namespace App\Services\Coi;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
 
 /**
@@ -21,6 +22,7 @@ class InboundEmailPayload
 {
     /**
      * @param  array<int, string>  $recipients
+     * @param  array<int, InboundAttachment>  $attachments
      * @param  array<string, mixed>  $raw
      */
     public function __construct(
@@ -33,6 +35,7 @@ class InboundEmailPayload
         public readonly ?string $inReplyTo,
         public readonly ?CarbonImmutable $receivedAt,
         public readonly array $raw,
+        public readonly array $attachments = [],
     ) {}
 
     /**
@@ -114,7 +117,8 @@ class InboundEmailPayload
             html: Arr::get($payload, 'HtmlBody'),
             inReplyTo: self::headerFromList(Arr::get($payload, 'Headers', []), 'In-Reply-To'),
             receivedAt: self::parseDate(Arr::get($payload, 'Date')),
-            raw: $payload,
+            raw: self::sanitiseRaw($payload),
+            attachments: self::postmarkAttachments($payload),
         );
     }
 
@@ -138,7 +142,8 @@ class InboundEmailPayload
             html: Arr::get($payload, 'body-html'),
             inReplyTo: Arr::get($payload, 'In-Reply-To'),
             receivedAt: self::parseDate(Arr::get($payload, 'Date')),
-            raw: $payload,
+            raw: self::sanitiseRaw($payload),
+            attachments: self::uploadedAttachments($payload),
         );
     }
 
@@ -160,7 +165,9 @@ class InboundEmailPayload
          | yields nulls and the caller records that it could not read the reply.
          */
         $mime = Arr::get($decoded, 'content');
-        $parsed = is_string($mime) ? MimeMessage::parse(self::maybeBase64($mime)) : ['text' => null, 'html' => null];
+        $parsed = is_string($mime)
+            ? MimeMessage::parse(self::maybeBase64($mime))
+            : ['text' => null, 'html' => null, 'attachments' => []];
 
         return new self(
             fromEmail: self::normaliseAddress(Arr::get($headers, 'from.0') ?? Arr::get($decoded, 'mail.source')),
@@ -175,7 +182,8 @@ class InboundEmailPayload
             html: $parsed['html'],
             inReplyTo: Arr::get($headers, 'inReplyTo'),
             receivedAt: self::parseDate(Arr::get($headers, 'date') ?? Arr::get($decoded, 'mail.timestamp')),
-            raw: $payload,
+            raw: self::sanitiseRaw($payload),
+            attachments: $parsed['attachments'],
         );
     }
 
@@ -215,7 +223,7 @@ class InboundEmailPayload
         $rawMime = Arr::get($payload, 'email');
         $parsed = is_string($rawMime) && trim($rawMime) !== ''
             ? MimeMessage::parse($rawMime)
-            : ['text' => null, 'html' => null];
+            : ['text' => null, 'html' => null, 'attachments' => []];
 
         return new self(
             fromEmail: self::normaliseAddress(
@@ -228,8 +236,128 @@ class InboundEmailPayload
             html: Arr::get($payload, 'html') ?? $parsed['html'],
             inReplyTo: Arr::get($payload, 'in_reply_to') ?? Arr::get($payload, 'In-Reply-To'),
             receivedAt: self::parseDate(Arr::get($payload, 'date') ?? Arr::get($payload, 'Date')),
-            raw: $payload,
+            raw: self::sanitiseRaw($payload),
+
+            /*
+             | SendGrid posts the files as uploads beside the parsed fields, and
+             | as MIME parts when the raw-message box is ticked. Never both, so
+             | whichever is there is the whole list.
+             */
+            attachments: self::uploadedAttachments($payload) ?: $parsed['attachments'],
         );
+    }
+
+    /**
+     * Postmark hands the files over inline, base64, in the JSON body.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<int, InboundAttachment>
+     */
+    private static function postmarkAttachments(array $payload): array
+    {
+        $attachments = [];
+
+        foreach ((array) Arr::get($payload, 'Attachments', []) as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $content = base64_decode((string) ($entry['Content'] ?? ''), true);
+
+            if ($content === false || $content === '') {
+                continue;
+            }
+
+            $attachments[] = new InboundAttachment(
+                filename: (string) ($entry['Name'] ?? 'attachment'),
+                contentType: $entry['ContentType'] ?? null,
+                content: $content,
+                contentId: trim((string) ($entry['ContentID'] ?? ''), ' <>') ?: null,
+            );
+        }
+
+        return $attachments;
+    }
+
+    /**
+     * Mailgun and SendGrid post the files as multipart uploads rather than as
+     * fields, so by the time this sees them they are already on disk as
+     * `UploadedFile`s sitting in the payload beside the text.
+     *
+     * SendGrid names them `attachment1`, Mailgun `attachment-1`; the numbering
+     * is the only thing they agree on, so the key is matched loosely and the
+     * real filename is read from the provider's own map where there is one.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<int, InboundAttachment>
+     */
+    private static function uploadedAttachments(array $payload): array
+    {
+        $info = Arr::get($payload, 'attachment-info');
+
+        if (is_string($info)) {
+            $decoded = json_decode($info, true);
+            $info = is_array($decoded) ? $decoded : [];
+        }
+
+        $info = is_array($info) ? $info : [];
+
+        $attachments = [];
+
+        foreach ($payload as $key => $file) {
+            if (! $file instanceof UploadedFile || ! preg_match('/^attachment-?\d+$/i', (string) $key)) {
+                continue;
+            }
+
+            $content = @file_get_contents($file->getRealPath() ?: '');
+
+            if ($content === false || $content === '') {
+                continue;
+            }
+
+            $meta = is_array($info[$key] ?? null) ? $info[$key] : [];
+
+            $attachments[] = new InboundAttachment(
+                filename: (string) ($meta['filename'] ?? $file->getClientOriginalName() ?: 'attachment'),
+                contentType: $meta['type'] ?? ($file->getClientMimeType() ?: null),
+                content: $content,
+                contentId: trim((string) ($meta['content-id'] ?? ''), ' <>') ?: null,
+            );
+        }
+
+        return $attachments;
+    }
+
+    /**
+     * The payload as it can actually be stored.
+     *
+     * `raw_payload` is a JSON column, and an `UploadedFile` in there is not
+     * serialisable — it would take the whole reply down on insert. The upload
+     * is replaced by a note of what it was, which is all the column was ever
+     * read for; the bytes live on the attachment row instead.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private static function sanitiseRaw(array $payload): array
+    {
+        foreach ($payload as $key => $value) {
+            if ($value instanceof UploadedFile) {
+                $payload[$key] = [
+                    'uploaded_file' => $value->getClientOriginalName(),
+                    'content_type' => $value->getClientMimeType(),
+                    'size' => $value->getSize(),
+                ];
+
+                continue;
+            }
+
+            if (is_array($value)) {
+                $payload[$key] = self::sanitiseRaw($value);
+            }
+        }
+
+        return $payload;
     }
 
     /**

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
 /**
@@ -44,5 +45,10 @@ class CoiInsuranceResponse extends Model
     public function request(): BelongsTo
     {
         return $this->belongsTo(CoiInsuranceRequest::class, 'coi_insurance_request_id');
+    }
+
+    public function attachments(): HasMany
+    {
+        return $this->hasMany(CoiInsuranceResponseAttachment::class, 'coi_insurance_response_id');
     }
 }

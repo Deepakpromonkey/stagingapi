@@ -26,6 +26,7 @@ class CarrierInsuranceRequestService
 {
     public function __construct(
         private readonly CoiContactResolver $contacts,
+        private readonly CoiAttachmentStore $attachments,
     ) {}
 
     /**
@@ -190,6 +191,16 @@ class CarrierInsuranceRequestService
                 'raw_payload' => $payload->raw,
                 'received_at' => $payload->receivedAt ?? now(),
             ]);
+
+            /*
+             | The certificate is usually the attachment, not the sentence
+             | above it. Stored before the extraction is queued so that the job
+             | — and the card it eventually refreshes — never sees a reply whose
+             | files are still on their way.
+             */
+            if ($payload->attachments !== []) {
+                $this->attachments->store($response, $payload->attachments);
+            }
 
             /*
              | A reply on a request that already succeeded is stored but does

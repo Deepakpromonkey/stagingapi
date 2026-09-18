@@ -470,6 +470,13 @@ Route::prefix('v1')->group(function () {
         Route::post('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'store']);
         Route::get('/carrier-insurance-requests/responses/{uuid}', [CarrierInsuranceRequestController::class, 'response']);
         Route::get('/carrier-insurance-requests/{uuid}/thread', [CarrierInsuranceRequestController::class, 'thread']);
+
+        /*
+        | The certificate an agency attached to its reply. Streamed through the
+        | API rather than served off a public bucket URL — a carrier's COI is
+        | not something to leave behind an unauthenticated link.
+        */
+        Route::get('/carrier-insurance-requests/attachments/{uuid}', [CarrierInsuranceRequestController::class, 'attachment']);
         Route::post('/carriers/{dot}/coverage-check', [CarrierInsuranceRequestController::class, 'coverageCheck'])
             ->where('dot', '[0-9]+');
         Route::get('/carriers/{dot}/insurance-request', [CarrierInsuranceRequestController::class, 'show'])
