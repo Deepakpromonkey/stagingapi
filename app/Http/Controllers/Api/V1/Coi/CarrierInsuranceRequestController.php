@@ -7,10 +7,13 @@ use App\Http\Requests\Coi\RaiseInsuranceRequest;
 use App\Http\Resources\CoiInsuranceRequestResource;
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
+use App\Models\CoiInsuranceResponseAttachment;
 use App\Services\Coi\CarrierInsuranceRequestService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * The broker side of "chase this carrier's agent for a current COI".
@@ -121,7 +124,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $response = CoiInsuranceResponse::where('uuid', $uuid)
             ->whereHas('request', fn ($query) => $query->where('company_id', $request->user()->company_id))
-            ->with('request')
+            ->with(['request', 'attachments'])
             ->first();
 
         if ($response === null) {
@@ -153,9 +156,91 @@ class CarrierInsuranceRequestController extends Controller
                 // what, without asking anyone.
                 'llm_response' => $response->llm_response,
 
+                /*
+                | The files that came with the reply — in practice the
+                | certificate itself. The bytes are not inlined here; each entry
+                | carries the path the card fetches them from, so opening a
+                | thread does not drag every PDF along with it.
+                */
+                'attachments' => self::attachmentsPayload($response),
+
                 'request' => new CoiInsuranceRequestResource($response->request),
             ],
         ]);
+    }
+
+    /**
+     * Hand back one attachment's bytes.
+     *
+     * Streamed through the API rather than linked straight at the bucket: these
+     * are a carrier's insurance certificates, and a public object URL is a
+     * permanent, unauthenticated copy of one that outlives whoever was allowed
+     * to see it. Going through here keeps the same company scoping the rest of
+     * the feature has, and leaves the bucket private.
+     */
+    public function attachment(Request $request, string $uuid): StreamedResponse|JsonResponse
+    {
+        $attachment = CoiInsuranceResponseAttachment::where('uuid', $uuid)
+            ->whereHas(
+                'response.request',
+                fn ($query) => $query->where('company_id', $request->user()->company_id),
+            )
+            ->first();
+
+        if ($attachment === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Attachment not found.',
+            ], 404);
+        }
+
+        $disk = Storage::disk($attachment->disk);
+
+        if (! $disk->exists($attachment->path)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'The stored file is no longer available.',
+            ], 404);
+        }
+
+        /*
+        | Inline for a PDF or an image so the card can show it in place, and an
+        | attachment for anything else. `X-Content-Type-Options` is what stops a
+        | file a stranger mailed us from being sniffed into something the
+        | browser will execute in our own origin.
+        */
+        return $disk->response($attachment->path, $attachment->filename, [
+            'Content-Type' => $attachment->content_type ?: 'application/octet-stream',
+            'X-Content-Type-Options' => 'nosniff',
+            'Content-Disposition' => sprintf(
+                '%s; filename="%s"',
+                $attachment->isPreviewable() ? 'inline' : 'attachment',
+                addslashes($attachment->filename),
+            ),
+        ]);
+    }
+
+    /**
+     * What the card needs to list and open the files on one reply.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private static function attachmentsPayload(CoiInsuranceResponse $response): array
+    {
+        return $response->attachments
+            ->map(fn (CoiInsuranceResponseAttachment $attachment) => [
+                'uuid' => $attachment->uuid,
+                'filename' => $attachment->filename,
+                'content_type' => $attachment->content_type,
+                'size_bytes' => $attachment->size_bytes,
+                'previewable' => $attachment->isPreviewable(),
+
+                // Relative on purpose: the front end prefixes its own API base,
+                // and the bytes are fetched with the caller's bearer token.
+                'path' => '/carrier-insurance-requests/attachments/'.$attachment->uuid,
+            ])
+            ->values()
+            ->all();
     }
 
     /**
@@ -172,7 +257,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $insuranceRequest = CoiInsuranceRequest::where('uuid', $uuid)
             ->where('company_id', $request->user()->company_id)
-            ->with(['user', 'responses' => fn ($query) => $query->oldest('received_at')])
+            ->with(['user', 'responses' => fn ($query) => $query->oldest('received_at')->with('attachments')])
             ->first();
 
         if ($insuranceRequest === null) {
@@ -215,6 +300,7 @@ class CarrierInsuranceRequestController extends Controller
             )),
             'ask_note' => $insuranceRequest->ask_note,
             'holder_name' => $insuranceRequest->holder_name,
+            'attachments' => [],
         ]];
 
         foreach ($insuranceRequest->responses as $reply) {
@@ -241,6 +327,8 @@ class CarrierInsuranceRequestController extends Controller
                 // Shown on purpose: a broker acting on an extracted date should
                 // be able to see what was extracted, and from what.
                 'llm_response' => $reply->llm_response,
+
+                'attachments' => self::attachmentsPayload($reply),
             ];
         }
 
