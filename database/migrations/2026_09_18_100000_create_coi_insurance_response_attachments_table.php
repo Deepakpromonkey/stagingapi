@@ -23,8 +23,18 @@ return new class extends Migration
 
             $table->uuid('uuid')->unique();
 
-            $table->foreignId('coi_insurance_response_id')
-                ->constrained('coi_insurance_responses')
+            /*
+             | The constraint is named explicitly. Laravel would derive
+             | `coi_insurance_response_attachments_coi_insurance_response_id_foreign`
+             | from the table and column, which is 68 characters and four past
+             | what MySQL accepts as an identifier — sqlite takes it without
+             | complaint, so the failure only ever appears on a real database.
+             */
+            $table->unsignedBigInteger('coi_insurance_response_id');
+
+            $table->foreign('coi_insurance_response_id', 'coi_attachments_response_fk')
+                ->references('id')
+                ->on('coi_insurance_responses')
                 ->cascadeOnDelete();
 
             // As the agency named it. Shown to the broker, never used to build
