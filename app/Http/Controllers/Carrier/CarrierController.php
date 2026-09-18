@@ -1062,6 +1062,7 @@ class CarrierController extends Controller
         ];
     }
 
+    
     private function calculateIdentity(
         $carrier,
         $detail

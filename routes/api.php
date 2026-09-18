@@ -435,8 +435,10 @@ Route::prefix('v1')->group(function () {
         Route::get('/carrier/search', [CarrierController::class, 'search']);
 
  
-        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
+        // Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
 
+        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter'])
+        ->middleware('throttle:10,1');
 
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
