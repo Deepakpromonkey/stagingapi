@@ -1171,7 +1171,7 @@ class CarrierConnectController extends BaseController
 
             // Terminal appends `result`, `token` and `state`; the `eld` flag is
             // ours, and is what tells the wizard which return leg this is.
-            $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=1'
+            $this->eldReturnUrl($connectRequest).'?eld=1'
         );
 
         if (! $url) {
@@ -2153,6 +2153,25 @@ class CarrierConnectController extends BaseController
         return strlen($phone) <= 4
             ? $phone
             : str_repeat('•', strlen($phone) - 4).substr($phone, -4);
+    }
+
+    /**
+     * Where Terminal sends the carrier back to once Link is done.
+     *
+     * The same place as every other return leg, unless TERMINAL_REDIRECT_BASE
+     * says otherwise. That override is for local development: Terminal
+     * validates the redirect it is handed and rejects a plain-http localhost
+     * one outright, so a tunnel address goes there while FRONTEND_URL keeps
+     * pointing at whatever the onboarding emails should say.
+     */
+    private function eldReturnUrl(CarrierConnectRequest $connectRequest): string
+    {
+        $base = config('services.terminal.redirect_base');
+        $path = '/carrier/connect/'.$connectRequest->token;
+
+        return filled($base)
+            ? rtrim($base, '/').'/'.ltrim($path, '/')
+            : $this->frontendUrl($path);
     }
 
     private function frontendUrl(string $path): string
