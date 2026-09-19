@@ -179,46 +179,6 @@ class CarrierEldConnectionTest extends TestCase
         $this->assertStringContainsString('backfill_days=0', $url);
     }
 
-    public function test_the_return_url_is_the_frontend_by_default(): void
-    {
-        config(['app.frontend_url' => 'https://app.example.test']);
-        config(['services.terminal.redirect_base' => null]);
-
-        $request = $this->connectRequest($this->company());
-
-        $url = $this->postJson('/api/v1/carrier-connect/eld/connect', ['token' => $request->token])
-            ->json('data.url');
-
-        $this->assertStringContainsString(
-            urlencode('https://app.example.test/carrier/connect/'.$request->token.'?eld=1'),
-            $url
-        );
-    }
-
-    /**
-     * Terminal validates the redirect it is handed and rejects a plain-http
-     * localhost one with "Invalid URL" — before the carrier ever reaches their
-     * provider, so the whole step is unusable against a dev server. This
-     * override points the return leg at a tunnel without disturbing
-     * FRONTEND_URL, which the onboarding emails are built from.
-     */
-    public function test_the_return_url_can_be_overridden_for_local_tunnels(): void
-    {
-        config(['app.frontend_url' => 'http://localhost:5173']);
-        config(['services.terminal.redirect_base' => 'https://tunnel.example.test/']);
-
-        $request = $this->connectRequest($this->company());
-
-        $url = $this->postJson('/api/v1/carrier-connect/eld/connect', ['token' => $request->token])
-            ->json('data.url');
-
-        $this->assertStringContainsString(
-            urlencode('https://tunnel.example.test/carrier/connect/'.$request->token.'?eld=1'),
-            $url
-        );
-        $this->assertStringNotContainsString(urlencode('http://localhost:5173'), $url);
-    }
-
     public function test_the_shared_login_fork_sends_a_normalised_external_id(): void
     {
         $request = $this->connectRequest($this->company());

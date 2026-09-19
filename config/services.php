@@ -125,18 +125,6 @@ return [
 
         'environment' => env('TERMINAL_ENVIRONMENT', 'sandbox'),
 
-        /*
-        | Base URL Terminal sends the carrier back to after the Link page.
-        |
-        | Unset — the normal case — the return leg uses FRONTEND_URL like every
-        | other link we mint. Local development is the exception: Terminal
-        | validates `redirect_url` and refuses a plain-http localhost one with
-        | "Invalid URL", before the carrier ever reaches their provider. A
-        | tunnel address goes here rather than in FRONTEND_URL, which also
-        | feeds the onboarding emails and is wanted pointing somewhere else.
-        */
-        'redirect_base' => env('TERMINAL_REDIRECT_BASE'),
-
         'secret_key' => env('TERMINAL_SECRET_KEY'),
         'publishable_key' => env('TERMINAL_PUBLISHABLE_KEY'),
 
