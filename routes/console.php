@@ -133,3 +133,9 @@ Schedule::command('coi:chase-requests')
     ->hourly()
     ->withoutOverlapping()
     ->onOneServer();
+
+
+Schedule::command('eld:poll-shipments')
+    ->everyMinute()
+    ->withoutOverlapping(5)
+    ->onOneServer();

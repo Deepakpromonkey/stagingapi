@@ -310,4 +310,56 @@ class TerminalClient
             'body' => Str::limit($response->body(), 500),
         ]);
     }
+
+        /**
+     * The latest known position of each vehicle, live from the provider.
+     *
+     * Unlike /vehicles/{id}/locations this is not a history read — it hits the
+     * provider's API on every call and answers with one row per vehicle. That
+     * is what makes it the right endpoint for an in-flight load: a single call
+     * covers every truck a carrier is currently hauling for us, where the
+     * history walk is a call per truck per pass.
+     *
+     * Terminal filters at most 50 vehicles per request, so the ids are chunked.
+     * Passing none asks for the whole fleet, which is only ever what a debug
+     * call wants — the poller always names its trucks.
+     *
+     * Vehicles with no last known position are simply absent from the response
+     * rather than returned empty, so a short result is normal and not an error.
+     */
+    public function latestVehicleLocations(string $connectionToken, array $vehicleIds = []): array
+    {
+        $results = [];
+
+        $collect = function (array $rows) use (&$results) {
+            foreach ($rows as $row) {
+                $results[] = $row;
+            }
+        };
+
+        if ($vehicleIds === []) {
+            $this->paginate($connectionToken, '/vehicles/locations', ['expand' => 'driver'], $collect);
+
+            return $results;
+        }
+
+        foreach (array_chunk(array_values(array_unique($vehicleIds)), 50) as $chunk) {
+            $this->paginate(
+                $connectionToken,
+                '/vehicles/locations',
+                [
+                    'vehicleIds' => implode(',', $chunk),
+
+                    // The driver on the truck right now, which is not always
+                    // the driver the broker picked at booking — a carrier can
+                    // swap one before the load rolls.
+                    'expand' => 'driver',
+                ],
+                $collect
+            );
+        }
+
+        return $results;
+    }
+    
 }

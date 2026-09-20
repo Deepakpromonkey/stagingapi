@@ -53,23 +53,38 @@ class ShipmentController extends BaseController
 
         $shipment = $this->shipmentService->create($data, $user);
 
+        /*
+        | Templates are keyed on the tracking number, so a load without one
+        | cannot be saved as a template — updateOrCreate matching on NULL never
+        | matches, and every save would silently create another row. ELD loads
+        | are the common case: they carry origin and destination instead, with
+        | no tracking number at all — so the request is honoured for the
+        | shipment itself and the template step is skipped, reported in the
+        | message rather than left for the broker to notice was never saved.
+        */
+        $message = 'Shipment created successfully.';
+
         if ($request->boolean('save_as_template')) {
-            ShipmentTemplate::updateOrCreate(
-                [
-                    'company_id' => $user->company_id,
-                    'tracking_number' => $data['tracking_number'],
-                ],
-                [
-                    'user_id' => $user->id,
-                    'template_name' => $request->input('template_name', 'Template '.$data['tracking_number']),
-                    'template_data' => $data,
-                ]
-            );
+            if (filled($data['tracking_number'] ?? null)) {
+                ShipmentTemplate::updateOrCreate(
+                    [
+                        'company_id' => $user->company_id,
+                        'tracking_number' => $data['tracking_number'],
+                    ],
+                    [
+                        'user_id' => $user->id,
+                        'template_name' => $request->input('template_name', 'Template '.$data['tracking_number']),
+                        'template_data' => $data,
+                    ]
+                );
+            } else {
+                $message .= ' Template was not saved: ELD-tracked loads have no tracking number to save it under.';
+            }
         }
 
         return $this->success(
             new ShipmentResource($shipment),
-            'Shipment created successfully.',
+            $message,
             201
         );
     }

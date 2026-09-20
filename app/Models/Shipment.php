@@ -11,6 +11,7 @@ class Shipment extends Model
 
     protected $fillable = [
         'uuid',
+        'tracking_token',
         'company_id',
         'created_by',
         'updated_by',
@@ -38,6 +39,15 @@ class Shipment extends Model
         'email_updates_to',
         'notes',
         'status',
+        'origin',
+    'destination',
+    'eld_connection_id',
+    'eld_vehicle_id',
+    'eld_driver_id',
+    'eld_vehicle_terminal_id',
+    'eld_driver_terminal_id',
+    'eld_tracking_started_at',
+    'eld_tracking_stopped_at',
     ];
 
     protected $casts = [
@@ -48,6 +58,8 @@ class Shipment extends Model
         'email_updates_to' => 'array',
         'last_ping_at' => 'datetime',
         'last_alert_sent_at' => 'datetime',
+        'eld_tracking_started_at' => 'datetime',
+        'eld_tracking_stopped_at' => 'datetime',
     ];
 
     public function company()
@@ -110,4 +122,36 @@ class Shipment extends Model
             }
         });
     }
+
+  public function eldConnection()
+{
+    return $this->belongsTo(\App\Models\Eld\EldConnection::class, 'eld_connection_id');
+}
+
+public function eldVehicle()
+{
+    return $this->belongsTo(\App\Models\Eld\EldVehicle::class, 'eld_vehicle_id');
+}
+
+public function eldDriver()
+{
+    return $this->belongsTo(\App\Models\Eld\EldDriver::class, 'eld_driver_id');
+}
+
+/**
+ * Loads the ELD poller is responsible for.
+ *
+ * Started and not yet stopped. A draft has no vehicle bound to it and a
+ * delivered load's truck has moved on to somebody else's freight — polling
+ * either would be paying Terminal for a position nobody is watching.
+ */
+public function scopeEldTracking($query)
+{
+    return $query->where('tracking_method', 'eld')
+        ->whereNotNull('eld_connection_id')
+        ->whereNotNull('eld_vehicle_terminal_id')
+        ->whereNotNull('eld_tracking_started_at')
+        ->whereNull('eld_tracking_stopped_at');
+}
+
 }
