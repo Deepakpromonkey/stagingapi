@@ -168,6 +168,14 @@ class EldShipmentTrackingController extends BaseController
 
             'origin' => $shipment->origin,
             'destination' => $shipment->destination,
+
+            'pickup_date' => optional($shipment->pickup_date)->toDateString(),
+            'pickup_time' => $shipment->pickup_time,
+            'pickup_timezone' => $shipment->pickup_timezone,
+            'delivery_date' => optional($shipment->delivery_date)->toDateString(),
+            'delivery_time' => $shipment->delivery_time,
+            'delivery_timezone' => $shipment->delivery_timezone,
+
             'carrier_name' => $shipment->carrier_name,
             'carrier_dot' => $shipment->carrier_dot,
 

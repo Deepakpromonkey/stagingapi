@@ -82,7 +82,23 @@ class ShipmentService
                 // position comes from the truck, so there is nothing for a
                 // driver to arrive at and no stop row to arrive there.
                 'origin' => trim($data['origin'] ?? '') ?: null,
+                'origin_lat' => $data['origin_lat'] ?? null,
+                'origin_lng' => $data['origin_lng'] ?? null,
                 'destination' => trim($data['destination'] ?? '') ?: null,
+                'destination_lat' => $data['destination_lat'] ?? null,
+                'destination_lng' => $data['destination_lng'] ?? null,
+
+                // When the load is expected to pick up and deliver. Same
+                // shape as a stop's start window — three plain strings, no
+                // combined timestamp — because nothing here has enough
+                // context to safely fold a date, a time and a timezone name
+                // into one instant; whatever reads these back does that.
+                'pickup_date' => $data['pickup_date'] ?? null,
+                'pickup_time' => $data['pickup_time'] ?? null,
+                'pickup_timezone' => $data['pickup_timezone'] ?? null,
+                'delivery_date' => $data['delivery_date'] ?? null,
+                'delivery_time' => $data['delivery_time'] ?? null,
+                'delivery_timezone' => $data['delivery_timezone'] ?? null,
 
                 'eld_connection_id' => $eld['connection_id'],
                 'eld_vehicle_id' => $eld['vehicle_id'],

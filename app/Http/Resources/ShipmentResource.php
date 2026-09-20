@@ -33,7 +33,18 @@ class ShipmentResource extends JsonResource
             // Route — an ELD load has no trip sheet, so these two strings are
             // its only record of where the freight was going.
             'origin' => $this->origin,
+            'origin_lat' => $this->origin_lat,
+            'origin_lng' => $this->origin_lng,
             'destination' => $this->destination,
+            'destination_lat' => $this->destination_lat,
+            'destination_lng' => $this->destination_lng,
+
+            'pickup_date' => $this->pickup_date?->toDateString(),
+            'pickup_time' => $this->pickup_time,
+            'pickup_timezone' => $this->pickup_timezone,
+            'delivery_date' => $this->delivery_date?->toDateString(),
+            'delivery_time' => $this->delivery_time,
+            'delivery_timezone' => $this->delivery_timezone,
 
             // The link to hand the customer. Built the same way every other
             // customer-facing link in this app is (see InvitationService,

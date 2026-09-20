@@ -45,6 +45,33 @@ class CreateShipmentRequest extends FormRequest
                 'max:255',
             ],
 
+            // Captured by the same Google Places Autocomplete the manual
+            // flow's trip sheet already uses — nothing reads these yet, but
+            // they're free once the frontend is asking Places for a
+            // formatted address anyway, and this is what a route-completion
+            // estimate would need later.
+            'origin_lat' => ['nullable', 'numeric', 'between:-90,90'],
+            'origin_lng' => ['nullable', 'numeric', 'between:-180,180'],
+            'destination_lat' => ['nullable', 'numeric', 'between:-90,90'],
+            'destination_lng' => ['nullable', 'numeric', 'between:-180,180'],
+
+            /*
+            | Pickup / delivery windows.
+            |
+            | Same shape as shipment_stops.start_date/start_time/start_timezone
+            | on purpose — three plain strings, not a combined timestamp — so an
+            | ELD load's timing is read the same way a phone-tracked load's stop
+            | timing already is. Required together on an ELD load: a date with
+            | no time or timezone is not a window anyone can act on.
+            */
+            'pickup_date' => ['required_if:tracking_method,eld', 'nullable', 'date'],
+            'pickup_time' => ['required_if:tracking_method,eld', 'nullable', 'string', 'max:20'],
+            'pickup_timezone' => ['required_if:tracking_method,eld', 'nullable', 'string', 'max:60'],
+
+            'delivery_date' => ['required_if:tracking_method,eld', 'nullable', 'date'],
+            'delivery_time' => ['required_if:tracking_method,eld', 'nullable', 'string', 'max:20'],
+            'delivery_timezone' => ['required_if:tracking_method,eld', 'nullable', 'string', 'max:60'],
+
             // Carrier
 
             'carrier_name' => [
@@ -332,6 +359,13 @@ class CreateShipmentRequest extends FormRequest
             'eld_connection_uuid.required_if' => 'Select a connected carrier for an ELD-tracked load.',
             'eld_vehicle_terminal_id.required_if' => 'Select a vehicle for an ELD-tracked load.',
             'eld_driver_terminal_id.required_if' => 'Select a driver for an ELD-tracked load.',
+
+            'pickup_date.required_if' => 'Pickup date is required for an ELD-tracked load.',
+            'pickup_time.required_if' => 'Pickup time is required for an ELD-tracked load.',
+            'pickup_timezone.required_if' => 'Pickup timezone is required for an ELD-tracked load.',
+            'delivery_date.required_if' => 'Delivery date is required for an ELD-tracked load.',
+            'delivery_time.required_if' => 'Delivery time is required for an ELD-tracked load.',
+            'delivery_timezone.required_if' => 'Delivery timezone is required for an ELD-tracked load.',
         ];
     }
 }
