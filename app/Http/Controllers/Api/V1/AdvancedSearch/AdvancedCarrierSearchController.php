@@ -322,16 +322,31 @@ class AdvancedCarrierSearchController extends Controller
 
         $upper = strtoupper($loc);
 
-        $query->where(function (Builder $sub) use ($loc, $upper) {
-            if (strlen($loc) === 2) {
+        // Anything that isn't a 2-letter state, a 5-digit zip, or "city,
+        // state" falls back to a "city starts with X" search below. If that
+        // leftover text is only 1-2 characters, it isn't narrowing anything
+        // down - "a" matches Atlanta, Austin, Albany, Arlington... a huge
+        // slice of the whole table, with none of the fast machinery above.
+        // Treat an unrecognized, too-short location as "not a real place"
+        // instead of silently running a near-unbounded scan.
+        $isState     = strlen($loc) === 2;
+        $isZip       = (bool) preg_match('/^\d{5}/', $loc);
+        $isCityState = str_contains($loc, ',');
+
+        if (!$isState && !$isZip && !$isCityState && strlen($loc) < 3) {
+            throw new EmptyResultException();
+        }
+
+        $query->where(function (Builder $sub) use ($loc, $upper, $isState, $isZip, $isCityState) {
+            if ($isState) {
                 $sub->where('carriers.phy_state', $upper);
                 return;
             }
-            if (preg_match('/^\d{5}/', $loc)) {
+            if ($isZip) {
                 $sub->where('carriers.phy_zip', 'LIKE', substr($loc, 0, 5) . '%');
                 return;
             }
-            if (str_contains($loc, ',')) {
+            if ($isCityState) {
                 [$city, $state] = array_pad(explode(',', $loc, 2), 2, '');
                 $sub->where('carriers.phy_city', 'LIKE', addcslashes(trim($city), '%_\\') . '%')
                     ->where('carriers.phy_state', strtoupper(trim($state)));

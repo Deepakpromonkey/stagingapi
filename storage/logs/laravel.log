@@ -64619,3 +64619,16 @@
 #48 /Users/saran/Desktop/broker-19th-august/artisan(16): Illuminate\\Foundation\\Application->handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))
 #49 {main}
 "} 
+[2026-09-16 07:28:39] local.ERROR: Failed to send contact form email: Connection could not be established with host "smtp.sendgrid.net:587": stream_socket_client(): Unable to connect to smtp.sendgrid.net:587 (Operation timed out)  
+[2026-09-16 07:29:58] local.ERROR: Failed to send contact form email: Connection could not be established with host "smtp.sendgrid.net:587": stream_socket_client(): Unable to connect to smtp.sendgrid.net:587 (Operation timed out)  
+[2026-09-16 07:33:18] local.ERROR: Failed to send contact form email: Connection could not be established with host "smtp.sendgrid.net:587": stream_socket_client(): Unable to connect to smtp.sendgrid.net:587 (Operation timed out)  
+[2026-09-16 07:34:21] local.ERROR: Failed to send contact form email: Connection could not be established with host "smtp.sendgrid.net:587": stream_socket_client(): Unable to connect to smtp.sendgrid.net:587 (Operation timed out)  
+[2026-09-17 13:09:34] local.ERROR: Command "serving" is not defined. {"exception":"[object] (Symfony\\Component\\Console\\Exception\\CommandNotFoundException(code: 0): Command \"serving\" is not defined. at /Users/saran/Desktop/broker-19th-august/vendor/symfony/console/Application.php:785)
+[stacktrace]
+#0 /Users/saran/Desktop/broker-19th-august/vendor/symfony/console/Application.php(321): Symfony\\Component\\Console\\Application->find('serving')
+#1 /Users/saran/Desktop/broker-19th-august/vendor/symfony/console/Application.php(218): Symfony\\Component\\Console\\Application->doRun(Object(Symfony\\Component\\Console\\Input\\ArgvInput), Object(Symfony\\Component\\Console\\Output\\ConsoleOutput))
+#2 /Users/saran/Desktop/broker-19th-august/vendor/laravel/framework/src/Illuminate/Foundation/Console/Kernel.php(198): Symfony\\Component\\Console\\Application->run(Object(Symfony\\Component\\Console\\Input\\ArgvInput), Object(Symfony\\Component\\Console\\Output\\ConsoleOutput))
+#3 /Users/saran/Desktop/broker-19th-august/vendor/laravel/framework/src/Illuminate/Foundation/Application.php(1235): Illuminate\\Foundation\\Console\\Kernel->handle(Object(Symfony\\Component\\Console\\Input\\ArgvInput), Object(Symfony\\Component\\Console\\Output\\ConsoleOutput))
+#4 /Users/saran/Desktop/broker-19th-august/artisan(16): Illuminate\\Foundation\\Application->handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))
+#5 {main}
+"} 
