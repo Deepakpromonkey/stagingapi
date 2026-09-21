@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\V1\CarrierPortal\CarrierProfileController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierUserController;
 use App\Http\Controllers\Api\V1\CarrierReportController;
 use App\Http\Controllers\Api\V1\CarrierShortlistController;
+use App\Http\Controllers\Api\V1\AdvancedSearch\AdvancedCarrierSearchController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
 use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
 use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
@@ -21,6 +22,7 @@ use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
 use App\Http\Controllers\Api\V1\Notification\NotificationController;
+use App\Http\Controllers\Api\V1\Eld\TerminalWebhookController;
 use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
@@ -67,10 +69,18 @@ Route::prefix('v1')->group(function () {
     Route::post('/signup', [AuthController::class, 'signup']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
+
+    /*
+    | Terminal (ELD) webhooks. Public because Terminal has no session here —
+    | authenticity is the Svix signature, checked before the body is read. No
+    | throttle: throttling a webhook means Terminal retries, which arrives as
+    | more of the same traffic.
+    */
+    Route::post('/webhooks/terminal', TerminalWebhookController::class);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
-    // The pricing table shown right after signup. Public, because the plan
+       // The pricing table shown right after signup. Public, because the plan
     // screen renders before the new account has finished authenticating.
     Route::get('/subscription/plans', [SubscriptionController::class, 'plans']);
 
@@ -99,6 +109,9 @@ Route::prefix('v1')->group(function () {
 
     Route::post('/signup/otp/verify', [SignupOtpController::class, 'verify'])
         ->middleware('throttle:20,1');
+
+    // PHMSA, SmartWay, CARB compliance list import
+    Route::post('/carrier-compliance/import', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'importCsv']);
 
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
@@ -135,6 +148,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/identity/verify', [CarrierConnectController::class, 'checkIdentityVerification']);
             Route::post('/stripe/connect', [CarrierConnectController::class, 'connectStripe']);
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
+            Route::post('/eld/connect', [CarrierConnectController::class, 'connectEld']);
+            Route::post('/eld/verify', [CarrierConnectController::class, 'verifyEld']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
             Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);
@@ -291,6 +306,8 @@ Route::prefix('v1')->group(function () {
 
         // csv import + export carriers
        Route::post('/carriers/bulk-import', [\App\Http\Controllers\Api\V1\CarrierImportController::class, 'bulkImport']);
+
+      
        
        Route::get('/carriers/export', [\App\Http\Controllers\Api\V1\CarrierExportController::class, 'export']);
 
@@ -384,7 +401,7 @@ Route::prefix('v1')->group(function () {
 
         Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
             Route::post('/shipments', [ShipmentController::class, 'store']);
-            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']);
+            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']); 
         });
 
         /*
@@ -399,6 +416,8 @@ Route::prefix('v1')->group(function () {
 
         // Carrier search (reads the EC2 carrier database)
         Route::get('/carrier/search', [CarrierController::class, 'search']);
+ 
+        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 
@@ -413,6 +432,9 @@ Route::prefix('v1')->group(function () {
                 ->where('dot', '[0-9]+');
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
+
+             // Check DOT compliance (PHMSA, CARB, SmartWay)
+            Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
 
         });
 

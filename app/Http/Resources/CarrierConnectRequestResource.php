@@ -25,18 +25,23 @@ class CarrierConnectRequestResource extends JsonResource
         'phone' => 'Phone number',
         'identity' => 'Government ID',
         'bank' => 'Bank account',
+        'eld' => 'ELD connection',
         'questionnaire' => 'Broker questions',
         'documents' => 'Documents',
         'agreement' => 'Carrier agreement',
     ];
 
     /*
-    | The two a carrier may move past without completing. The phone check, the
+    | The three a carrier may move past without completing. The phone check, the
     | questionnaire and the agreement are not skippable: the first is what
     | proves we are talking to the carrier, and the other two are the broker's
     | own requirements.
+    |
+    | ELD is skippable because Terminal does not cover every provider, and a
+    | carrier running one we cannot reach must not be locked out of onboarding
+    | over the limits of our integration.
     */
-    private const SKIPPABLE = ['identity', 'bank'];
+    private const SKIPPABLE = ['identity', 'bank', 'eld'];
 
     public function toArray(Request $request): array
     {
@@ -121,12 +126,31 @@ class CarrierConnectRequestResource extends JsonResource
             */
             'identity_skipped' => $this->identity_skipped_at !== null,
             'bank_skipped' => $this->bank_skipped_at !== null,
+            'eld_skipped' => $this->eld_skipped_at !== null,
 
             // What the wizard gates on: done, or deliberately passed over.
             'identity_settled' => $this->didit_status === 'Approved'
                 || $this->identity_skipped_at !== null,
             'bank_settled' => $this->stripe_verified_at !== null
                 || $this->bank_skipped_at !== null,
+            'eld_connected' => $this->eld_connection_id !== null,
+            'eld_settled' => $this->eld_connection_id !== null
+                || $this->eld_skipped_at !== null,
+
+            /*
+            | Enough for the wizard to say "Motive connected, importing your
+            | fleet" instead of a bare tick. The sync runs on a queue, so the
+            | carrier reaches the next step while it is still going.
+            */
+            'eld' => $this->whenLoaded('eldConnection', fn () => [
+                'provider' => $this->eldConnection->provider_name
+                    ?? $this->eldConnection->provider_code,
+                'status' => $this->eldConnection->status,
+                'sync_status' => $this->eldConnection->sync_status,
+                'last_synced_at' => $this->eldConnection->last_synced_at?->toIso8601String(),
+                'vehicles' => $this->eldConnection->vehicles()->count(),
+                'drivers' => $this->eldConnection->drivers()->count(),
+            ]),
             'factoring_answered' => $this->factoring_answered_at !== null,
             'questionnaire_completed' => $this->questionnaire_completed_at !== null,
             'documents_completed' => $this->documents_completed_at !== null,
@@ -299,6 +323,7 @@ class CarrierConnectRequestResource extends JsonResource
             'phone' => $this->mobile_verified_at !== null,
             'identity' => $this->didit_status === 'Approved',
             'bank' => $this->stripe_verified_at !== null,
+            'eld' => $this->eld_connection_id !== null,
             'questionnaire' => $this->questionnaire_completed_at !== null,
             'documents' => $this->documents_completed_at !== null,
             'agreement' => $this->signed_at !== null,
@@ -307,6 +332,7 @@ class CarrierConnectRequestResource extends JsonResource
         $skipped = [
             'identity' => $this->identity_skipped_at !== null,
             'bank' => $this->bank_skipped_at !== null,
+            'eld' => $this->eld_skipped_at !== null,
         ];
 
         $number = 0;
