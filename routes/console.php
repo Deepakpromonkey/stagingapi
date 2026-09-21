@@ -43,29 +43,6 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 
 /*
 |--------------------------------------------------------------------------
-| ELD / telematics
-|--------------------------------------------------------------------------
-|
-| Refreshes the fleets of carriers that are actually under load. Terminal bills
-| for data synced rather than for vehicles and drivers held, so polling every
-| carrier who ever finished onboarding would run up a bill for fleets nobody is
-| looking at — the command scopes itself to carriers with an active shipment and
-| goes quiet again when the load is delivered.
-|
-| The first import after a carrier connects does not come from here: it is
-| dispatched on the spot by the Link exchange. Nor does the routine case of new
-| data arriving — Terminal's sync.completed and vehicle.added webhooks queue a
-| pass as it happens. This is the floor under both of those, for the connection
-| whose webhook was never delivered.
-|
-*/
-Schedule::command('eld:sync-active')
-    ->hourly()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-/*
-|--------------------------------------------------------------------------
 | Queue
 |--------------------------------------------------------------------------
 |
@@ -80,12 +57,12 @@ Schedule::command('eld:sync-active')
 |
 | --stop-when-empty means this normally exits in well under a second and does
 | nothing at all when there is nothing to do. If it dies, the next minute
-| starts a fresh one — which is more supervision than it had before.
+| starts a fresh one - which is more supervision than it had before.
 |
 | `default` is named first because Laravel drains queues in order, and a broker
-| waiting on a request should not queue behind a VIN batch or a fleet import.
-| `eld` is last for the same reason: a first sync after a carrier connects can
-| run for minutes on a large fleet, and nothing is waiting on it. The connection
+| waiting on a request should not queue behind a VIN batch. `eld` is named last
+| for the same reason, and is the heaviest of the three: one first sync
+| backfills a month of duty-status logs for an entire fleet. The connection is
 | named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
 | would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
 |
@@ -121,21 +98,20 @@ Schedule::command('coi:expire-requests')
     ->onOneServer();
 
 /*
-| Asks the silent agencies again.
+|--------------------------------------------------------------------------
+| ELD / telematics
+|--------------------------------------------------------------------------
 |
-| Hourly rather than daily because the interval it enforces is measured in
-| hours: a daily run would turn a 24-hour cadence into anything between 24 and
-| 48 depending on when the request happened to be raised. The command itself
-| decides what is due, so running it often is cheap and running it rarely is
-| what loses the cadence.
+| Terminal's webhooks are what normally moves a fleet forward; this is the
+| backstop for the deliveries that never arrive — an endpoint that was down, a
+| provider that went quiet, a connection made while the webhook was
+| misconfigured. Nothing else would notice any of those.
+|
+| Hourly rather than by the minute: `resync_after_minutes` decides what is
+| actually stale, and this only queues what has crossed it.
+|
 */
-Schedule::command('coi:chase-requests')
+Schedule::command('eld:sync --stale')
     ->hourly()
     ->withoutOverlapping()
-    ->onOneServer();
-
-
-Schedule::command('eld:poll-shipments')
-    ->everyMinute()
-    ->withoutOverlapping(5)
     ->onOneServer();

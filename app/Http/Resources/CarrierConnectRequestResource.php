@@ -4,8 +4,6 @@ namespace App\Http\Resources;
 
 use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
-use App\Models\Eld\EldConnection;
-use App\Services\Eld\EldConnectionService;
 use App\Services\Carrier\CarrierAccountService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -27,21 +25,21 @@ class CarrierConnectRequestResource extends JsonResource
         'phone' => 'Phone number',
         'identity' => 'Government ID',
         'bank' => 'Bank account',
-        'eld' => 'ELD / telematics',
+        'eld' => 'ELD connection',
         'questionnaire' => 'Broker questions',
         'documents' => 'Documents',
         'agreement' => 'Carrier agreement',
     ];
 
     /*
-    | The three a carrier may move past without completing. The phone check,
-    | the questionnaire and the agreement are not skippable: the first is what
+    | The three a carrier may move past without completing. The phone check, the
+    | questionnaire and the agreement are not skippable: the first is what
     | proves we are talking to the carrier, and the other two are the broker's
     | own requirements.
     |
-    | The ELD belongs here rather than with them: plenty of carriers run a
-    | provider Terminal cannot reach, and a step they physically cannot finish
-    | must not be the thing that ends their onboarding.
+    | ELD is skippable because Terminal does not cover every provider, and a
+    | carrier running one we cannot reach must not be locked out of onboarding
+    | over the limits of our integration.
     */
     private const SKIPPABLE = ['identity', 'bank', 'eld'];
 
@@ -130,50 +128,29 @@ class CarrierConnectRequestResource extends JsonResource
             'bank_skipped' => $this->bank_skipped_at !== null,
             'eld_skipped' => $this->eld_skipped_at !== null,
 
-            // A connection the carrier made, then their provider dropped, is
-            // not a connection any more — the wizard has to be able to offer
-            // re-authentication rather than showing a tick.
-            'eld_connected' => $this->eld_connected_at !== null
-                && $this->eldConnection?->status === EldConnection::STATUS_CONNECTED,
-
             // What the wizard gates on: done, or deliberately passed over.
             'identity_settled' => $this->didit_status === 'Approved'
                 || $this->identity_skipped_at !== null,
             'bank_settled' => $this->stripe_verified_at !== null
                 || $this->bank_skipped_at !== null,
-            'eld_settled' => $this->eld_connected_at !== null
+            'eld_connected' => $this->eld_connection_id !== null,
+            'eld_settled' => $this->eld_connection_id !== null
                 || $this->eld_skipped_at !== null,
 
             /*
-            | What the ELD tile reads. The fleet arrives on a queue after the
-            | Link flow returns, so the carrier reaches the next step while it
-            | is still importing — `sync_status` is what lets the tile say so
-            | instead of showing a tick beside an empty fleet.
-            |
-            | The connection token is never part of this: it is hidden on the
-            | model and has no business leaving the server.
+            | Enough for the wizard to say "Motive connected, importing your
+            | fleet" instead of a bare tick. The sync runs on a queue, so the
+            | carrier reaches the next step while it is still going.
             */
-            /*
-            | A live connection this carrier made during another broker's
-            | onboarding, which this broker has not been granted yet. Present
-            | only until they are: after that it is simply their connection and
-            | `eld` below describes it.
-            |
-            | The wizard uses this to offer one-click sharing instead of sending
-            | the carrier back through their provider's login for a connection
-            | that already exists.
-            */
-            'eld_shareable' => $this->shareable(),
-
-            'eld' => $this->whenLoaded('eldConnection', fn () => $this->eldConnection ? [
-                'provider' => $this->eldConnection->provider,
+            'eld' => $this->whenLoaded('eldConnection', fn () => [
+                'provider' => $this->eldConnection->provider_name
+                    ?? $this->eldConnection->provider_code,
                 'status' => $this->eldConnection->status,
                 'sync_status' => $this->eldConnection->sync_status,
-                'vehicles' => $this->eldConnection->vehicle_count,
-                'drivers' => $this->eldConnection->driver_count,
-                'last_sync_at' => $this->eldConnection->last_sync_at,
-            ] : null),
-
+                'last_synced_at' => $this->eldConnection->last_synced_at?->toIso8601String(),
+                'vehicles' => $this->eldConnection->vehicles()->count(),
+                'drivers' => $this->eldConnection->drivers()->count(),
+            ]),
             'factoring_answered' => $this->factoring_answered_at !== null,
             'questionnaire_completed' => $this->questionnaire_completed_at !== null,
             'documents_completed' => $this->documents_completed_at !== null,
@@ -346,7 +323,7 @@ class CarrierConnectRequestResource extends JsonResource
             'phone' => $this->mobile_verified_at !== null,
             'identity' => $this->didit_status === 'Approved',
             'bank' => $this->stripe_verified_at !== null,
-            'eld' => $this->eld_connected_at !== null,
+            'eld' => $this->eld_connection_id !== null,
             'questionnaire' => $this->questionnaire_completed_at !== null,
             'documents' => $this->documents_completed_at !== null,
             'agreement' => $this->signed_at !== null,
@@ -387,31 +364,6 @@ class CarrierConnectRequestResource extends JsonResource
             })
             ->values()
             ->all();
-    }
-
-    /**
-     * The connection this carrier already has that this broker cannot yet see.
-     *
-     * Skipped entirely once the step is settled, so a carrier who connected or
-     * deliberately declined is never shown it.
-     */
-    private function shareable(): ?array
-    {
-        if ($this->eld_connected_at !== null || $this->eld_skipped_at !== null) {
-            return null;
-        }
-
-        $connection = app(EldConnectionService::class)->shareableFor($this->resource);
-
-        if (! $connection) {
-            return null;
-        }
-
-        return [
-            'provider' => $connection->provider,
-            'vehicles' => $connection->vehicle_count,
-            'drivers' => $connection->driver_count,
-        ];
     }
 
     /**
