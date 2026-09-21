@@ -19,19 +19,26 @@ use Illuminate\Support\Facades\Cache;
  *   points <  10,000 ->  54 .. 19   status Unacceptable-Review
  *   points >= 10,000 ->  18 ..  0   status Unacceptable-Fail
  *
- * v3.2 adds AUTH-11 (revocation proceedings that never completed),
- * AUTH-12 (carrier + broker authority on the same DOT), INS-13 (a
- * feed-consistency flag that carries no points), INSP-02 (thin roadside
- * history), INSP-03 (stale roadside history) and tiered NET-04 VIN
- * sharing.
+ * v3.3 adds affiliate handling on NET rules (name-stem exclusion +
+ * large-fleet demotion), fleet-normalised CR-01, and an active-broker
+ * gate on INS-04.
+ *
+ * v3.2 adds AUTH-11 (revocation proceedings), AUTH-12 (dual authority),
+ * INS-13 (feed-consistency flag), INSP-02 (thin history), INSP-03 (stale
+ * history), and tiered NET-04 VIN sharing.
  *
  * Missing data abstains — it never fires a rule and never counts as clean.
  * Unknown inputs lower data confidence, which caps the score instead.
  *
- * Installed on CarrierController via `use DtTrustScoreV3;`. Rollback is the
- * two call sites: change dtCalculateTrustScore() back to
- * calculateCarrierTrustScore(), which stays untouched alongside
- * checkKnockout().
+ * INSTALL (two lines, one call):
+ *
+ *   1. use App\Http\Controllers\Carrier\Concerns\DtTrustScoreV3;   // imports
+ *   2. use DtTrustScoreV3;                                          // in class body
+ *   3. at the call site (~L3358):
+ *        $trustScore = $this->dtCalculateTrustScore(   // was calculateCarrierTrustScore(
+ *      Same 17 arguments, same order. Rollback = change that one call back.
+ *
+ * The old calculateCarrierTrustScore() / checkKnockout() stay untouched.
  *
  * This trait leans on members that already exist on CarrierController and
  * will fail loudly at boot if they are removed: SMS_BASICS,
@@ -48,8 +55,7 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     | Entry Point
     |--------------------------------------------------------------------------
-    | Same arguments, same order, as calculateCarrierTrustScore() — including
-    | the trailing optional $inspectionCount the shortlist call site passes.
+    | Same 17 arguments, same order, as calculateCarrierTrustScore().
     */
 
     private function dtCalculateTrustScore(
@@ -69,9 +75,7 @@ trait DtTrustScoreV3
         $crashesTotal,
         $crashFatalities,
         $crashInjuries,
-        $crashesTowAway,
-        ?int $inspectionCount = null,
-        $lastInspectionDate = null
+        $crashesTowAway
     ) {
         /*
         |--------------------------------------------------------------------------
@@ -79,28 +83,11 @@ trait DtTrustScoreV3
         |--------------------------------------------------------------------------
         */
 
-        /*
-        | The shortlist counts inspection rows in SQL and hands the total in,
-        | precisely so this path never hydrates them — the busiest carrier in
-        | the feed has 22,482. Fall back to the relation only when no count
-        | was passed (the profile, where it is already loaded).
-        */
-
-        $inspectionTotal = $inspectionCount ?? $carrier->inspections->count();
-
-        /*
-        | Authority age in days is read once, here, rather than per group:
-        | the authority group needs it for the 30/90-day lines and AUTH-12's
-        | escalation, the inspection group needs it to tell an established
-        | carrier from a new one, and dtAuthorityAgeDays() walks the whole
-        | authorityHistory relation to find it.
-        */
-
         $ageDays = $this->dtAuthorityAgeDays($carrier);
 
         $groups = [
 
-            'authority_compliance' => $this->dtEvaluateAuthority($carrier, $detail, $auth, $dotAge, $observedUnits, $ageDays, $authorityAgeCommon),
+            'authority_compliance' => $this->dtEvaluateAuthority($carrier, $detail, $auth, $dotAge, $observedUnits, $ageDays),
 
             'insurance_financial' => $this->dtEvaluateInsurance($carrier, $auth),
 
@@ -108,11 +95,11 @@ trait DtTrustScoreV3
 
             'crash_history' => $this->dtEvaluateCrash($carrier, $crashesTotal, $crashFatalities, $crashInjuries, $crashesTowAway),
 
-            'inspection_quality' => $this->dtEvaluateInspection($carrier, $sms, $inspectionTotal, $ageDays, $lastInspectionDate),
+            'inspection_quality' => $this->dtEvaluateInspection($carrier, $sms, $ageDays),
 
-            'identity_fraud' => $this->dtEvaluateIdentity($carrier, $detail),
+            'identity_fraud' => $this->dtEvaluateIdentity($carrier, $detail, $ageDays),
 
-            'operations_experience' => $this->dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers, $inspectionTotal),
+            'operations_experience' => $this->dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers),
 
         ];
 
@@ -182,8 +169,7 @@ trait DtTrustScoreV3
             $sms,
             $auth,
             $dotAge,
-            $mcs150Year,
-            $inspectionTotal
+            $mcs150Year
         );
 
         if (! $fail && $confidenceCap !== null && $score > $confidenceCap) {
@@ -269,11 +255,11 @@ trait DtTrustScoreV3
 
             'pillars' => $fail ? [] : $this->dtLegacyPillars($groups),
 
-            'model_version' => 'dt-trust-v3.2-motus',
+            'model_version' => 'dt-trust-v3.3-motus',
 
             'v3' => [
 
-                'model_version' => 'dt-trust-v3.2-motus',
+                'model_version' => 'dt-trust-v3.3-motus',
 
                 'risk_points' => $riskPoints,
 
@@ -312,23 +298,15 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateAuthority($carrier, $detail, $auth, $dotAge, $observedUnits, $ageDays, $authorityAgeCommon = null): array
+    private function dtEvaluateAuthority($carrier, $detail, $auth, $dotAge, $observedUnits, $ageDays): array
     {
         $g = $this->dtGroup();
 
         /*
         | Authority status — 'A' / 'I' / 'N' since the Motus load, but SAFER
         | responses and older rows also carry 'ACTIVE' and 'AUTHORIZED FOR
-        | Property'.
-        |
-        | AUTH-01 fires only when BOTH statuses are positively inactive.
-        | Anything less is not a clearance: per the breakdown §3 ("if either
-        | is blank/unreadable, the rule abstains and the score caps at 84
-        | instead — unknown != inactive") and §6 ("no usable authority row at
-        | all, or one status readable, one not"), an unreadable status caps
-        | at 84 and raises authority_record_missing for manual review. An
-        | active common authority alongside a blank contract status is still
-        | a half-read record, so it caps too.
+        | Property'. Fire only when BOTH statuses are positively inactive;
+        | one unknown means the rule abstains and the score caps instead.
         */
 
         $common = $this->dtAuthorityActive($auth?->common_stat);
@@ -343,21 +321,23 @@ trait DtTrustScoreV3
 
             $g['flags'][] = 'authority_record_missing';
 
-        } elseif ($common === false && $contract === false) {
+        } elseif ($common !== true && $contract !== true && ($common === false || $contract === false)) {
 
-            $this->dtFire($g, 'AUTH-01', 'fail', 'Common and Contract Authority are both inactive.', [
-                'code' => 'AUTHORITY_INACTIVE',
-                'message' => 'Common and Contract Authority are both inactive.',
-            ]);
+            if ($common === false && $contract === false) {
 
-        } elseif ($common === null || $contract === null) {
+                $this->dtFire($g, 'AUTH-01', 'fail', 'Common and Contract Authority are both inactive.', [
+                    'code' => 'AUTHORITY_INACTIVE',
+                    'message' => 'Common and Contract Authority are both inactive.',
+                ]);
 
-            // Exactly one status readable — abstain on AUTH-01, but cap.
-            $g['unknown'][] = 'authority_status_partial';
+            } else {
 
-            $g['caps'][] = ['cap' => 84, 'reason' => 'Authority status partially unreadable.'];
+                // One inactive, one unreadable — abstain but cap.
+                $g['unknown'][] = 'authority_status_partial';
 
-            $g['flags'][] = 'authority_record_missing';
+                $g['caps'][] = ['cap' => 84, 'reason' => 'Authority status partially unreadable.'];
+
+            }
 
         }
 
@@ -476,14 +456,14 @@ trait DtTrustScoreV3
 
         /*
         |--------------------------------------------------------------------------
-        | Revocation Proceedings — the near-misses (AUTH-11)
+        | Revocation PROCEEDINGS — the near-misses (AUTH-11)
         |--------------------------------------------------------------------------
-        | An involuntary revocation proceeding that is DISCONTINUED days
-        | later is an insurance or BOC-3 lapse cured right at the deadline.
-        | Completed revocations belong to AUTH-09; this counts proceedings
-        | INITIATED in the last 36 months that never completed. They scored
-        | zero before, because 'DISCONTINUED REVOCATION' never matched
-        | AUTH-09's REVOK pattern — REVOC is not REVOK.
+        | An involuntary revocation proceeding that gets DISCONTINUED days
+        | later is an insurance or BOC-3 lapse cured at the deadline.
+        | Completed revocations belong to AUTH-09; this rule counts
+        | proceedings INITIATED in the last 36 months that did not
+        | complete. ('DISCONTINUED REVOCATION' never matched AUTH-09's
+        | REVOK pattern — REVOC != REVOK — so these scored zero before.)
         */
 
         $cutoff36 = now()->subMonths(36);
@@ -507,8 +487,6 @@ trait DtTrustScoreV3
             })
             ->count();
 
-        $g['params']['revocation_proceedings_36mo'] = $proceedings;
-
         if ($proceedings >= 4) {
             $this->dtFire($g, 'AUTH-11', 'review', $proceedings.' involuntary revocation proceedings initiated in the last 36 months.');
         } elseif ($proceedings >= 2) {
@@ -519,13 +497,13 @@ trait DtTrustScoreV3
 
         /*
         |--------------------------------------------------------------------------
-        | Carrier + Broker Authority on one DOT — re-brokering risk (AUTH-12)
+        | Dual Carrier + Broker Authority — re-brokering risk (AUTH-12)
         |--------------------------------------------------------------------------
         | Legal and common, so never an automatic Fail: the risk is the
-        | paper-carrier pattern, not the authority itself. Base Medium, and
-        | Review when the equipment story does not hold up — nothing ever
-        | seen at roadside, authority under 180 days, or a reported fleet of
-        | one or two trucks.
+        | paper-carrier pattern, not the authority itself. Base Medium;
+        | escalates to Review when the equipment story doesn't hold up
+        | (nothing ever observed at roadside, authority under 180 days,
+        | or a reported fleet of 1-2 trucks).
         */
 
         if ($this->dtAuthorityActive($auth?->broker_stat) === true && ($common === true || $contract === true)) {
@@ -537,7 +515,7 @@ trait DtTrustScoreV3
                 || ($reportedPu > 0 && $reportedPu <= 2);
 
             if ($escalate) {
-                $this->dtFire($g, 'AUTH-12', 'review', 'Carrier and broker authority on one DOT, with re-brokering risk markers.');
+                $this->dtFire($g, 'AUTH-12', 'review', 'Dual carrier + broker authority with re-brokering risk markers.');
             } else {
                 $this->dtFire($g, 'AUTH-12', 'medium', 'Active broker authority alongside carrier authority.');
             }
@@ -602,7 +580,7 @@ trait DtTrustScoreV3
             'active_oos_orders' => $activeOos,
             'revocation_count' => $revocations,
             'suspension_orders' => $suspensions,
-            'authority_age_common_years' => $authorityAgeCommon,
+            'authority_age_common_years' => $authorityAgeCommon ?? null,
         ];
 
         return $g;
@@ -679,14 +657,14 @@ trait DtTrustScoreV3
 
         /*
         |--------------------------------------------------------------------------
-        | Feed Consistency Alarm (INS-13) — a flag, never points
+        | Feed Consistency Alarm (INS-13) — flag, never points
         |--------------------------------------------------------------------------
         | The authority row says BIPD is on file, BIPD filings exist in the
-        | table, and yet none of them is live. FMCSA revokes a genuinely
-        | lapsed carrier within ~60 days, so this shape nearly always means
-        | the filings ingest is stale rather than that the carrier is bare.
-        | Unverifiable data goes to a human; it does not move the score in
-        | either direction.
+        | table, yet none of them is live. FMCSA revokes genuinely lapsed
+        | carriers within ~60 days, so this shape almost always means the
+        | filings ingest is stale (Warrior: cancellation captured
+        | 2025-07-07, the same-day replacement filing never ingested).
+        | Unverifiable data gets flagged for a human, not scored.
         */
 
         if (
@@ -724,12 +702,16 @@ trait DtTrustScoreV3
         |--------------------------------------------------------------------------
         | Bond
         |--------------------------------------------------------------------------
-        | Deliberately demoted from a knockout to Low: BMC-84/85 bonds bind
-        | brokers and forwarders, not motor carriers, so a bond-only gap is
-        | a finding, not a disqualifier. (Score lands ~84.)
+        | Low, not a knockout — BMC-84/85 bonds bind brokers and forwarders.
+        | v3.3: gated on the broker authority being ACTIVE. The verification
+        | pack showed bond_req persisting on carriers whose broker authority
+        | is inactive (Kreilkamp, broker 'I') or absent (Killingsworth,
+        | broker 'N') — requiring a bond for authority nobody operates is a
+        | stale flag, not a finding.
         */
 
         if (
+            $this->dtAuthorityActive($auth?->broker_stat) === true &&
             $this->dtFlagValue($auth?->bond_req) === true &&
             ($this->dtOnFileAmount($auth?->bond_file) ?? 0) <= 0 &&
             ! $this->hasInsuranceFiling($carrier, 'bond')
@@ -913,30 +895,6 @@ trait DtTrustScoreV3
 
                     $over[] = $basic;
 
-                }
-
-            }
-
-            $g['params']['basics_over_threshold'] = count($over);
-
-            /*
-            | One BASIC over is a Medium finding in its own right. Two or
-            | more is SMS-MULTI *instead* — the single hard stop replaces
-            | the per-BASIC rules rather than stacking on top of them, so
-            | rules_fired reads as one reason and not three.
-            */
-
-            if (count($over) >= 2) {
-
-                $this->dtFire($g, 'SMS-MULTI', 'fail', 'Two or more BASICs at or above the intervention threshold.', [
-                    'code' => 'MULTIPLE_BASIC_THRESHOLDS',
-                    'message' => count($over).' BASICs at or above the intervention threshold.',
-                ]);
-
-            } else {
-
-                foreach ($over as $basic) {
-
                     $this->dtFire(
                         $g,
                         'SMS-'.strtoupper($basic),
@@ -945,6 +903,28 @@ trait DtTrustScoreV3
                     );
 
                 }
+
+            }
+
+            $g['params']['basics_over_threshold'] = count($over);
+
+            if (count($over) >= 2) {
+
+                /*
+                | TEMPORARY DEMOTION (v3.2.1): Review, not Fail. Our cuts are
+                | one national sort; FMCSA percentiles are computed within
+                | safety event groups, and at low inspection counts FMCSA
+                | assigns no percentile at all (DOT 3175931: 5 inspections,
+                | measures 7.82 / 15, no FMCSA percentile possible — our
+                | engine disqualified it, Highway passed it, both wrong).
+                | An unappealable Fail is only defensible on faithful input.
+                | RESTORE to 'fail' the day carrier:refresh-benchmarks emits
+                | peer-grouped 65/80 cuts — that word is the whole change.
+                */
+                $this->dtFire($g, 'SMS-MULTI', 'review', 'Two or more BASICs at or above the intervention threshold.', [
+                    'code' => 'MULTIPLE_BASIC_THRESHOLDS',
+                    'message' => count($over).' BASICs at or above the intervention threshold.',
+                ]);
 
             }
 
@@ -1056,11 +1036,30 @@ trait DtTrustScoreV3
 
         $tow24 = $recent->where('tow_away', true)->count();
 
-        if ($fatal24 >= 1) {
-            $this->dtFire($g, 'CR-01', 'review', 'Fatal crash within the last 24 months.');
-        }
-
         $powerUnits = (int) ($carrier->nbr_power_unit ?? 0);
+
+        /*
+        | CR-01, v3.3: fleet-normalised. "Any fatal in 24 months = Review"
+        | put every mega-fleet in permanent Review (Kaplan, 867 units, is
+        | near the statistical baseline with 1-2). Small fleets and high
+        | fatal RATES stay Review; a large fleet at baseline rate takes
+        | Medium — and every fatal raises a standing flag either way, so
+        | the broker always sees it.
+        */
+
+        if ($fatal24 >= 1) {
+
+            $g['flags'][] = 'fatal_crash_24mo';
+
+            $fatalRateHigh = $powerUnits > 0 && ($fatal24 / $powerUnits) >= 0.005;   // 1+ per 200 units per 24mo
+
+            if ($powerUnits < 100 || $fatalRateHigh) {
+                $this->dtFire($g, 'CR-01', 'review', 'Fatal crash within the last 24 months.');
+            } else {
+                $this->dtFire($g, 'CR-01', 'medium', 'Fatal crash within the last 24 months (large fleet, baseline rate).');
+            }
+
+        }
 
         $ratePerUnitYear = ($powerUnits > 0) ? round(($count24 / $powerUnits) / 2, 3) : null;
 
@@ -1109,14 +1108,14 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateInspection($carrier, $sms, int $inspectionTotal, $ageDays = null, $lastInspectionDate = null): array
+    private function dtEvaluateInspection($carrier, $sms, $ageDays): array
     {
         $g = $this->dtGroup();
 
         $inspTotal = (int) ($sms?->insp_total ?? 0);
 
         if ($inspTotal === 0) {
-            $inspTotal = $inspectionTotal;
+            $inspTotal = $carrier->inspections->count();
         }
 
         /*
@@ -1150,12 +1149,12 @@ trait DtTrustScoreV3
         |--------------------------------------------------------------------------
         | Roadside History Depth & Freshness (INSP-02 / INSP-03)
         |--------------------------------------------------------------------------
-        | INSP-02: an established authority (12+ months) with fewer than
-        | five inspections. That narrows the sufficiency cliff from 83-vs-100
+        | INSP-02: an established authority (>12 months) with fewer than
+        | five inspections — narrows the sufficiency cliff from 83-vs-100
         | to 83-vs-94, because "not enough history to judge" is itself a
         | finding on a carrier that has had a year to accumulate some.
-        | INSP-03: history exists, but the newest inspection is over a year
-        | old — running with no recent roadside contact at all.
+        | INSP-03: history exists but the newest inspection is over a year
+        | old — operating with no recent roadside contact.
         */
 
         $established = $ageDays !== null && $ageDays > 365;
@@ -1164,41 +1163,34 @@ trait DtTrustScoreV3
             $this->dtFire($g, 'INSP-02', 'low', 'Fewer than five roadside inspections despite 12+ months of authority.');
         }
 
-        /*
-        | The newest roadside date, from whichever source the caller has:
-        | the shortlist reads MAX(insp_date) in the same grouped query that
-        | counts the rows, the profile already has the relation loaded.
-        | Neither path hydrates inspections just to read one column.
-        */
+        $lastInspDays = null;
 
-        $latest = null;
+        if ($carrier->inspections->count() >= 1) {
 
-        if ($lastInspectionDate !== null && $lastInspectionDate !== '') {
-
-            $latest = Fmcsa::date($lastInspectionDate);
-
-        } elseif ($carrier->relationLoaded('inspections')) {
+            $latest = null;
 
             foreach ($carrier->inspections->all() as $inspection) {
 
                 $date = Fmcsa::date($inspection->insp_date);
 
-                if ($date !== null && ($latest === null || $date->gte($latest))) {
+                if ($date && ($latest === null || $date->gte($latest))) {
                     $latest = $date;
                 }
 
             }
 
-        }
+            if ($latest !== null) {
+                $lastInspDays = (int) $latest->diffInDays(now());
+            }
 
-        $lastInspDays = $latest !== null ? (int) $latest->diffInDays(now()) : null;
+            if ($established) {
 
-        if ($established && $inspTotal > 0) {
+                if ($latest === null) {
+                    $g['unknown'][] = 'last_inspection_date';
+                } elseif ($lastInspDays > 365) {
+                    $this->dtFire($g, 'INSP-03', 'low', 'No roadside inspection in the last 12 months.');
+                }
 
-            if ($lastInspDays === null) {
-                $g['unknown'][] = 'last_inspection_date';
-            } elseif ($lastInspDays > 365) {
-                $this->dtFire($g, 'INSP-03', 'low', 'No roadside inspection in the last 12 months.');
             }
 
         }
@@ -1219,9 +1211,22 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateIdentity($carrier, $detail): array
+    private function dtEvaluateIdentity($carrier, $detail, $ageDays): array
     {
         $g = $this->dtGroup();
+
+        /*
+        | v3.3: the chameleon shape is small and young. A 50+ unit fleet
+        | with 5+ years of authority sharing identifiers is a corporate
+        | family, not a reincarnation — the verification pack had Kaplan
+        | (867 units, 52 years) at Review off its own affiliates. Large
+        | established fleets take Medium instead of Review on NET rules;
+        | everyone else keeps the full tiers.
+        */
+
+        $largeEstablished = ((int) ($carrier->nbr_power_unit ?? 0)) >= 50
+            && $ageDays !== null
+            && $ageDays >= 1825;
 
         /*
         | Internal block / fraud reports — the columns don't exist yet, and
@@ -1290,25 +1295,35 @@ trait DtTrustScoreV3
                 }
 
                 if ($count >= 3) {
-                    $this->dtFire($g, $id, 'review', sprintf($label, $count));
+
+                    if ($largeEstablished) {
+                        $this->dtFire($g, $id, 'medium', sprintf($label, $count), [
+                            'note' => 'Demoted from Review: established fleet of 50+ units.',
+                        ]);
+                    } else {
+                        $this->dtFire($g, $id, 'review', sprintf($label, $count));
+                    }
+
                 } elseif ($count === 2) {
                     $this->dtFire($g, $id, 'low', sprintf($label, $count));
                 }
 
             }
 
-            /*
-            | Shared roadside VINs, tiered: two other DOTs on the same
-            | truck is a leased unit or a clerical slip, five is a fleet
-            | being run under somebody else's numbers.
-            */
-
             $vinShared = $network['vin'] ?? null;
 
             if ($vinShared !== null) {
 
                 if ($vinShared >= 5) {
-                    $this->dtFire($g, 'NET-04', 'review', 'Roadside VINs shared with '.$vinShared.' other carriers.');
+
+                    if ($largeEstablished) {
+                        $this->dtFire($g, 'NET-04', 'medium', 'Roadside VINs shared with '.$vinShared.' other carriers.', [
+                            'note' => 'Demoted from Review: established fleet of 50+ units.',
+                        ]);
+                    } else {
+                        $this->dtFire($g, 'NET-04', 'review', 'Roadside VINs shared with '.$vinShared.' other carriers.');
+                    }
+
                 } elseif ($vinShared >= 3) {
                     $this->dtFire($g, 'NET-04', 'medium', 'Roadside VINs shared with '.$vinShared.' other carriers.');
                 } elseif ($vinShared === 2) {
@@ -1365,7 +1380,7 @@ trait DtTrustScoreV3
     |--------------------------------------------------------------------------
     */
 
-    private function dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers, int $inspectionTotal): array
+    private function dtEvaluateOperations($carrier, $detail, $dotAge, $mcs150Year, $observedUnits, $observedTrailers): array
     {
         $g = $this->dtGroup();
 
@@ -1396,7 +1411,9 @@ trait DtTrustScoreV3
 
         $reportedUnits = (int) ($carrier->nbr_power_unit ?? 0);
 
-        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionTotal >= 5) {
+        $inspectionCount = $carrier->inspections->count();
+
+        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionCount >= 5) {
 
             $this->dtFire($g, 'OPS-11', 'low', 'Reported power units, none observed at roadside.');
 
@@ -1517,11 +1534,6 @@ trait DtTrustScoreV3
     /**
      * Latest uncancelled filing amount for a coverage kind, in DOLLARS
      * (the filing columns store thousands). Null when no matching filing.
-     *
-     * "Latest" is by effective_date, not by amount: a carrier can leave an
-     * older, larger, still-uncancelled filing on record, and ranking by
-     * amount would quietly score that stale number instead of the coverage
-     * actually in force — which is what INS-02 is asking about.
      */
     private function dtLatestFilingAmount($carrier, string $kind): ?float
     {
@@ -1535,7 +1547,7 @@ trait DtTrustScoreV3
 
                 return Fmcsa::date($f->cancl_effective_date)?->isFuture() ?? false;
             })
-            ->sortByDesc(fn ($f) => Fmcsa::dateKey($f->effective_date))
+            ->sortByDesc(fn ($f) => (float) ($f->max_cov_amount ?? $f->min_cov_amount ?? 0))
             ->first();
 
         if ($filing === null) {
@@ -1592,66 +1604,107 @@ trait DtTrustScoreV3
             return null;
         }
 
+        /*
+        | v3.3: affiliate exclusion. DOTs whose legal_name shares this
+        | carrier's name stem (KAPLAN TRUCKING / KAPLAN LOGISTICS at one
+        | HQ) are family, not chameleons — reincarnated carriers pick
+        | UNRELATED names on purpose, so openly name-linked sharing is
+        | weak fraud evidence. Needs an index on carriers.legal_name.
+        */
+
+        $stem = $this->dtNameStem($carrier->legal_name);
+
+        $stemLike = $stem !== null ? addcslashes($stem, '\\%_').'%' : null;
+
         try {
 
-            return Cache::remember('dt:trust:net:'.$dot, 21600, function () use ($carrier, $dot) {
+            return Cache::remember('dt:trust:net:v2:'.$dot, 21600, function () use ($carrier, $dot, $stemLike) {
 
                 $phone = null;
 
                 if (! empty($carrier->telephone)) {
-                    $phone = (int) Carrier::query()
+
+                    $q = Carrier::query()
                         ->where('telephone', $carrier->telephone)
-                        ->where('dot_number', '<>', $dot)
-                        ->distinct()
-                        ->count('dot_number');
+                        ->where('dot_number', '<>', $dot);
+
+                    if ($stemLike !== null) {
+                        $q->where('legal_name', 'NOT LIKE', $stemLike);
+                    }
+
+                    $phone = (int) $q->distinct()->count('dot_number');
                 }
 
                 $email = null;
 
                 if (! empty($carrier->email_address)) {
-                    $email = (int) Carrier::query()
+
+                    $q = Carrier::query()
                         ->where('email_address', $carrier->email_address)
-                        ->where('dot_number', '<>', $dot)
-                        ->distinct()
-                        ->count('dot_number');
+                        ->where('dot_number', '<>', $dot);
+
+                    if ($stemLike !== null) {
+                        $q->where('legal_name', 'NOT LIKE', $stemLike);
+                    }
+
+                    $email = (int) $q->distinct()->count('dot_number');
                 }
 
                 $address = null;
 
                 if (! empty($carrier->phy_street) && strlen(trim((string) $carrier->phy_street)) > 5) {
-                    $address = (int) Carrier::query()
+
+                    $q = Carrier::query()
                         ->where('phy_state', $carrier->phy_state)
                         ->where('phy_city', $carrier->phy_city)
                         ->where('phy_street', $carrier->phy_street)
-                        ->where('dot_number', '<>', $dot)
-                        ->distinct()
-                        ->count('dot_number');
+                        ->where('dot_number', '<>', $dot);
+
+                    if ($stemLike !== null) {
+                        $q->where('legal_name', 'NOT LIKE', $stemLike);
+                    }
+
+                    $address = (int) $q->distinct()->count('dot_number');
                 }
 
                 $vin = null;
 
-                /*
-                | Use the relation when the profile has already loaded it,
-                | and pull the bare column otherwise — the shortlist leaves
-                | inspections unloaded on purpose, and hydrating them here
-                | just to read one field undoes that.
-                */
-
-                $vins = ($carrier->relationLoaded('inspections')
-                        ? $carrier->inspections->pluck('vin')
-                        : Inspection::query()
-                            ->where('dot_number', $dot)
-                            ->pluck('vin'))
+                $vins = $carrier->inspections
+                    ->pluck('vin')
                     ->filter(fn ($v) => strlen((string) $v) === 17)
                     ->unique()
                     ->take(200);
 
                 if ($vins->isNotEmpty()) {
-                    $vin = (int) Inspection::query()
+
+                    /*
+                    | COUNT(DISTINCT dot_number) here makes MySQL take a
+                    | loose index scan on idx_dot_vin_type, whose leading
+                    | column is dot_number — 2.35M index entries, measured
+                    | at 12.3s for five VINs and ~300s for a 200-VIN fleet
+                    | (DOT 120670). Selecting the distinct dot_numbers
+                    | instead lets the optimiser use idx_vin (11 rows,
+                    | under 10ms) and the row set is small enough to count
+                    | in PHP. The limit is a backstop, not a filter: past
+                    | it the tier is already pinned at the top band.
+                    | Pre-dates v3.3 — the affiliate subquery below costs
+                    | 46 rows on idx_legal and was never the bottleneck.
+                    */
+
+                    $q = Inspection::query()
+                        ->select('dot_number')
                         ->whereIn('vin', $vins->all())
-                        ->where('dot_number', '<>', $dot)
-                        ->distinct()
-                        ->count('dot_number');
+                        ->where('dot_number', '<>', $dot);
+
+                    if ($stemLike !== null) {
+                        $q->whereNotIn('dot_number', function ($sub) use ($stemLike) {
+                            $sub->select('dot_number')
+                                ->from('carriers')
+                                ->where('legal_name', 'LIKE', $stemLike);
+                        });
+                    }
+
+                    $vin = $q->distinct()->limit(5000)->pluck('dot_number')->count();
                 }
 
                 return ['phone' => $phone, 'email' => $email, 'address' => $address, 'vin' => $vin];
@@ -1661,6 +1714,29 @@ trait DtTrustScoreV3
 
             return null;
         }
+    }
+
+    /**
+     * Affiliate name stem: uppercase, punctuation stripped, leading
+     * article (THE/A/AN) dropped, first token kept when it is 4+
+     * characters. Shorter or absent stems return null and the network
+     * counts run unfiltered — conservative in the fraud direction.
+     */
+    private function dtNameStem($name): ?string
+    {
+        $name = strtoupper(trim((string) ($name ?? '')));
+
+        $name = preg_replace('/[^A-Z0-9 ]+/', ' ', $name);
+
+        $tokens = array_values(array_filter(explode(' ', (string) $name)));
+
+        if (isset($tokens[0]) && in_array($tokens[0], ['THE', 'A', 'AN'], true)) {
+            array_shift($tokens);
+        }
+
+        $stem = $tokens[0] ?? '';
+
+        return strlen($stem) >= 4 ? $stem : null;
     }
 
     /*
@@ -1781,12 +1857,12 @@ trait DtTrustScoreV3
      * actually populated. The caps are the v1.1 starting shape and are
      * UNCALIBRATED — run 20-30 known carriers before trusting them.
      */
-    private function dtDataConfidence($carrier, $detail, $sms, $auth, $dotAge, $mcs150Year, int $inspectionTotal): array
+    private function dtDataConfidence($carrier, $detail, $sms, $auth, $dotAge, $mcs150Year): array
     {
         $inspTotal = (int) ($sms?->insp_total ?? 0);
 
         if ($inspTotal === 0) {
-            $inspTotal = $inspectionTotal;
+            $inspTotal = $carrier->inspections->count();
         }
 
         $inputs = [
