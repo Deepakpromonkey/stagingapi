@@ -23,6 +23,13 @@ use Illuminate\Support\Facades\Log;
  */
 class EldTrackingService
 {
+    /**
+     * How close counts as "arrived" at origin or destination. 1 mile —
+     * tight enough to be meaningful, loose enough to absorb GPS drift and a
+     * large facility yard without missing the crossing.
+     */
+    private const GEOFENCE_RADIUS_MILES = 1.0;
+
     public function __construct(private TerminalClient $terminal) {}
 
     /**
@@ -116,24 +123,91 @@ class EldTrackingService
 
             $written++;
 
-            /*
-            | last_ping_at is the column the control tower and the stale-load
-            | alerting already watch, filled by the driver app on a phone-
-            | tracked load. Writing it here is what makes an ELD load visible to
-            | both without either of them learning what an ELD is.
-            |
-            | The provider's timestamp, not ours: a truck parked in a yard with
-            | a two hour old position has not pinged, and stamping now() would
-            | tell the alerting otherwise.
-            */
+            $lat = data_get($row, 'location.latitude');
+            $lng = data_get($row, 'location.longitude');
+
             foreach ($byVehicle->get($vehicleId, collect()) as $shipment) {
+                $updates = [];
+
+                /*
+                | last_ping_at is the column the control tower and the
+                | stale-load alerting already watch, filled by the driver app
+                | on a phone-tracked load. Writing it here is what makes an
+                | ELD load visible to both without either of them learning
+                | what an ELD is.
+                |
+                | The provider's timestamp, not ours: a truck parked in a yard
+                | with a two hour old position has not pinged, and stamping
+                | now() would tell the alerting otherwise.
+                */
                 if (! $shipment->last_ping_at || $locatedAt->greaterThan($shipment->last_ping_at)) {
-                    $shipment->forceFill(['last_ping_at' => $locatedAt])->save();
+                    $updates['last_ping_at'] = $locatedAt;
+                }
+
+                if ($lat !== null && $lng !== null) {
+                    $updates += $this->arrivalUpdates($shipment, (float) $lat, (float) $lng, $locatedAt);
+                }
+
+                if ($updates !== []) {
+                    $shipment->forceFill($updates)->save();
                 }
             }
         }
 
         return $written;
+    }
+
+    /**
+     * Which of the two milestone columns this ping crosses, if either —
+     * empty if neither, so the caller can merge this straight into whatever
+     * else is being written for the shipment this cycle without an extra
+     * round trip.
+     *
+     * Written once and never cleared: a truck that arrives, repositions
+     * within the yard and drifts back out past the radius has still arrived
+     * — the first crossing is the event, not a live in/out flag.
+     *
+     * Silently does nothing for a shipment with no origin/destination
+     * coordinates — a broker who typed an address by hand instead of picking
+     * it from the map autocomplete has nothing here to geofence against.
+     */
+    private function arrivalUpdates(Shipment $shipment, float $lat, float $lng, Carbon $locatedAt): array
+    {
+        $updates = [];
+
+        if (! $shipment->arrived_at_origin_at
+            && $shipment->origin_lat !== null
+            && $shipment->origin_lng !== null
+            && $this->milesBetween($lat, $lng, $shipment->origin_lat, $shipment->origin_lng) <= self::GEOFENCE_RADIUS_MILES) {
+            $updates['arrived_at_origin_at'] = $locatedAt;
+        }
+
+        if (! $shipment->arrived_at_destination_at
+            && $shipment->destination_lat !== null
+            && $shipment->destination_lng !== null
+            && $this->milesBetween($lat, $lng, $shipment->destination_lat, $shipment->destination_lng) <= self::GEOFENCE_RADIUS_MILES) {
+            $updates['arrived_at_destination_at'] = $locatedAt;
+        }
+
+        return $updates;
+    }
+
+    /**
+     * Great-circle distance in miles — the Haversine formula, accurate
+     * enough for a "did the truck reach the yard" check without needing a
+     * geo library for one call site.
+     */
+    private function milesBetween(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $earthRadiusMiles = 3958.8;
+
+        $deltaLat = deg2rad($lat2 - $lat1);
+        $deltaLng = deg2rad($lng2 - $lng1);
+
+        $a = sin($deltaLat / 2) ** 2
+            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($deltaLng / 2) ** 2;
+
+        return $earthRadiusMiles * 2 * atan2(sqrt($a), sqrt(1 - $a));
     }
 
     /**

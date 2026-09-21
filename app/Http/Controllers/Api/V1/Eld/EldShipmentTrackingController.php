@@ -161,6 +161,14 @@ class EldShipmentTrackingController extends BaseController
             'tracking_started_at' => optional($shipment->eld_tracking_started_at)->toIso8601String(),
             'tracking_stopped_at' => optional($shipment->eld_tracking_stopped_at)->toIso8601String(),
 
+            // One of Shipment::MILESTONES, or null before tracking starts /
+            // after a cancel. See Shipment::eldMilestone() — the same method
+            // the public tracking endpoint calls, so the two can never
+            // disagree about what stage a load is in.
+            'milestone' => $shipment->eldMilestone(),
+            'arrived_at_origin_at' => optional($shipment->arrived_at_origin_at)->toIso8601String(),
+            'arrived_at_destination_at' => optional($shipment->arrived_at_destination_at)->toIso8601String(),
+
             // How often the poller asks Terminal for this load — the UI's
             // "pings every N min" line reads off the broker's own choice at
             // booking, not a hardcoded number.

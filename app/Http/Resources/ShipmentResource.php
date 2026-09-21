@@ -46,6 +46,10 @@ class ShipmentResource extends JsonResource
             'delivery_time' => $this->delivery_time,
             'delivery_timezone' => $this->delivery_timezone,
 
+            'milestone' => $this->eldMilestone(),
+            'arrived_at_origin_at' => $this->arrived_at_origin_at?->toIso8601String(),
+            'arrived_at_destination_at' => $this->arrived_at_destination_at?->toIso8601String(),
+
             // The link to hand the customer. Built the same way every other
             // customer-facing link in this app is (see InvitationService,
             // CarrierConnectController) — config('app.frontend_url') plus a

@@ -15,14 +15,13 @@ use App\Models\Shipment;
  * carrier, the driver, or this broker's internal ids — only what a shipper
  * needs in order to know where their freight is.
  *
- * "Picked up" as its own step does not exist here on purpose, not by
- * omission. Distinguishing it from "in transit" needs the truck's position
- * checked against the origin's coordinates, and origin is a free-text string
- * ("Dallas, TX") with no coordinates behind it — there is nothing to geofence
- * against yet. Faking a step neither side of the API can actually tell apart
- * would be worse than not having it. Three real states are returned —
- * pending, in_transit, delivered — plus cancelled; a fourth can follow once
- * origin/destination are geocoded.
+ * `state` is the coarse status (pending/in_transit/delivered/cancelled);
+ * `milestone` is the finer-grained stage within in_transit — one of
+ * Shipment::MILESTONES, via Shipment::eldMilestone() (see there for why
+ * arrived_at_origin/destination only populate for a load whose origin and
+ * destination were picked from the map autocomplete, not typed by hand).
+ * The same method backs the broker's own /eld/track endpoint, so the two
+ * views can never disagree about what stage a load is in.
  */
 class PublicShipmentTrackingController extends BaseController
 {
@@ -55,6 +54,16 @@ class PublicShipmentTrackingController extends BaseController
             return $base + ['state' => 'cancelled'];
         }
 
+        // Milestone data goes out on every non-cancelled state, delivered
+        // included — a completed load's whole point on this page is showing
+        // the finished journey, all four steps checked off, not just the
+        // fact that it's done.
+        $base += [
+            'milestone' => $shipment->eldMilestone(),
+            'arrived_at_origin_at' => optional($shipment->arrived_at_origin_at)->toIso8601String(),
+            'arrived_at_destination_at' => optional($shipment->arrived_at_destination_at)->toIso8601String(),
+        ];
+
         if ($shipment->status === 'completed') {
             return $base + [
                 'state' => 'delivered',
@@ -66,6 +75,12 @@ class PublicShipmentTrackingController extends BaseController
 
         return $base + [
             'state' => $shipment->eld_tracking_started_at ? 'in_transit' : 'pending',
+
+            // What the page's own poll rate is paced against — no reason to
+            // ask more often than the broker's own chosen tracking
+            // frequency could possibly produce something new.
+            'tracking_interval_seconds' => (int) $shipment->tracking_interval_seconds,
+
             'current' => $this->currentPosition($shipment),
         ];
     }

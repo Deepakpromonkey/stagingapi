@@ -58,6 +58,8 @@ class Shipment extends Model
     'eld_driver_terminal_id',
     'eld_tracking_started_at',
     'eld_tracking_stopped_at',
+    'arrived_at_origin_at',
+    'arrived_at_destination_at',
     ];
 
     protected $casts = [
@@ -76,7 +78,17 @@ class Shipment extends Model
         'last_alert_sent_at' => 'datetime',
         'eld_tracking_started_at' => 'datetime',
         'eld_tracking_stopped_at' => 'datetime',
+        'arrived_at_origin_at' => 'datetime',
+        'arrived_at_destination_at' => 'datetime',
     ];
+
+    /**
+     * The four stages a broker or customer can see on an ELD load, in order.
+     * Shared by EldShipmentTrackingController and PublicShipmentTrackingController
+     * so the broker's view and the customer's view can never disagree about
+     * what stage a load is in — both just call eldMilestone().
+     */
+    public const MILESTONES = ['arrived_at_origin', 'in_transit', 'arrived_at_destination', 'delivered'];
 
     public function company()
     {
@@ -168,6 +180,37 @@ public function scopeEldTracking($query)
         ->whereNotNull('eld_vehicle_terminal_id')
         ->whereNotNull('eld_tracking_started_at')
         ->whereNull('eld_tracking_stopped_at');
+}
+
+/**
+ * The current stage in self::MILESTONES, or null if there's nothing to
+ * show yet (never started, or cancelled — a cancelled load's outcome is
+ * already said by `status`, not by how far it got).
+ *
+ * Deliberately doesn't distinguish "not started" from "started but not yet
+ * near origin" — both read as the first milestone still pending, which is
+ * exactly what a broker who just pressed Start should see: nothing achieved
+ * yet, working toward the first one.
+ */
+public function eldMilestone(): ?string
+{
+    if ($this->status === 'completed') {
+        return 'delivered';
+    }
+
+    if ($this->status !== 'active') {
+        return null;
+    }
+
+    if ($this->arrived_at_destination_at) {
+        return 'arrived_at_destination';
+    }
+
+    if ($this->arrived_at_origin_at) {
+        return 'in_transit';
+    }
+
+    return 'arrived_at_origin';
 }
 
 }
