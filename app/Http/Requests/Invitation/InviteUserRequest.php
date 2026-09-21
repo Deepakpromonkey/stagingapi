@@ -54,13 +54,14 @@ class InviteUserRequest extends FormRequest
                 Rule::unique('users', 'email')
                     ->whereNull('deleted_at'),
 
-                // Email should not already have a pending invitation
+                // Email should not already have a pending invitation.
                 Rule::unique('invitations', 'email')
                     ->whereNull('accepted_at'),
             ],
 
             'role_id' => [
                 'required',
+
                 // Broker guard only — carrier seats live in the same table.
                 Rule::exists('roles', 'id')
                     ->where('is_active', true)

@@ -35,6 +35,22 @@ trait PortableMigrations
     ];
 
     /**
+     * Migrations that build schema on the `external_db` connection.
+     *
+     * `migrate:fresh` does not point these at the test database — they name
+     * their connection explicitly — so running them in a test issues DDL
+     * against the real external host, which fails on the second run and has
+     * no business being attempted from a test suite at all.
+     *
+     * Keep this in step with:
+     *
+     *   grep -rl "Schema::connection('external_db')" database/migrations
+     */
+    protected array $externalConnectionMigrations = [
+        '2026_08_31_123853_create_zip_centroids_table.php',
+    ];
+
+    /**
      * RefreshDatabase hands these straight to `migrate:fresh`.
      */
     protected function migrateFreshUsing()
@@ -62,7 +78,12 @@ trait PortableMigrations
         }
 
         foreach (glob($source.'/*.php') as $migration) {
-            if (in_array(basename($migration), $this->mysqlOnlyMigrations, true)) {
+            $skipped = array_merge(
+                $this->mysqlOnlyMigrations,
+                $this->externalConnectionMigrations,
+            );
+
+            if (in_array(basename($migration), $skipped, true)) {
                 continue;
             }
 

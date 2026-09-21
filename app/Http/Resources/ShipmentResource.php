@@ -29,7 +29,42 @@ class ShipmentResource extends JsonResource
             'tracking_method' => $this->tracking_method,
             'country_code' => $this->country_code,
             'tracking_number' => $this->tracking_number,
- 
+
+            // Route — an ELD load has no trip sheet, so these two strings are
+            // its only record of where the freight was going.
+            'origin' => $this->origin,
+            'origin_lat' => $this->origin_lat,
+            'origin_lng' => $this->origin_lng,
+            'destination' => $this->destination,
+            'destination_lat' => $this->destination_lat,
+            'destination_lng' => $this->destination_lng,
+
+            'pickup_date' => $this->pickup_date?->toDateString(),
+            'pickup_time' => $this->pickup_time,
+            'pickup_timezone' => $this->pickup_timezone,
+            'delivery_date' => $this->delivery_date?->toDateString(),
+            'delivery_time' => $this->delivery_time,
+            'delivery_timezone' => $this->delivery_timezone,
+
+            'milestone' => $this->eldMilestone(),
+            'arrived_at_origin_at' => $this->arrived_at_origin_at?->toIso8601String(),
+            'arrived_at_destination_at' => $this->arrived_at_destination_at?->toIso8601String(),
+
+            // The link to hand the customer. Built the same way every other
+            // customer-facing link in this app is (see InvitationService,
+            // CarrierConnectController) — config('app.frontend_url') plus a
+            // path, never hardcoded.
+            'public_tracking_url' => $this->tracking_token
+                ? rtrim((string) config('app.frontend_url'), '/').'/track/'.$this->tracking_token
+                : null,
+
+            // ELD binding
+            'eld_connection_uuid' => $this->eldConnection?->uuid,
+            'eld_vehicle_terminal_id' => $this->eld_vehicle_terminal_id,
+            'eld_driver_terminal_id' => $this->eld_driver_terminal_id,
+            'eld_tracking_started_at' => $this->eld_tracking_started_at,
+            'eld_tracking_stopped_at' => $this->eld_tracking_stopped_at,
+
             // Driver
             'truck_number' => $this->truck_number,
             'trailer_number' => $this->trailer_number,
