@@ -74,14 +74,7 @@ class UserService
 
             $target->fill(
                 collect($data)
-                    ->only([
-                        'first_name',
-                        'last_name',
-                        'phone',
-                        'country_code',
-                        'designation',
-                        'status',
-                    ])
+                    ->only(['first_name', 'last_name', 'phone', 'country_code', 'designation', 'status'])
                     ->toArray()
             )->save();
 
@@ -131,7 +124,7 @@ class UserService
             // removed by mistake could never be invited back. Tombstone it
             // instead: the original is still legible in the value, and the
             // live address is released.
-            $target->email = Str::limit('deleted+' . $target->id . '+' . $target->email, 255, '');
+            $target->email = Str::limit('deleted+'.$target->id.'+'.$target->email, 255, '');
 
             $target->save();
 

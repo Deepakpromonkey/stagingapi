@@ -10,10 +10,6 @@ use Illuminate\Foundation\Http\FormRequest;
  * The allowed set is closed deliberately. Phone verification, the broker's
  * questionnaire and the agreement are not skippable, so they must not be
  * reachable by passing a different value here.
- *
- * The ELD is skippable because a carrier whose provider Terminal cannot reach
- * has no way to complete it, and an onboarding that dead-ends on a step nobody
- * can finish is worse than one that records the refusal.
  */
 class CarrierSkipStepRequest extends FormRequest
 {
@@ -30,6 +26,7 @@ class CarrierSkipStepRequest extends FormRequest
                 'string',
                 'size:64',
             ],
+
             'step' => [
                 'required',
                 'string',

@@ -18,17 +18,13 @@ class UserResource extends JsonResource
             'last_name' => $this->last_name,
             'email' => $this->email,
             'phone' => $this->phone,
-
-            // Added in main branch.
             'country_code' => $this->country_code,
-
             'designation' => $this->designation,
             'is_owner' => $this->is_owner,
             'status' => $this->status,
-
             'profile_image' => $this->profile_image
-                ? Storage::disk('s3')->url($this->profile_image)
-                : null,
+             ? Storage::disk('s3')->url($this->profile_image)
+             : null,
 
             // True while the user is still on the temporary password from
             // their invitation email — the client should route them to the

@@ -19,7 +19,7 @@ class CarrierBlockedController extends Controller
         // belongsTo cannot match the rows back without it.
         $blockedList = CarrierBlocked::where('company_id', $request->user()->company_id)
             ->with([
-                'carrier:' . implode(',', [
+                'carrier:'.implode(',', [
                     'id',
                     'row_id',
                     'dot_number',
@@ -43,7 +43,7 @@ class CarrierBlockedController extends Controller
             $carrier = $entry->carrier?->toArray() ?? [];
 
             $carrier['blocked_by'] = $entry->user
-                ? trim($entry->user->first_name . ' ' . $entry->user->last_name)
+                ? trim($entry->user->first_name.' '.$entry->user->last_name)
                 : null;
 
             $carrier['blocked_at'] = $entry->created_at?->format('m/d/y');
@@ -67,31 +67,21 @@ class CarrierBlockedController extends Controller
 
         // `carriers` is a view that derives row_id as CAST(dot_number AS CHAR),
         // so `where row_id = ?` cannot use the dot_number index and scans the
-        // whole census file. resolveIdFromRowId matches on dot_number instead
-        // and caches the answer.
+        // whole census file — ~21s per block. resolveIdFromRowId matches on
+        // dot_number instead and caches the answer, which is what made this
+        // endpoint slow.
         $carrierId = Carrier::resolveIdFromRowId($request->row_id);
 
         if (! $carrierId) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Carrier not found in system.',
-            ], 404);
+            return response()->json(['status' => 'error', 'message' => 'Carrier not found in system.'], 404);
         }
 
         CarrierBlocked::updateOrCreate(
-            [
-                'company_id' => $request->user()->company_id,
-                'carrier_id' => $carrierId,
-            ],
-            [
-                'user_id' => $request->user()->id,
-            ]
+            ['company_id' => $request->user()->company_id, 'carrier_id' => $carrierId],
+            ['user_id' => $request->user()->id]
         );
 
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Carrier blocked successfully.',
-        ]);
+        return response()->json(['status' => 'success', 'message' => 'Carrier blocked successfully.']);
     }
 
     // 3. DELETE API to unblock a carrier
@@ -101,23 +91,17 @@ class CarrierBlockedController extends Controller
             'row_id' => 'required|string',
         ]);
 
-        // Same indexed lookup as store().
+        // Same indexed lookup as store() — see the note there.
         $carrierId = Carrier::resolveIdFromRowId($request->row_id);
 
         if (! $carrierId) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Carrier not found in system.',
-            ], 404);
+            return response()->json(['status' => 'error', 'message' => 'Carrier not found in system.'], 404);
         }
 
         CarrierBlocked::where('company_id', $request->user()->company_id)
             ->where('carrier_id', $carrierId)
             ->delete();
 
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Carrier removed from blocklist.',
-        ]);
+        return response()->json(['status' => 'success', 'message' => 'Carrier removed from blocklist.']);
     }
 }

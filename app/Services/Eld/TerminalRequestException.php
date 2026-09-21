@@ -5,10 +5,26 @@ namespace App\Services\Eld;
 use RuntimeException;
 
 /**
- * A Terminal call that failed in a way a sync cannot carry on through.
- *
- * Thrown rather than returned so a half-read fleet never gets written as if it
- * were the whole fleet — the job fails, the checkpoint is left where it was,
- * and the next run picks up from the same place.
+ * A non-2xx from Terminal. Carries the status and body so the caller can log
+ * something useful instead of "request failed".
  */
-class TerminalRequestException extends RuntimeException {}
+class TerminalRequestException extends RuntimeException
+{
+    public function __construct(
+        string $message,
+        public readonly int $status = 0,
+        public readonly string $body = ''
+    ) {
+        parent::__construct($message);
+    }
+
+    public function context(): array
+    {
+        return [
+            'status' => $this->status,
+
+            // Enough to identify the failure without pasting a fleet into the log.
+            'body' => mb_substr($this->body, 0, 1000),
+        ];
+    }
+}
