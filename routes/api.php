@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\V1\CarrierPortal\CarrierProfileController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierUserController;
 use App\Http\Controllers\Api\V1\CarrierReportController;
 use App\Http\Controllers\Api\V1\CarrierShortlistController;
+use App\Http\Controllers\Api\V1\AdvancedSearch\AdvancedCarrierSearchController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
 use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
 use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
@@ -70,7 +71,7 @@ Route::prefix('v1')->group(function () {
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
-    // The pricing table shown right after signup. Public, because the plan
+       // The pricing table shown right after signup. Public, because the plan
     // screen renders before the new account has finished authenticating.
     Route::get('/subscription/plans', [SubscriptionController::class, 'plans']);
 
@@ -99,6 +100,9 @@ Route::prefix('v1')->group(function () {
 
     Route::post('/signup/otp/verify', [SignupOtpController::class, 'verify'])
         ->middleware('throttle:20,1');
+
+    // PHMSA, SmartWay, CARB compliance list import
+    Route::post('/carrier-compliance/import', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'importCsv']);
 
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
@@ -291,6 +295,8 @@ Route::prefix('v1')->group(function () {
 
         // csv import + export carriers
        Route::post('/carriers/bulk-import', [\App\Http\Controllers\Api\V1\CarrierImportController::class, 'bulkImport']);
+
+      
        
        Route::get('/carriers/export', [\App\Http\Controllers\Api\V1\CarrierExportController::class, 'export']);
 
@@ -384,7 +390,7 @@ Route::prefix('v1')->group(function () {
 
         Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
             Route::post('/shipments', [ShipmentController::class, 'store']);
-            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']);
+            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']); 
         });
 
         /*
@@ -399,6 +405,8 @@ Route::prefix('v1')->group(function () {
 
         // Carrier search (reads the EC2 carrier database)
         Route::get('/carrier/search', [CarrierController::class, 'search']);
+ 
+        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 
@@ -413,6 +421,9 @@ Route::prefix('v1')->group(function () {
                 ->where('dot', '[0-9]+');
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
+
+             // Check DOT compliance (PHMSA, CARB, SmartWay)
+            Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
 
         });
 
