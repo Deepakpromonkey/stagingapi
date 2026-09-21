@@ -19,10 +19,10 @@ use App\Http\Controllers\Api\V1\Company\CompanyController;
 use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
 use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
 use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
+use App\Http\Controllers\Api\V1\Eld\TerminalWebhookController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
 use App\Http\Controllers\Api\V1\Notification\NotificationController;
-use App\Http\Controllers\Api\V1\Eld\TerminalWebhookController;
 use App\Http\Controllers\Api\V1\Ocr\OcrController;
 use App\Http\Controllers\Api\V1\Role\RoleController;
 use App\Http\Controllers\Api\V1\Shipment\ShipmentController;
@@ -32,6 +32,12 @@ use App\Http\Controllers\Api\V1\Subscription\StripeWebhookController;
 use App\Http\Controllers\Api\V1\Subscription\SubscriptionController;
 use App\Http\Controllers\Api\V1\User\UserController;
 use App\Http\Controllers\Carrier\CarrierController;
+
+use App\Http\Controllers\Api\V1\ContactController;
+use App\Http\Controllers\Api\V1\Eld\EldFleetController;
+use App\Http\Controllers\Api\V1\Eld\EldShipmentTrackingController;
+use App\Http\Controllers\Api\V1\Public\PublicShipmentTrackingController;
+
 use App\Http\Controllers\CarrierQuestionController;
 use App\Http\Controllers\SearchHistoryController;
 use App\Http\Controllers\Api\V1\Driver\DriverAuthController;
@@ -69,18 +75,23 @@ Route::prefix('v1')->group(function () {
     Route::post('/signup', [AuthController::class, 'signup']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
-
-    /*
-    | Terminal (ELD) webhooks. Public because Terminal has no session here —
-    | authenticity is the Svix signature, checked before the body is read. No
-    | throttle: throttling a webhook means Terminal retries, which arrives as
-    | more of the same traffic.
-    */
-    Route::post('/webhooks/terminal', TerminalWebhookController::class);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
-       // The pricing table shown right after signup. Public, because the plan
+    Route::post('/contact-us', [ContactController::class, 'store']);
+
+    /*
+    | The customer-facing tracking link. No auth, no company scoping — the
+    | token itself is the only credential, which is exactly why it is rate
+    | limited here rather than trusting the default api throttle: this is the
+    | one route in the app a stranger is expected to call, and it should stay
+    | that way rather than becoming a scraping target.
+    */
+    Route::middleware('throttle:30,1')->group(function () {
+        Route::get('/public/tracking/{token}', [PublicShipmentTrackingController::class, 'show']);
+    });
+
+    // The pricing table shown right after signup. Public, because the plan
     // screen renders before the new account has finished authenticating.
     Route::get('/subscription/plans', [SubscriptionController::class, 'plans']);
 
@@ -112,7 +123,6 @@ Route::prefix('v1')->group(function () {
 
     // PHMSA, SmartWay, CARB compliance list import
     Route::post('/carrier-compliance/import', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'importCsv']);
-
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
         Route::post('/verify-forgot-password-otp', [PasswordResetController::class, 'verifyResetOtp']);
@@ -150,6 +160,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
             Route::post('/eld/connect', [CarrierConnectController::class, 'connectEld']);
             Route::post('/eld/verify', [CarrierConnectController::class, 'verifyEld']);
+            Route::post('/eld/share', [CarrierConnectController::class, 'shareEld']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
             Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);
@@ -173,6 +184,24 @@ Route::prefix('v1')->group(function () {
     });
 
     /*
+
+
+    | Terminal (ELD / telematics) events.
+    |
+    | Server to server, so no session and no invitation token — the Svix
+    | signature on the request is what authorises it, and the handler rejects
+    | anything it cannot verify. Outside the carrier-connect group because these
+    | keep arriving long after an onboarding is finished: a connection that
+    | breaks a year later is reported here.
+    |
+    | Deliberately unthrottled. Terminal retries anything that is not answered
+    | 2xx, so a rate limit would turn a burst into a retry storm; the handler is
+    | idempotent on the event id instead.
+    */
+    Route::post('/eld/terminal/webhook', [TerminalWebhookController::class, 'handle']);
+
+    /*
+
     | Driver app.
     |
     | Drivers sign in with their phone number and a texted code — there is no
@@ -297,7 +326,6 @@ Route::prefix('v1')->group(function () {
         | NotificationController.
         */
         Route::get('/notifications', [NotificationController::class, 'index']);
-
         // Session
         Route::get('/me', [AuthController::class, 'me']);
         Route::post('/logout', [AuthController::class, 'logout']);
@@ -307,7 +335,10 @@ Route::prefix('v1')->group(function () {
         // csv import + export carriers
        Route::post('/carriers/bulk-import', [\App\Http\Controllers\Api\V1\CarrierImportController::class, 'bulkImport']);
 
+
       
+
+
        
        Route::get('/carriers/export', [\App\Http\Controllers\Api\V1\CarrierExportController::class, 'export']);
 
@@ -399,10 +430,39 @@ Route::prefix('v1')->group(function () {
             Route::get('/shipment-templates/{tracking_number}', [ShipmentTemplateController::class, 'show']);
         });
 
+
+
+
+                /*
+        | ELD tracking. Fleet reads are gated on booking, not viewing: the only
+        | screen that opens these dropdowns is the new-load modal, and a seat
+        | that cannot book a load has nothing to do with them.
+        */
+        Route::middleware(PermissionMiddleware::using('book-assign-loads'))
+            ->prefix('eld')
+            ->group(function () {
+                Route::get('/carriers', [EldFleetController::class, 'carriers']);
+                Route::get('/carriers/{connectionUuid}/fleet', [EldFleetController::class, 'fleet']);
+            });
+
+        Route::middleware(PermissionMiddleware::using('view-loads-tracking'))->group(function () {
+            Route::get('/shipments/{uuid}/eld/track', [EldShipmentTrackingController::class, 'track']);
+        });
+
+        Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
+            Route::post('/shipments/{uuid}/eld/start', [EldShipmentTrackingController::class, 'start']);
+            Route::post('/shipments/{uuid}/eld/stop', [EldShipmentTrackingController::class, 'stop']);
+        });
+
+
+
+
+
         Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
             Route::post('/shipments', [ShipmentController::class, 'store']);
-            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']); 
+            Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']);
         });
+
 
         /*
         | Broker side of the shipment chat. Gated on seeing the load at all —
@@ -416,8 +476,13 @@ Route::prefix('v1')->group(function () {
 
         // Carrier search (reads the EC2 carrier database)
         Route::get('/carrier/search', [CarrierController::class, 'search']);
+
  
-        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
+        // Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
+
+        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter'])
+        ->middleware('throttle:10,1');
+
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 
@@ -433,9 +498,8 @@ Route::prefix('v1')->group(function () {
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
 
-             // Check DOT compliance (PHMSA, CARB, SmartWay)
+            // Check DOT compliance (PHMSA, CARB, SmartWay)
             Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
-
         });
 
         // OCR
@@ -450,6 +514,16 @@ Route::prefix('v1')->group(function () {
         Route::get('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'index']);
         Route::post('/carrier-insurance-requests', [CarrierInsuranceRequestController::class, 'store']);
         Route::get('/carrier-insurance-requests/responses/{uuid}', [CarrierInsuranceRequestController::class, 'response']);
+        Route::get('/carrier-insurance-requests/{uuid}/thread', [CarrierInsuranceRequestController::class, 'thread']);
+
+        /*
+        | The certificate an agency attached to its reply. Streamed through the
+        | API rather than served off a public bucket URL — a carrier's COI is
+        | not something to leave behind an unauthenticated link.
+        */
+        Route::get('/carrier-insurance-requests/attachments/{uuid}', [CarrierInsuranceRequestController::class, 'attachment']);
+        Route::post('/carriers/{dot}/coverage-check', [CarrierInsuranceRequestController::class, 'coverageCheck'])
+            ->where('dot', '[0-9]+');
         Route::get('/carriers/{dot}/insurance-request', [CarrierInsuranceRequestController::class, 'show'])
             ->where('dot', '[0-9]+');
 

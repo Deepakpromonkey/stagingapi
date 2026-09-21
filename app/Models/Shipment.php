@@ -11,6 +11,7 @@ class Shipment extends Model
 
     protected $fillable = [
         'uuid',
+        'tracking_token',
         'company_id',
         'created_by',
         'updated_by',
@@ -38,17 +39,56 @@ class Shipment extends Model
         'email_updates_to',
         'notes',
         'status',
+        'origin',
+    'origin_lat',
+    'origin_lng',
+    'destination',
+    'destination_lat',
+    'destination_lng',
+    'pickup_date',
+    'pickup_time',
+    'pickup_timezone',
+    'delivery_date',
+    'delivery_time',
+    'delivery_timezone',
+    'eld_connection_id',
+    'eld_vehicle_id',
+    'eld_driver_id',
+    'eld_vehicle_terminal_id',
+    'eld_driver_terminal_id',
+    'eld_tracking_started_at',
+    'eld_tracking_stopped_at',
+    'arrived_at_origin_at',
+    'arrived_at_destination_at',
     ];
 
     protected $casts = [
         'team_load' => 'boolean',
         'tracking_start_at' => 'datetime',
+        'pickup_date' => 'date',
+        'delivery_date' => 'date',
+        'origin_lat' => 'float',
+        'origin_lng' => 'float',
+        'destination_lat' => 'float',
+        'destination_lng' => 'float',
         'tracking_interval_seconds' => 'integer',
         // TELL LARAVEL TO HANDLE THIS AS AN ARRAY
         'email_updates_to' => 'array',
         'last_ping_at' => 'datetime',
         'last_alert_sent_at' => 'datetime',
+        'eld_tracking_started_at' => 'datetime',
+        'eld_tracking_stopped_at' => 'datetime',
+        'arrived_at_origin_at' => 'datetime',
+        'arrived_at_destination_at' => 'datetime',
     ];
+
+    /**
+     * The four stages a broker or customer can see on an ELD load, in order.
+     * Shared by EldShipmentTrackingController and PublicShipmentTrackingController
+     * so the broker's view and the customer's view can never disagree about
+     * what stage a load is in — both just call eldMilestone().
+     */
+    public const MILESTONES = ['arrived_at_origin', 'in_transit', 'arrived_at_destination', 'delivered'];
 
     public function company()
     {
@@ -110,4 +150,67 @@ class Shipment extends Model
             }
         });
     }
+
+  public function eldConnection()
+{
+    return $this->belongsTo(\App\Models\Eld\EldConnection::class, 'eld_connection_id');
+}
+
+public function eldVehicle()
+{
+    return $this->belongsTo(\App\Models\Eld\EldVehicle::class, 'eld_vehicle_id');
+}
+
+public function eldDriver()
+{
+    return $this->belongsTo(\App\Models\Eld\EldDriver::class, 'eld_driver_id');
+}
+
+/**
+ * Loads the ELD poller is responsible for.
+ *
+ * Started and not yet stopped. A draft has no vehicle bound to it and a
+ * delivered load's truck has moved on to somebody else's freight — polling
+ * either would be paying Terminal for a position nobody is watching.
+ */
+public function scopeEldTracking($query)
+{
+    return $query->where('tracking_method', 'eld')
+        ->whereNotNull('eld_connection_id')
+        ->whereNotNull('eld_vehicle_terminal_id')
+        ->whereNotNull('eld_tracking_started_at')
+        ->whereNull('eld_tracking_stopped_at');
+}
+
+/**
+ * The current stage in self::MILESTONES, or null if there's nothing to
+ * show yet (never started, or cancelled — a cancelled load's outcome is
+ * already said by `status`, not by how far it got).
+ *
+ * Deliberately doesn't distinguish "not started" from "started but not yet
+ * near origin" — both read as the first milestone still pending, which is
+ * exactly what a broker who just pressed Start should see: nothing achieved
+ * yet, working toward the first one.
+ */
+public function eldMilestone(): ?string
+{
+    if ($this->status === 'completed') {
+        return 'delivered';
+    }
+
+    if ($this->status !== 'active') {
+        return null;
+    }
+
+    if ($this->arrived_at_destination_at) {
+        return 'arrived_at_destination';
+    }
+
+    if ($this->arrived_at_origin_at) {
+        return 'in_transit';
+    }
+
+    return 'arrived_at_origin';
+}
+
 }

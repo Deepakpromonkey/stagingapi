@@ -1,0 +1,547 @@
+<?php
+
+namespace App\Services\Eld;
+
+use App\Jobs\SyncEldConnection;
+use App\Models\CarrierConnectRequest;
+use App\Models\Eld\EldConnection;
+use App\Models\Eld\EldConnectionGrant;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+/**
+ * The rules around a carrier's ELD connection.
+ *
+ * Terminal is reached through TerminalClient; everything about who owns a
+ * connection, who may see it, and what happens when it breaks lives here.
+ *
+ * The shape worth understanding before reading on: a connection belongs to the
+ * CARRIER and is shared across every broker they work with, while consent is
+ * per broker and recorded as a grant. That is what stops the same fleet being
+ * imported — and metered — once per broker relationship.
+ */
+class EldConnectionService
+{
+    /**
+     * How long a Link state nonce is good for. Long enough for a carrier to
+     * find their provider password, short enough that a return URL left in a
+     * browser history is worthless.
+     */
+    private const STATE_TTL_MINUTES = 60;
+
+    public function __construct(private TerminalClient $terminal) {}
+
+    public function isConfigured(): bool
+    {
+        return $this->terminal->isConfigured();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Opening the Link page
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The URL to send this carrier to, and the state that has to come back.
+     *
+     * A carrier whose connection has gone stale is sent to the re-auth page for
+     * the connection they already have, not to a fresh flow — a new connection
+     * to the same provider account would either be deduped into the old one or,
+     * worse, become a second billable copy of the same fleet.
+     *
+     * `$forkOnExternalId` is the shared-login escape hatch, and the only reason
+     * to send an external id at all. Two of our carriers occasionally sit
+     * behind one provider login; left alone Terminal resolves that login to a
+     * single connection covering both, which breaks the one-connection-per-
+     * carrier rule the rest of this service is built on. Passing true forks
+     * them deliberately. Pair it with non-overlapping vehicle include lists,
+     * set before the first sync: metering is per vehicle per connection, so two
+     * connections cost nothing extra as long as no truck lands on both.
+     */
+    public function linkUrlFor(
+        CarrierConnectRequest $connectRequest,
+        string $redirectUrl,
+        bool $forkOnExternalId = false,
+    ): ?string {
+        if (! $this->isConfigured()) {
+            Log::error('Terminal is not configured; cannot open the ELD Link page.');
+
+            return null;
+        }
+
+        $state = Str::random(48);
+
+        $connectRequest->forceFill([
+            'eld_link_state' => $state,
+            'eld_link_state_at' => now(),
+        ])->save();
+
+        $template = $connectRequest->company?->eld_consent_template;
+
+        $existing = $this->existingConnectionFor($connectRequest);
+
+        if ($existing && $existing->status === EldConnection::STATUS_DISCONNECTED) {
+            return $this->terminal->reauthUrl($existing->terminal_connection_id, [
+                'redirect_url' => $redirectUrl,
+                'state' => $state,
+                'template' => $template,
+            ]);
+        }
+
+        return $this->terminal->linkUrl([
+            'redirect_url' => $redirectUrl,
+            'state' => $state,
+
+            // Shown to the carrier on the Link page and on their provider's
+            // consent screen, so it has to read as the broker asking.
+            'name' => $connectRequest->company?->company_name,
+
+            /*
+            | Deliberately absent on the ordinary flow. The job this used to do
+            | — stopping a second broker's Link flow creating a duplicate of a
+            | fleet we already pay for — is done by Terminal's own matching on
+            | the provider account, and does not depend on anything we send
+            | here. Sending it anyway buys nothing and risks a fork.
+            |
+            | Terminal confirmed the case this platform actually runs on: a
+            | carrier connected through one broker, sent through another
+            | broker's flow later, signing into the same provider account,
+            | resolves to the existing connection with no external id involved.
+            */
+            'external_id' => $this->shouldSendExternalId($forkOnExternalId)
+                ? $this->externalIdFor($connectRequest)
+                : null,
+
+            'tags' => 'broker:'.$connectRequest->company_id,
+            'template' => $template,
+            /*
+            | Always sent, including the 0 that means "no history". This used to
+            | be `?: null`, which silently dropped exactly the value it most
+            | needed to send: 0 is falsy, so the intent never reached Terminal
+            | and their account default decided the backfill instead.
+            |
+            | That is a billing control. Metering starts when GPS or HOS is
+            | called for a vehicle, and a backfill is precisely that, across the
+            | whole fleet, the moment a carrier connects. The consent template
+            | carries the same 0, but only three of our companies have a
+            | template attached — the rest send no template at all, so this is
+            | the only thing standing between them and an unasked-for history
+            | pull.
+            */
+            'backfill_days' => (int) config('services.terminal.backfill_days'),
+        ]);
+    }
+
+    /**
+     * The value that forks a connection, when we deliberately want one forked.
+     *
+     * Terminal matches on the provider plus the provider's own account
+     * identifier; `external_id` is not part of that match. It can only ever
+     * SPLIT a connection, never join one — two different values against one
+     * account fork it, and a value missing on either side still matches. So
+     * this is not a dedupe key and must not be treated as one.
+     *
+     * Which makes normalising it a billing concern rather than tidiness. The
+     * same carrier reaching this twice with `07654321` and `7654321 ` would
+     * produce two values, fork one fleet across two connections, and be
+     * ingested and billed twice. `carrier_dot_number` carries no validation on
+     * the connect-request path, so the normalising has to happen here: digits
+     * only, no leading zeros, and null rather than a bare `dot:` prefix when
+     * there is no usable number at all.
+     */
+    /**
+     * Whether this Link flow should carry an external id at all.
+     *
+     * False for everything ordinary. The config flag exists so the behaviour
+     * can be restored from the environment without a deploy if Terminal's
+     * matching ever turns out not to cover a case we depend on — not because
+     * anyone should turn it on.
+     */
+    private function shouldSendExternalId(bool $forkOnExternalId): bool
+    {
+        return $forkOnExternalId
+            || (bool) config('services.terminal.send_external_id');
+    }
+
+    public function externalIdFor(CarrierConnectRequest $connectRequest): ?string
+    {
+        $dot = ltrim(preg_replace('/\D/', '', (string) $connectRequest->carrier_dot_number), '0');
+
+        return $dot === '' ? null : 'dot:'.$dot;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Coming back from the Link page
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Finish the connection a carrier just made.
+     *
+     * The public token is single use and useless without the state, which is
+     * checked against what we stored when the page was opened — so a return URL
+     * replayed from a browser history, or one forged by a third party, gets
+     * nowhere.
+     */
+    public function completeFromPublicToken(
+        CarrierConnectRequest $connectRequest,
+        string $publicToken,
+        string $state
+    ): ?EldConnection {
+        if (! $this->stateMatches($connectRequest, $state)) {
+            Log::warning('ELD link state mismatch', [
+                'connect_request' => $connectRequest->uuid,
+            ]);
+
+            return null;
+        }
+
+        $payload = $this->terminal->exchangePublicToken($publicToken);
+
+        if ($payload === null) {
+            return null;
+        }
+
+        $connection = DB::transaction(function () use ($connectRequest, $payload) {
+            $connection = $this->storeConnection($connectRequest, $payload);
+
+            $this->grantTo($connection, $connectRequest);
+
+            $connectRequest->forceFill([
+                'eld_connection_id' => $connection->id,
+                'eld_connected_at' => now(),
+
+                // Single use: burn the nonce so the same return URL cannot be
+                // played again.
+                'eld_link_state' => null,
+                'eld_link_state_at' => null,
+
+                // A carrier who skipped and later came back has connected, and
+                // the skip should stop being reported as their answer.
+                'eld_skipped_at' => null,
+            ])->save();
+
+            return $connection;
+        });
+
+        /*
+        | Before the first sync, not after. Terminal meters what it ingests, and
+        | the initial import is the largest read a connection ever makes — a
+        | filter applied afterwards would arrive too late to have saved
+        | anything on the one pass that costs the most.
+        */
+        $this->applyDefaultFilters($connection);
+
+        // Outside the transaction: the job must not start against a connection
+        // row the transaction has not committed yet.
+        SyncEldConnection::dispatch($connection->id, true);
+
+        return $connection;
+    }
+
+    /**
+     * Write what Terminal told us about the connection.
+     *
+     * Matched on Terminal's own connection id first, because dedupe means a
+     * second broker's flow returns the id we already hold — that is the case
+     * this whole design exists to handle, and it must update, never insert.
+     */
+    public function storeConnection(CarrierConnectRequest $connectRequest, array $payload): EldConnection
+    {
+        $connection = EldConnection::firstOrNew([
+            'terminal_connection_id' => $payload['id'],
+        ]);
+
+        $connection->fill([
+            'uuid' => $connection->uuid ?: (string) Str::uuid(),
+            'carrier_dot_number' => $connectRequest->carrier_dot_number,
+            'carrier_row_id' => $connectRequest->carrier_row_id,
+            'carrier_legal_name' => $connectRequest->carrier_legal_name,
+            /*
+            | Only ever what Terminal actually holds. This used to fall back to
+            | recomputing the value locally, which was harmless while we sent
+            | one on every link and actively misleading now that we do not: the
+            | column would claim an external id Terminal has never seen, and the
+            | next person debugging a fork would chase it.
+            */
+            'external_id' => $payload['externalId'] ?? null,
+            'provider' => data_get($payload, 'provider.name') ?: data_get($payload, 'provider.code'),
+            'connection_token' => $payload['token'],
+            'status' => $this->mapStatus($payload['status'] ?? EldConnection::STATUS_CONNECTED),
+            'connected_at' => $connection->connected_at ?: now(),
+
+            // A re-auth clears the break rather than leaving a stale timestamp
+            // implying the connection is still down.
+            'disconnected_at' => null,
+        ]);
+
+        if ($connection->sync_status === null) {
+            $connection->sync_status = EldConnection::SYNC_PENDING;
+        }
+
+        $connection->save();
+
+        return $connection;
+    }
+
+    /**
+     * Record this broker's permission to see the carrier's fleet.
+     *
+     * Idempotent, and it un-revokes: a carrier who left a broker and came back
+     * has consented again, and that is the same grant rather than a second one.
+     */
+    public function grantTo(EldConnection $connection, CarrierConnectRequest $connectRequest): EldConnectionGrant
+    {
+        $grant = EldConnectionGrant::firstOrNew([
+            'eld_connection_id' => $connection->id,
+            'company_id' => $connectRequest->company_id,
+        ]);
+
+        $grant->fill([
+            'carrier_connect_request_id' => $connectRequest->id,
+            'granted_at' => now(),
+            'revoked_at' => null,
+            'consent_template' => $connectRequest->company?->eld_consent_template,
+        ])->save();
+
+        return $grant;
+    }
+
+    /**
+     * Narrow what Terminal ingests to the fleet that is actually running.
+     *
+     * A real carrier's provider account carries retired tractors and drivers
+     * who left years ago, and Terminal bills for data synced rather than for
+     * entities held — so every one of them is a standing charge for records
+     * nobody will ever look at.
+     *
+     * Status is the only filter that is safe here, and that is a consequence of
+     * the sharing model rather than a limitation of Terminal: one connection
+     * serves every broker working with the carrier, so narrowing it to the
+     * trucks on one broker's loads would blind the others looking at the same
+     * carrier.
+     *
+     * Failure is not fatal. The connection works either way; without the filter
+     * it simply syncs more than it needs to, and that is a bill to trim rather
+     * than a reason to fail a carrier's onboarding.
+     */
+    private function applyDefaultFilters(EldConnection $connection): void
+    {
+        if (! config('services.terminal.filter_active_only', true)) {
+            return;
+        }
+
+        $applied = $this->terminal->updateConnection($connection->connection_token, [
+            'filters' => [
+                'vehicles' => ['status' => 'active'],
+                'drivers' => ['status' => 'active'],
+            ],
+        ]);
+
+        if (! $applied) {
+            Log::warning('Could not narrow an ELD connection to active vehicles and drivers', [
+                'connection' => $connection->uuid,
+            ]);
+        }
+    }
+
+    /**
+     * A live connection this carrier already made, that this broker cannot see.
+     *
+     * The carrier links their provider once. A second broker inviting the same
+     * carrier needs their own consent recorded, but not another trip through
+     * the provider's login — we already hold a working token, and Terminal
+     * would only dedupe the new attempt back onto this same connection.
+     *
+     * Returns null once this broker has been granted access, because then it is
+     * simply their connection and the wizard shows it as connected.
+     */
+    public function shareableFor(CarrierConnectRequest $connectRequest): ?EldConnection
+    {
+        $dot = trim((string) $connectRequest->carrier_dot_number);
+
+        if ($dot === '') {
+            return null;
+        }
+
+        $connection = EldConnection::where('carrier_dot_number', $dot)
+            ->where('status', EldConnection::STATUS_CONNECTED)
+            ->latest('id')
+            ->first();
+
+        if (! $connection) {
+            return null;
+        }
+
+        $alreadyGranted = EldConnectionGrant::where('eld_connection_id', $connection->id)
+            ->where('company_id', $connectRequest->company_id)
+            ->whereNull('revoked_at')
+            ->exists();
+
+        return $alreadyGranted ? null : $connection;
+    }
+
+    /**
+     * Record this broker's access to a connection the carrier already made.
+     *
+     * The consent is real and explicit — the carrier presses a button naming
+     * the broker — it just does not need the provider's login screen a second
+     * time to be given.
+     */
+    public function share(CarrierConnectRequest $connectRequest): ?EldConnection
+    {
+        $connection = $this->shareableFor($connectRequest);
+
+        if (! $connection) {
+            return null;
+        }
+
+        DB::transaction(function () use ($connection, $connectRequest) {
+            $this->grantTo($connection, $connectRequest);
+
+            $connectRequest->forceFill([
+                'eld_connection_id' => $connection->id,
+                'eld_connected_at' => now(),
+                'eld_skipped_at' => null,
+            ])->save();
+        });
+
+        return $connection;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Wind-down
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * One broker stops working with the carrier.
+     *
+     * Only that broker's grant goes; the connection keeps serving the others.
+     * The connection itself is archived only once nobody is left looking at it,
+     * because archiving it while another broker still has an active grant would
+     * silently blind them.
+     */
+    public function revokeGrant(EldConnection $connection, int $companyId): void
+    {
+        EldConnectionGrant::where('eld_connection_id', $connection->id)
+            ->where('company_id', $companyId)
+            ->whereNull('revoked_at')
+            ->update(['revoked_at' => now(), 'updated_at' => now()]);
+
+        $stillWatched = EldConnectionGrant::where('eld_connection_id', $connection->id)
+            ->whereNull('revoked_at')
+            ->exists();
+
+        if (! $stillWatched) {
+            $this->archive($connection);
+        }
+    }
+
+    /**
+     * Stop syncing, keep the history.
+     *
+     * The default wind-down. A broker settling a dispute over a load already
+     * hauled still needs the HOS and the positions from the day it ran, and
+     * archiving stops the meter without throwing that away.
+     */
+    public function archive(EldConnection $connection): bool
+    {
+        if (! $this->terminal->updateConnection($connection->connection_token, ['status' => 'archived'])) {
+            return false;
+        }
+
+        $connection->forceFill([
+            'status' => EldConnection::STATUS_ARCHIVED,
+            'archived_at' => now(),
+        ])->save();
+
+        return true;
+    }
+
+    /**
+     * Erase it.
+     *
+     * Only for an explicit deletion request. Terminal answers with a 24-hour
+     * grace period, and the local rows go with the connection through the
+     * cascade — after that neither side can bring it back.
+     */
+    public function delete(EldConnection $connection): bool
+    {
+        if (! $this->terminal->deleteConnection($connection->connection_token)) {
+            return false;
+        }
+
+        $connection->delete();
+
+        return true;
+    }
+
+    /**
+     * The carrier's provider credentials stopped working.
+     *
+     * Recorded, not deleted: the fleet history stays readable and the wizard
+     * can offer re-auth against the same connection.
+     */
+    public function markDisconnected(EldConnection $connection): void
+    {
+        $connection->forceFill([
+            'status' => EldConnection::STATUS_DISCONNECTED,
+            'disconnected_at' => now(),
+        ])->save();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The connection this carrier already has, if any.
+     *
+     * Found by DOT number rather than by the connect request, because the whole
+     * point is that a connection made during one broker's onboarding is the one
+     * the next broker's onboarding should reuse.
+     */
+    public function existingConnectionFor(CarrierConnectRequest $connectRequest): ?EldConnection
+    {
+        if ($connectRequest->eld_connection_id) {
+            return EldConnection::find($connectRequest->eld_connection_id);
+        }
+
+        $dot = trim((string) $connectRequest->carrier_dot_number);
+
+        if ($dot === '') {
+            return null;
+        }
+
+        return EldConnection::where('carrier_dot_number', $dot)
+            ->whereNull('archived_at')
+            ->latest('id')
+            ->first();
+    }
+
+    private function stateMatches(CarrierConnectRequest $connectRequest, string $state): bool
+    {
+        if (! $connectRequest->eld_link_state || $state === '') {
+            return false;
+        }
+
+        if ($connectRequest->eld_link_state_at?->lt(now()->subMinutes(self::STATE_TTL_MINUTES))) {
+            return false;
+        }
+
+        return hash_equals($connectRequest->eld_link_state, $state);
+    }
+
+    /**
+     * Terminal reports `pending_deletion` while a delete is in its grace
+     * period, which is not one of our three — treat anything unrecognised as
+     * disconnected so nothing keeps syncing against it.
+     */
+    private function mapStatus(string $status): string
+    {
+        return match ($status) {
+            'connected' => EldConnection::STATUS_CONNECTED,
+            'archived' => EldConnection::STATUS_ARCHIVED,
+            default => EldConnection::STATUS_DISCONNECTED,
+        };
+    }
+}
