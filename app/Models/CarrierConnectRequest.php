@@ -65,6 +65,10 @@ class CarrierConnectRequest extends Model
         'stripe_express_account',
         'stripe_verified_at',
         'bank_skipped_at',
+        'eld_connection_id',
+        'eld_link_state',
+        'eld_connected_at',
+        'eld_skipped_at',
         'uses_factoring_company',
         'factoring_company_name',
         'factoring_document_disk',
@@ -98,6 +102,9 @@ class CarrierConnectRequest extends Model
 
         'didit_session_id',
         'didit_response',
+
+        // Proves a Terminal Link redirect is the one this request started.
+        'eld_link_state',
     ];
 
     protected $casts = [
@@ -114,6 +121,8 @@ class CarrierConnectRequest extends Model
         'identity_skipped_at' => 'datetime',
         'stripe_verified_at' => 'datetime',
         'bank_skipped_at' => 'datetime',
+        'eld_connected_at' => 'datetime',
+        'eld_skipped_at' => 'datetime',
         'factoring_answered_at' => 'datetime',
         'questionnaire_completed_at' => 'datetime',
         'documents_completed_at' => 'datetime',
@@ -141,6 +150,12 @@ class CarrierConnectRequest extends Model
     public function carrierUser()
     {
         return $this->belongsTo(CarrierUser::class, 'carrier_user_id');
+    }
+
+    /** The telematics account the carrier linked through Terminal, if any. */
+    public function eldConnection()
+    {
+        return $this->belongsTo(EldConnection::class, 'eld_connection_id');
     }
 
     public function agreementDocument()

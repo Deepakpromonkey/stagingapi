@@ -5,13 +5,13 @@ namespace App\Http\Requests\Connect;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
- * Skipping an onboarding step.
+ * The return trip from Terminal Link.
  *
- * The allowed set is closed deliberately. Phone verification, the broker's
- * questionnaire and the agreement are not skippable, so they must not be
- * reachable by passing a different value here.
+ * `state` is not optional. It is what ties the redirect back to the onboarding
+ * request that opened the link — without it, anyone holding a public token
+ * could attach a telematics account to someone else's onboarding.
  */
-class CarrierSkipStepRequest extends FormRequest
+class CarrierEldVerifyRequest extends FormRequest
 {
     public function authorize(): bool
     {
@@ -27,10 +27,16 @@ class CarrierSkipStepRequest extends FormRequest
                 'size:64',
             ],
 
-            'step' => [
+            'public_token' => [
                 'required',
                 'string',
-                'in:identity,bank,eld',
+                'max:500',
+            ],
+
+            'state' => [
+                'required',
+                'string',
+                'max:64',
             ],
         ];
     }
@@ -40,7 +46,7 @@ class CarrierSkipStepRequest extends FormRequest
         return [
             'token.required' => 'This onboarding link is not valid.',
             'token.size' => 'This onboarding link is not valid.',
-            'step.in' => 'That step cannot be skipped.',
+            'public_token.required' => 'The ELD connection did not complete. Please try again.',
         ];
     }
 }
