@@ -31,9 +31,16 @@ class ShipmentService
                 ]);
             }
 
+                        $eld = $this->resolveEldSelection($data, $user);
+
             $shipment = Shipment::create([
 
                 'uuid' => (string) Str::orderedUuid(),
+
+                // What the public tracking link is keyed on — see
+                // generateTrackingToken() for why this isn't just the uuid
+                // above.
+                'tracking_token' => $this->generateTrackingToken(),
 
                 'company_id' => $user->company_id,
 
@@ -47,9 +54,9 @@ class ShipmentService
                 'pro_number' => $data['pro_number'] ?? null,
 
                 // Carrier
-                'carrier_name' => isset($data['carrier_name'])
+                 'carrier_name' => isset($data['carrier_name'])
                     ? trim($data['carrier_name'])
-                    : null,
+                    : $eld['carrier_name'],
 
                 'carrier_mc' => isset($data['carrier_mc'])
                     ? strtoupper(trim($data['carrier_mc']))
@@ -57,7 +64,7 @@ class ShipmentService
 
                 'carrier_dot' => isset($data['carrier_dot'])
                     ? strtoupper(trim($data['carrier_dot']))
-                    : null,
+                    : $eld['carrier_dot'],
 
                 'carrier_phone' => $data['carrier_phone'] ?? null,
 
@@ -70,16 +77,47 @@ class ShipmentService
 
                 'tracking_number' => $data['tracking_number'] ?? null,
 
+
+                                // Origin / destination. An ELD load has no trip sheet — the
+                // position comes from the truck, so there is nothing for a
+                // driver to arrive at and no stop row to arrive there.
+                'origin' => trim($data['origin'] ?? '') ?: null,
+                'origin_lat' => $data['origin_lat'] ?? null,
+                'origin_lng' => $data['origin_lng'] ?? null,
+                'destination' => trim($data['destination'] ?? '') ?: null,
+                'destination_lat' => $data['destination_lat'] ?? null,
+                'destination_lng' => $data['destination_lng'] ?? null,
+
+                // When the load is expected to pick up and deliver. Same
+                // shape as a stop's start window — three plain strings, no
+                // combined timestamp — because nothing here has enough
+                // context to safely fold a date, a time and a timezone name
+                // into one instant; whatever reads these back does that.
+                'pickup_date' => $data['pickup_date'] ?? null,
+                'pickup_time' => $data['pickup_time'] ?? null,
+                'pickup_timezone' => $data['pickup_timezone'] ?? null,
+                'delivery_date' => $data['delivery_date'] ?? null,
+                'delivery_time' => $data['delivery_time'] ?? null,
+                'delivery_timezone' => $data['delivery_timezone'] ?? null,
+
+                'eld_connection_id' => $eld['connection_id'],
+                'eld_vehicle_id' => $eld['vehicle_id'],
+                'eld_driver_id' => $eld['driver_id'],
+                'eld_vehicle_terminal_id' => $eld['vehicle_terminal_id'],
+                'eld_driver_terminal_id' => $eld['driver_terminal_id'],
+
+
+
                 // Driver
-                'truck_number' => isset($data['truck_number'])
+              'truck_number' => isset($data['truck_number'])
                     ? strtoupper(trim($data['truck_number']))
-                    : null,
+                    : $eld['truck_number'],
 
                 'trailer_number' => isset($data['trailer_number'])
                     ? strtoupper(trim($data['trailer_number']))
                     : null,
 
-                'driver_phone_1' => $data['driver_phone_1'] ?? null,
+                'driver_phone_1' => $data['driver_phone_1'] ?? $eld['driver_phone'],
 
                 'driver_phone_2' => $data['driver_phone_2'] ?? null,
 
@@ -269,6 +307,22 @@ class ShipmentService
     }
 
     /**
+     * A token for the public tracking link — unguessable, and never the uuid.
+     *
+     * 48 random characters is far past brute-forcing range, so uniqueness is
+     * the only real risk, and it's astronomically small; the loop exists so a
+     * collision fails safe instead of racing the unique constraint.
+     */
+    private function generateTrackingToken(): string
+    {
+        do {
+            $token = Str::random(48);
+        } while (Shipment::where('tracking_token', $token)->exists());
+
+        return $token;
+    }
+
+    /**
      * Generate Shipment Number
      *
      * Example:
@@ -286,6 +340,93 @@ class ShipmentService
             date('Y').
             '-'.
             str_pad($nextNumber, 6, '0', STR_PAD_LEFT);
+    }
+
+
+        /**
+     * Turn the modal's ELD selection into columns.
+     *
+     * The denormalised carrier name, truck number and driver phone matter more
+     * than they look: every screen downstream of this — the loads list, the
+     * mailers, the driver-phone scope on Shipment — reads those columns and
+     * knows nothing about telematics. Filling them from the ELD records is what
+     * lets an ELD load behave like any other load everywhere else.
+     *
+     * CreateShipmentRequest::withValidator() has already proved the selection
+     * belongs to the caller, but that check and this read are two separate
+     * queries — the ownership scope is repeated here rather than trusted
+     * blindly, so a future caller that builds $data without going through that
+     * FormRequest cannot bind another company's carrier to a shipment.
+     */
+    private function resolveEldSelection(array $data, $user): array
+    {
+        $empty = [
+            'connection_id' => null,
+            'vehicle_id' => null,
+            'driver_id' => null,
+            'vehicle_terminal_id' => null,
+            'driver_terminal_id' => null,
+            'carrier_name' => null,
+            'carrier_dot' => null,
+            'truck_number' => null,
+            'driver_phone' => null,
+        ];
+
+        if (($data['tracking_method'] ?? null) !== 'eld' || blank($data['eld_connection_uuid'] ?? null)) {
+            return $empty;
+        }
+
+        $connection = \App\Models\Eld\EldConnection::query()
+            ->where('uuid', $data['eld_connection_uuid'])
+            ->where('status', \App\Models\Eld\EldConnection::STATUS_CONNECTED)
+            ->whereHas('connectRequests', fn ($q) => $q->where('company_id', $user->company_id))
+            ->first();
+
+        if (! $connection) {
+            throw ValidationException::withMessages([
+                'eld_connection_uuid' => ['That carrier is not connected to your account, or the ELD connection is no longer live.'],
+            ]);
+        }
+
+        $vehicle = $connection->vehicles()
+            ->where('terminal_id', $data['eld_vehicle_terminal_id'])
+            ->first();
+
+        $driver = $connection->drivers()
+            ->where('terminal_id', $data['eld_driver_terminal_id'])
+            ->first();
+
+        // The FormRequest confirmed both existed moments ago; a miss here means
+        // the fleet changed underneath the submission (a truck deactivated, a
+        // driver removed). Failing loudly beats writing a shipment flagged
+        // tracking_method=eld with a null vehicle, which scopeEldTracking()
+        // would then silently exclude from the poller forever.
+        if (! $vehicle) {
+            throw ValidationException::withMessages([
+                'eld_vehicle_terminal_id' => ["That vehicle is no longer on this carrier's connected fleet. Please reselect it."],
+            ]);
+        }
+
+        if (! $driver) {
+            throw ValidationException::withMessages([
+                'eld_driver_terminal_id' => ["That driver is no longer on this carrier's connected fleet. Please reselect them."],
+            ]);
+        }
+
+        return [
+            'connection_id' => $connection->id,
+            'vehicle_id' => $vehicle?->id,
+            'driver_id' => $driver?->id,
+            'vehicle_terminal_id' => $vehicle?->terminal_id,
+            'driver_terminal_id' => $driver?->terminal_id,
+            'carrier_name' => $connection->carrier_legal_name,
+            'carrier_dot' => $connection->carrier_dot_number,
+
+            // Unit number first, plate as the fallback — a broker reads one or
+            // the other on a rate confirmation, never the provider's id.
+            'truck_number' => $vehicle?->name ?: $vehicle?->license_plate,
+            'driver_phone' => $driver?->phone,
+        ];
     }
 
 
@@ -367,9 +508,9 @@ class ShipmentService
     public function getAllForUser($user)
     {
         return Shipment::where('company_id', $user->company_id)
-            ->with(['stops', 'trackingUpdates'])
-            ->latest('id') 
-            ->paginate(15); 
+            ->with(['stops', 'trackingUpdates', 'eldConnection'])
+            ->latest('id')
+            ->paginate(15);
     }
 
 

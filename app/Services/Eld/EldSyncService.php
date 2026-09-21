@@ -89,6 +89,43 @@ class EldSyncService
         }
     }
 
+        /**
+     * A refresh the broker is sitting and waiting for.
+     *
+     * Entities only. The full pass also walks position history a truck at a
+     * time, which is both the expensive half of the bill and far too slow to
+     * run inside a request — a forty-truck fleet means forty provider round
+     * trips before the response can be written. And it answers a question
+     * nobody asked: a broker pressing refresh wants the vehicle their carrier
+     * added five minutes ago, not last week's breadcrumbs.
+     *
+     * Checkpoints are shared with the full pass, so this is not a second
+     * timeline — a refresh advances the vehicle and driver checkpoints and the
+     * scheduled sync picks up from where this left off.
+     *
+     * sync_status is deliberately untouched: this is not a sync pass, and a
+     * refresh that flipped a connection to RUNNING and back would make the
+     * scheduled job's state meaningless.
+     */
+    public function syncFleetOnly(EldConnection $connection): void
+    {
+        if (! $connection->isSyncable()) {
+            return;
+        }
+
+        // Entitlement refusals are absorbed here exactly as they are in a full
+        // pass — a provider that will not expose drivers should still return
+        // the vehicles it does expose, not fail the refresh outright.
+        $this->attempt('vehicles', fn () => $this->syncVehicles($connection, false));
+        $this->attempt('drivers', fn () => $this->syncDrivers($connection, false));
+
+        $connection->forceFill([
+            'vehicle_count' => $connection->vehicles()->count(),
+            'driver_count' => $connection->drivers()->count(),
+        ])->save();
+    }
+    
+
     /**
      * Run one resource's sync, tolerating an account that cannot see it.
      *

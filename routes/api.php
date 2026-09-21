@@ -34,6 +34,9 @@ use App\Http\Controllers\Api\V1\User\UserController;
 use App\Http\Controllers\Carrier\CarrierController;
 
 use App\Http\Controllers\Api\V1\ContactController;
+use App\Http\Controllers\Api\V1\Eld\EldFleetController;
+use App\Http\Controllers\Api\V1\Eld\EldShipmentTrackingController;
+use App\Http\Controllers\Api\V1\Public\PublicShipmentTrackingController;
 
 use App\Http\Controllers\CarrierQuestionController;
 use App\Http\Controllers\SearchHistoryController;
@@ -76,6 +79,17 @@ Route::prefix('v1')->group(function () {
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
     Route::post('/contact-us', [ContactController::class, 'store']);
+
+    /*
+    | The customer-facing tracking link. No auth, no company scoping — the
+    | token itself is the only credential, which is exactly why it is rate
+    | limited here rather than trusting the default api throttle: this is the
+    | one route in the app a stranger is expected to call, and it should stay
+    | that way rather than becoming a scraping target.
+    */
+    Route::middleware('throttle:30,1')->group(function () {
+        Route::get('/public/tracking/{token}', [PublicShipmentTrackingController::class, 'show']);
+    });
 
     // The pricing table shown right after signup. Public, because the plan
     // screen renders before the new account has finished authenticating.
@@ -416,10 +430,39 @@ Route::prefix('v1')->group(function () {
             Route::get('/shipment-templates/{tracking_number}', [ShipmentTemplateController::class, 'show']);
         });
 
+
+
+
+                /*
+        | ELD tracking. Fleet reads are gated on booking, not viewing: the only
+        | screen that opens these dropdowns is the new-load modal, and a seat
+        | that cannot book a load has nothing to do with them.
+        */
+        Route::middleware(PermissionMiddleware::using('book-assign-loads'))
+            ->prefix('eld')
+            ->group(function () {
+                Route::get('/carriers', [EldFleetController::class, 'carriers']);
+                Route::get('/carriers/{connectionUuid}/fleet', [EldFleetController::class, 'fleet']);
+            });
+
+        Route::middleware(PermissionMiddleware::using('view-loads-tracking'))->group(function () {
+            Route::get('/shipments/{uuid}/eld/track', [EldShipmentTrackingController::class, 'track']);
+        });
+
+        Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
+            Route::post('/shipments/{uuid}/eld/start', [EldShipmentTrackingController::class, 'start']);
+            Route::post('/shipments/{uuid}/eld/stop', [EldShipmentTrackingController::class, 'stop']);
+        });
+
+
+
+
+
         Route::middleware(PermissionMiddleware::using('book-assign-loads'))->group(function () {
             Route::post('/shipments', [ShipmentController::class, 'store']);
             Route::post('/shipments/{uuid}/stops', [ShipmentController::class, 'addStops']);
         });
+
 
         /*
         | Broker side of the shipment chat. Gated on seeing the load at all —
