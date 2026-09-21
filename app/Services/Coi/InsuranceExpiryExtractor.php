@@ -3,7 +3,12 @@
 namespace App\Services\Coi;
 
 use Anthropic\Client;
+use Anthropic\Messages\Base64ImageSource;
+use Anthropic\Messages\Base64PDFSource;
+use Anthropic\Messages\DocumentBlockParam;
+use Anthropic\Messages\ImageBlockParam;
 use Anthropic\Messages\TextBlock;
+use Anthropic\Messages\TextBlockParam;
 use Carbon\CarbonImmutable;
 use RuntimeException;
 
@@ -30,6 +35,10 @@ class InsuranceExpiryExtractor
         You are reading a reply from a commercial insurance agency to a freight
         broker who asked for a carrier's current certificate of insurance.
 
+        The reply may carry the certificate itself as an attached PDF or scan.
+        Where one is attached, read it: it is the document the broker will be
+        held to, and the message around it is usually only a covering note.
+
         Answer with one JSON object and nothing else. No prose, no code fence.
 
         {
@@ -46,8 +55,22 @@ class InsuranceExpiryExtractor
           "scheduled_vins": [{"vin": string, "description": string or null}],
           "alternate_email": string or null,
           "signals": [string],
-          "summary": string
+          "summary": string,
+          "read_from": "certificate" | "email" | "both"
         }
+
+        Rules when a document is attached:
+
+        - The certificate outranks the message. Where the two disagree on a
+          date, a limit or a name, take the certificate and say so in summary:
+          a covering note written from memory is the thing that is wrong, and
+          the disagreement is itself worth the broker knowing.
+        - Read every coverage row on the certificate, not only the ones the
+          message mentions, along with its limits and its own expiry date.
+        - The certificate's own exclusions and endorsements count as
+          exclusions, including anything conditioning cover on a schedule.
+        - If the attachment is not a certificate at all — a signature image, an
+          unrelated form — ignore it and read the message instead.
 
         Rules for expiry_date:
 
@@ -76,6 +99,10 @@ class InsuranceExpiryExtractor
         - alternate_email: a different address the mail asks you to write to
           instead, such as a service inbox in an out-of-office.
         - summary: one sentence, plain English, what this reply actually says.
+        - read_from: "certificate" when the answer came off an attached
+          document, "email" when it came out of the message text, "both" when
+          each supplied part of it. It is shown to the broker, so it has to say
+          where the numbers actually came from.
 
         signals — include every one that applies, and nothing else:
 
@@ -101,21 +128,38 @@ class InsuranceExpiryExtractor
      * @throws RuntimeException when the model could not be reached or answered
      *                          in a shape this cannot read
      */
-    public function extract(string $emailBody): array
+    public function extract(string $emailBody, array $documents = []): array
     {
         $body = $this->trimForModel($emailBody);
 
-        if (trim($body) === '') {
+        if (trim($body) === '' && $documents === []) {
             throw new RuntimeException('The reply had no readable body to extract from.');
         }
 
+        /*
+         | "Certificate attached." is a complete reply, and until the document
+         | went with it there was nothing here to read. The note below keeps the
+         | user turn non-empty and tells the model where the answer actually is.
+         */
+        if (trim($body) === '') {
+            $body = 'The reply carried no text of its own. Read the attached document.';
+        }
+
+        $hasDocuments = $documents !== [];
+
         $message = $this->client->messages->create(
-            maxTokens: (int) config('coi_insurance.llm.max_tokens', 1024),
-            messages: [['role' => 'user', 'content' => $body]],
+            maxTokens: $hasDocuments
+                ? (int) config('coi_insurance.llm.max_tokens_with_document', 4096)
+                : (int) config('coi_insurance.llm.max_tokens', 1024),
+            messages: [['role' => 'user', 'content' => $this->contentFor($body, $documents)]],
             model: (string) config('coi_insurance.llm.model', 'claude-opus-5'),
-            // A one-line extraction. Depth here buys nothing and costs on every
-            // reply that arrives.
-            outputConfig: ['effort' => 'low'],
+            /*
+             | A sentence of prose is a one-line extraction and depth buys
+             | nothing. A certificate is a dense page of limits, dates,
+             | endorsements and exclusions that have to be read off a table and
+             | told apart, so a reply carrying one gets more room to think.
+             */
+            outputConfig: ['effort' => $hasDocuments ? 'medium' : 'low'],
             system: self::SYSTEM_PROMPT,
         );
 
@@ -132,6 +176,52 @@ class InsuranceExpiryExtractor
             'raw' => $raw,
             'details' => $details,
         ];
+    }
+
+    /**
+     * The user turn: the documents first, then the prose.
+     *
+     * The order is the documented one and it is not arbitrary — a document
+     * placed after the text it relates to is read less reliably.
+     *
+     * @param  array<int, array{data: string, media_type: string, filename: string}>  $documents
+     * @return array<int, DocumentBlockParam|ImageBlockParam|TextBlockParam>
+     */
+    private function contentFor(string $body, array $documents): array
+    {
+        $blocks = [];
+
+        foreach ($documents as $document) {
+            $mediaType = strtolower((string) ($document['media_type'] ?? ''));
+            $data = (string) ($document['data'] ?? '');
+
+            if ($data === '') {
+                continue;
+            }
+
+            if ($mediaType === 'application/pdf') {
+                $blocks[] = DocumentBlockParam::with(
+                    source: Base64PDFSource::with($data),
+
+                    // The agency's own filename. "ACME COI 2026.pdf" tells the
+                    // model which carrier the page belongs to when a reply
+                    // carries a certificate and an endorsement together.
+                    title: (string) ($document['filename'] ?? 'certificate.pdf'),
+                );
+
+                continue;
+            }
+
+            // A scanned certificate photographed or faxed in. The same page,
+            // arriving as pixels rather than as text.
+            $blocks[] = ImageBlockParam::with(
+                source: Base64ImageSource::with($data, $mediaType),
+            );
+        }
+
+        $blocks[] = TextBlockParam::with($body);
+
+        return $blocks;
     }
 
     /**
@@ -193,6 +283,7 @@ class InsuranceExpiryExtractor
             'holder_name' => $this->stringOrNull($decoded['holder_name'] ?? null),
             'alternate_email' => $this->stringOrNull($decoded['alternate_email'] ?? null),
             'summary' => $this->stringOrNull($decoded['summary'] ?? null),
+            'read_from' => $this->stringOrNull($decoded['read_from'] ?? null),
             'coverages' => $this->listOf($decoded['coverages'] ?? null),
             'exclusions' => array_values(array_filter(
                 $this->listOf($decoded['exclusions'] ?? null),

@@ -101,6 +101,17 @@ return [
         'max_bytes' => (int) env('COI_ATTACHMENT_MAX_BYTES', 15 * 1024 * 1024),
         'max_per_reply' => (int) env('COI_ATTACHMENT_MAX_PER_REPLY', 10),
 
+        /*
+        | How much of a reply's attachments the extraction may actually read.
+        |
+        | Separate from the storage caps above, and lower: storing a file is
+        | pennies, sending it to the model is paid for per megabyte on a mail
+        | that anyone can send us. Three documents covers a certificate, an
+        | endorsement and a schedule, which is what a real reply carries.
+        */
+        'max_documents_read' => (int) env('COI_ATTACHMENT_MAX_DOCUMENTS_READ', 3),
+        'max_read_bytes' => (int) env('COI_ATTACHMENT_MAX_READ_BYTES', 8 * 1024 * 1024),
+
         'allowed_types' => [
             'application/pdf',
             'image/png',
@@ -131,6 +142,11 @@ return [
     'llm' => [
         'model' => env('COI_LLM_MODEL', 'claude-opus-5'),
         'max_tokens' => (int) env('COI_LLM_MAX_TOKENS', 1024),
+
+        // A certificate yields far more than a sentence of prose does — every
+        // coverage row, its exclusions, its scheduled units — and an answer cut
+        // off mid-JSON is thrown away whole.
+        'max_tokens_with_document' => (int) env('COI_LLM_MAX_TOKENS_WITH_DOCUMENT', 4096),
 
         // The reply body is truncated to this before it is sent, so a mail
         // with a 200-page quoted history cannot turn into a large bill.

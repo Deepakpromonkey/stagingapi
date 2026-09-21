@@ -87,6 +87,89 @@ class CoiAttachmentStore
         return $stored;
     }
 
+    /**
+     * The stored files for one reply, as the extraction can send them.
+     *
+     * The certificate is the document the whole request was raised to obtain,
+     * so it goes to the model rather than being left on disk for a human — the
+     * prose in a reply is usually a covering note, and the numbers a broker
+     * acts on are on the page.
+     *
+     * Capped twice over: the API refuses a request above 32MB, and every
+     * megabyte sent is paid for on a mail anyone can send us. A file that
+     * cannot be read back is skipped rather than failing the extraction, which
+     * still has the prose to work with.
+     *
+     * @return array<int, array{data: string, media_type: string, filename: string}>
+     */
+    public function documentsFor(CoiInsuranceResponse $response): array
+    {
+        $maxDocuments = (int) config('coi_insurance.attachments.max_documents_read', 3);
+        $budget = (int) config('coi_insurance.attachments.max_read_bytes', 8 * 1024 * 1024);
+
+        $documents = [];
+
+        foreach ($response->attachments as $attachment) {
+            if (count($documents) >= $maxDocuments) {
+                break;
+            }
+
+            if (! $this->isReadable($attachment)) {
+                continue;
+            }
+
+            if ($attachment->size_bytes > $budget) {
+                Log::info('COI attachment too large to send for extraction', [
+                    'attachment_uuid' => $attachment->uuid,
+                    'size_bytes' => $attachment->size_bytes,
+                ]);
+
+                continue;
+            }
+
+            try {
+                $contents = Storage::disk($attachment->disk)->get($attachment->path);
+            } catch (\Throwable $e) {
+                $contents = null;
+
+                Log::warning('COI attachment could not be read back for extraction', [
+                    'attachment_uuid' => $attachment->uuid,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            if (! is_string($contents) || $contents === '') {
+                continue;
+            }
+
+            $budget -= strlen($contents);
+
+            $documents[] = [
+                'data' => base64_encode($contents),
+                'media_type' => (string) $attachment->content_type,
+                'filename' => (string) $attachment->filename,
+            ];
+
+            if ($budget <= 0) {
+                break;
+            }
+        }
+
+        return $documents;
+    }
+
+    /**
+     * Only what the model can actually open. A type it cannot read costs the
+     * same to upload and comes back as a refusal.
+     */
+    private function isReadable(CoiInsuranceResponseAttachment $attachment): bool
+    {
+        $type = strtolower((string) $attachment->content_type);
+
+        return $type === 'application/pdf'
+            || in_array($type, ['image/png', 'image/jpeg', 'image/gif', 'image/webp'], true);
+    }
+
     private function isKeepable(InboundAttachment $attachment, int $maxBytes, CoiInsuranceResponse $response): bool
     {
         if ($attachment->size() === 0 || $attachment->size() > $maxBytes) {

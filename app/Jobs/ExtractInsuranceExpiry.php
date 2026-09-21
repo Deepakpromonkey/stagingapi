@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
 use App\Services\Coi\CarrierInsuranceRequestService;
+use App\Services\Coi\CoiAttachmentStore;
 use App\Services\Coi\CoiFilingVerifier;
 use App\Services\Coi\CoiTrustCheck;
 use App\Services\Coi\InboundEmailPayload;
@@ -45,9 +46,9 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $this->onQueue(config('coi_insurance.queue', 'default'));
     }
 
-    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier, CoiTrustCheck $trust): void
+    public function handle(InsuranceExpiryExtractor $extractor, CarrierInsuranceRequestService $service, CoiFilingVerifier $verifier, CoiTrustCheck $trust, CoiAttachmentStore $attachments): void
     {
-        $response = CoiInsuranceResponse::with('request')->find($this->responseId);
+        $response = CoiInsuranceResponse::with(['request', 'attachments'])->find($this->responseId);
 
         if ($response === null || $response->request === null) {
             return;
@@ -72,7 +73,15 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
             $body = trim((string) ($response->body_text ?: strip_tags((string) $response->body_html)));
         }
 
-        $result = $extractor->extract($body);
+        /*
+         | The certificate, where one came with the reply. Until this was sent,
+         | the reading was of the covering note alone — which is how a mail
+         | saying "current COI attached" produced no date at all, while the
+         | date sat on the page beside it.
+         */
+        $documents = $attachments->documentsFor($response);
+
+        $result = $extractor->extract($body, $documents);
 
         $response->forceFill([
             'llm_response' => $result['raw'],

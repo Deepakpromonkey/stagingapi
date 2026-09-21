@@ -106,6 +106,7 @@ class CoiFollowUpRepliesTest extends TestCase
             app(CarrierInsuranceRequestService::class),
             app(\App\Services\Coi\CoiFilingVerifier::class),
             app(\App\Services\Coi\CoiTrustCheck::class),
+            app(\App\Services\Coi\CoiAttachmentStore::class),
         );
 
         $request->refresh();
@@ -217,8 +218,13 @@ class FakeExpiryExtractor extends \App\Services\Coi\InsuranceExpiryExtractor
     {
     }
 
-    public function extract(string $body): array
+    /** @var array<int, array<string, string>> */
+    public array $documentsSeen = [];
+
+    public function extract(string $body, array $documents = []): array
     {
+        $this->documentsSeen = $documents;
+
         return [
             'expiry_date' => $this->date ? \Carbon\CarbonImmutable::parse($this->date) : null,
             'raw' => 'Insurance Expiry Date - '.($this->date ?: 'NOT FOUND'),
