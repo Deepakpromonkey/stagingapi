@@ -176,6 +176,18 @@ class ShipmentController extends BaseController
         */
         $this->driverActivity->attachTo($shipment);
 
+        /*
+        | The link to hand the customer, built exactly the way
+        | ShipmentResource builds it (config('app.frontend_url') + path,
+        | never hardcoded) — this endpoint bypasses that resource entirely
+        | (a raw DB::table() row, not an Eloquent model going through it),
+        | so the field has to be added by hand here instead of inheriting
+        | it for free.
+        */
+        $shipment->public_tracking_url = $shipment->tracking_token
+            ? rtrim((string) config('app.frontend_url'), '/').'/track/'.$shipment->tracking_token
+            : null;
+
         return $this->success(
             $shipment,
             'Shipment details retrieved successfully.',

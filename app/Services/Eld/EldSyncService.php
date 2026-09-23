@@ -53,7 +53,16 @@ class EldSyncService
             $unavailable = array_filter([
                 $this->attempt('vehicles', fn () => $this->syncVehicles($connection, $initial)),
                 $this->attempt('drivers', fn () => $this->syncDrivers($connection, $initial)),
-                $this->attempt('hos', fn () => $this->syncHosLogs($connection, $initial)),
+
+                /*
+                | HOS deliberately not attempted. Nothing in the app reads
+                | EldHosLog - no endpoint, no UI - so calling an endpoint this
+                | account doesn't have permission for bought nothing but a
+                | line in last_sync_error every cycle. syncHosLogs() is left
+                | in place below, unused, for whoever wires up an HOS screen
+                | later; wiring it back in is one line here.
+                */
+
                 $this->attempt('locations', fn () => $this->syncLocations($connection, $initial)),
             ]);
 
@@ -249,6 +258,11 @@ class EldSyncService
 
     /**
      * Duty status changes.
+     *
+     * Not called from sync() - see the comment there. Left implemented and
+     * untouched rather than deleted: the ingestion-time reasoning below and
+     * the field-name fallbacks are the research, not the wiring, and both
+     * still apply whenever an HOS screen gets built.
      *
      * Read by ingestion time, which matters more here than anywhere else: an
      * HOS record can reach the provider hours after the driver made the change,

@@ -52,8 +52,10 @@ class EldFleetController extends BaseController
 
                 // Surfaced rather than swallowed: a connection whose account
                 // cannot read drivers will show an empty dropdown, and the
-                // broker deserves to know why.
-                'last_sync_error' => $connection->last_sync_error,
+                // broker deserves to know why. Filtered through
+                // visibleSyncError() - see its docblock for what's excluded
+                // and why.
+                'last_sync_error' => $this->visibleSyncError($connection),
             ])->values(),
             'Connected ELD carriers retrieved successfully.'
         );
@@ -127,10 +129,73 @@ class EldFleetController extends BaseController
             'carrier_name' => $connection->carrier_legal_name,
             'dot_number' => $connection->carrier_dot_number,
             'last_sync_at' => optional($connection->last_sync_at)->toIso8601String(),
-            'last_sync_error' => $connection->last_sync_error,
+            'last_sync_error' => $this->visibleSyncError($connection),
             'vehicles' => $vehicles,
             'drivers' => $drivers,
         ], 'ELD fleet retrieved successfully.');
+    }
+
+    /**
+     * Resources whose "not available to this Terminal account" note is a
+     * known, accepted gap rather than something a broker needs to see.
+     *
+     * hos: not attempted any more (see EldSyncService::sync()), but a
+     * connection can still be carrying an older stored message naming it
+     * from before that change - filtered here too so a stale row doesn't
+     * show it until its next sync happens to overwrite it clean.
+     *
+     * locations: still attempted every cycle, on purpose - see
+     * visibleSyncError()'s docblock.
+     */
+    private const ACCEPTED_SYNC_GAPS = ['hos', 'locations'];
+
+    /**
+     * last_sync_error, with the known, accepted gaps filtered out.
+     *
+     * Reading vehicle positions needs Terminal's vehicle-location:read
+     * scope, which this account does not have. That is accepted, not a
+     * bug - EldSyncService and EldTrackingService both keep quietly
+     * retrying it every cycle regardless, so live tracking starts working
+     * the moment Terminal grants the scope, with no code change needed.
+     * Broadcasting that retry to every broker on every page load is not
+     * accepted, so it never reaches this response.
+     *
+     * Nothing else is filtered: a connection whose account genuinely can't
+     * read vehicles or drivers still needs to tell the broker why their
+     * dropdown is empty, so any other reason still comes through.
+     *
+     * Two message shapes reach here, both written elsewhere:
+     *  - EldSyncService's combined "Not available to this Terminal
+     *    account: a (...); b (...)" - only the accepted-gap clauses are
+     *    stripped, the rest of the sentence survives.
+     *  - EldTrackingService's live-poll failure, which is locations-only
+     *    by construction (its one catch site) - hidden outright.
+     */
+    private function visibleSyncError(EldConnection $connection): ?string
+    {
+        $error = $connection->last_sync_error;
+
+        if ($error === null) {
+            return null;
+        }
+
+        if (str_starts_with($error, 'Live location is not available')) {
+            return null;
+        }
+
+        $prefix = 'Not available to this Terminal account: ';
+
+        if (str_starts_with($error, $prefix)) {
+            $remaining = array_values(array_filter(
+                explode('; ', substr($error, strlen($prefix))),
+                fn ($clause) => ! collect(self::ACCEPTED_SYNC_GAPS)
+                    ->contains(fn ($resource) => str_starts_with($clause, $resource.' '))
+            ));
+
+            return $remaining === [] ? null : $prefix.implode('; ', $remaining);
+        }
+
+        return $error;
     }
 
     /**
