@@ -64,15 +64,18 @@ class Col implements Countable
     }
     public function where(string $key, $value): Col
     { return new Col(array_values(array_filter($this->items, fn ($x) => (is_array($x) ? ($x[$key] ?? null) : ($x->$key ?? null)) == $value))); }
-    public function sortByDesc(callable $cb): Col
-    { $c = $this->items; usort($c, fn ($a, $b) => $cb($b) <=> $cb($a)); return new Col($c); }
-    public function sortBy(callable $cb): Col
-    { $c = $this->items; usort($c, fn ($a, $b) => $cb($a) <=> $cb($b)); return new Col($c); }
+    public function sortByDesc($cb): Col
+    { $cb = $this->keyFn($cb); $c = $this->items; usort($c, fn ($a, $b) => $cb($b) <=> $cb($a)); return new Col($c); }
+    public function sortBy($cb): Col
+    { $cb = $this->keyFn($cb); $c = $this->items; usort($c, fn ($a, $b) => $cb($a) <=> $cb($b)); return new Col($c); }
+    private function keyFn($cb): callable
+    { return is_callable($cb) ? $cb : fn ($x) => is_array($x) ? ($x[$cb] ?? null) : ($x->$cb ?? null); }
     public function first() { return $this->items[0] ?? null; }
     public function isNotEmpty(): bool { return count($this->items) > 0; }
     public function take(int $n): Col { return new Col(array_slice($this->items, 0, $n)); }
     public function all(): array { return $this->items; }
-    public function map(callable $cb): Col { return new Col(array_map($cb, $this->items)); }
+    public function map(callable $cb): Col
+    { $k = array_keys($this->items); return new Col(array_combine($k, array_map($cb, $this->items, $k))); }
     public function values(): Col { return new Col(array_values($this->items)); }
     public function flatMap(callable $cb): Col
     { $o = []; foreach ($this->items as $i) { foreach ($cb($i) as $x) { $o[] = $x; } } return new Col($o); }
@@ -121,10 +124,10 @@ class StubQuery
     { if ($this->firstColumn === null && is_string($col)) $this->firstColumn = $col; return $this; }
     public function whereIn($col, $v): self
     { if ($this->firstColumn === null) $this->firstColumn = $col; return $this; }
+    public function limit(int $n): self { return $this; }
     public function whereNotIn($col, $v): self { return $this; }
     public function select(...$c): self { return $this; }
     public function distinct(): self { return $this; }
-    public function limit(int $n): self { return $this; }
     public function count($col = null): int
     {
         $map = ['telephone' => 'phone', 'email_address' => 'email', 'phy_state' => 'address', 'vin' => 'vin'];
@@ -261,6 +264,7 @@ function carrier(array $over = []): Rec
         'authorityOrders' => \collect([]),
         'crashes' => \collect([]),
         'inspections' => \collect([new Rec(['vin' => null, 'insp_date' => d(100)]), new Rec(['vin' => null, 'insp_date' => d(200)]), new Rec(['vin' => null, 'insp_date' => d(300)])]),
+        'violationDetails' => \collect([]),
     ], $over));
 }
 
@@ -674,6 +678,81 @@ check('Kaplan replica -> 1625 pts, 52 Review (was 4750 -> 39)',
     && in_array('fatal_crash_24mo', $r['v3']['flags'], true)
     && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'NET-03' && $x['tier'] === 'medium'),
     json_encode([$r['v3']['risk_points'], $r['overall_score'], $r['v3']['rules_fired']]));
+
+
+/* ---- v3.4 tenure ladder ---- */
+
+/* 43. Authority 120 days old, otherwise clean -> capped 75, Acceptable band */
+$r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(120))])])]);
+check('120-day authority, clean -> capped 75, band acceptable',
+    $r['overall_score'] === 75 && ($r['v3']['score_cap_applied']['cap'] ?? null) === 75
+    && $r['v3']['band']['key'] === 'acceptable' && $r['v3']['status'] === 'Acceptable',
+    json_encode([$r['overall_score'], $r['v3']['score_cap_applied'], $r['v3']['band']['key']]));
+
+/* 44. Authority 300 days old, clean -> capped 84 */
+$r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(300))])])]);
+check('300-day authority, clean -> capped 84',
+    $r['overall_score'] === 84 && ($r['v3']['score_cap_applied']['cap'] ?? null) === 84,
+    json_encode([$r['overall_score'], $r['v3']['score_cap_applied']]));
+
+/* 45. Authority 400 days old, clean -> uncapped 100 */
+$r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(400))])])]);
+check('400-day authority, clean -> 100, no cap',
+    $r['overall_score'] === 100 && $r['v3']['score_cap_applied'] === null,
+    json_encode([$r['overall_score'], $r['v3']['score_cap_applied']]));
+
+
+/* ---- v3.5 rules ---- */
+
+/* 46. 390.19TG citation -> OPS-12 Medium, 89 */
+$r = run($c, ['carrier' => carrier(['violationDetails' => \collect([new Rec(['viol_code' => '390.19TG', 'insp_date' => '2025-10-14'])])])]);
+check('false MCS-150 citation -> OPS-12 Medium, 89',
+    $r['overall_score'] === 89 && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'OPS-12' && $x['tier'] === 'medium'),
+    json_encode([$r['overall_score'], $r['v3']['rules_fired']]));
+
+/* 47. 390.35 fires; ordinary maintenance codes do not */
+$r = run($c, ['carrier' => carrier(['violationDetails' => \collect([new Rec(['viol_code' => '390.35']), new Rec(['viol_code' => '393.75A']), new Rec(['viol_code' => '395.8'])])])]);
+$r2 = run($c, ['carrier' => carrier(['violationDetails' => \collect([new Rec(['viol_code' => '393.75A']), new Rec(['viol_code' => '396.3A1'])])])]);
+check('390.35 fires, benign codes stay silent',
+    $r['overall_score'] === 89 && $r2['overall_score'] === 100,
+    json_encode([$r['overall_score'], $r2['overall_score'], $r2['v3']['rules_fired']]));
+
+/* 48. Observed units exceed reported -> OPS-13 Low; unknown fleet abstains */
+$r = run($c, ['carrier' => carrier(['nbr_power_unit' => 1]), 'observedUnits' => 3]);
+$r2 = run($c, ['carrier' => carrier(['nbr_power_unit' => 0]), 'observedUnits' => 2]);
+check('3 observed vs 1 reported -> OPS-13 Low 94; fleet unreported -> abstain 100',
+    $r['overall_score'] === 94 && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'OPS-13')
+    && $r2['overall_score'] === 100,
+    json_encode([$r['overall_score'], $r2['overall_score']]));
+
+/* 49. M&M Garage replica (DOT 4361498): v3.3 gave 100; v3.5 lands 83 */
+$mm = carrier([
+    'legal_name' => 'M&M GARAGE OF MIDDLE GEORGIA LLC',
+    'nbr_power_unit' => 1,
+    'authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(321))]),
+    'inspections' => \collect([
+        new Rec(['vin' => null, 'insp_date' => d(154)]),
+        new Rec(['vin' => null, 'insp_date' => d(279)]),
+        new Rec(['vin' => null, 'insp_date' => d(344)]),
+    ]),
+    'violationDetails' => \collect([new Rec(['viol_code' => '390.19TG', 'insp_date' => '2025-10-14'])]),
+]);
+$r = run($c, [
+    'carrier' => $mm,
+    'sms' => sms(['insp_total' => 3, 'vehicle_insp_total' => 2, 'driver_insp_total' => 3,
+        'unsafe_driv_measure' => 0, 'hos_driv_measure' => 0, 'veh_maint_measure' => 0,
+        'unsafe_driv_insp_w_viol' => 0, 'hos_driv_insp_w_viol' => 0, 'veh_maint_insp_w_viol' => 0]),
+    'dotAge' => 1, 'mcs150Year' => 2025,
+    'observedUnits' => 2, 'observedTrailers' => 1,
+    'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0,
+]);
+check('M&M replica -> 375 pts, 83, tenure cap not binding, manual review on',
+    $r['v3']['risk_points'] === 375 && $r['overall_score'] === 83
+    && $r['v3']['score_cap_applied'] === null
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'OPS-12')
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'OPS-13')
+    && $r['v3']['needs_manual_review'] === true,
+    json_encode([$r['v3']['risk_points'], $r['overall_score'], $r['v3']['score_cap_applied'], $r['v3']['rules_fired']]));
 
 echo "\n{$pass} passed, {$fail} failed\n";
 exit($fail === 0 ? 0 : 1);

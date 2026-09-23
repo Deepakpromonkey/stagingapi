@@ -19,6 +19,13 @@ use Illuminate\Support\Facades\Cache;
  *   points <  10,000 ->  54 .. 19   status Unacceptable-Review
  *   points >= 10,000 ->  18 ..  0   status Unacceptable-Fail
  *
+ * v3.5 adds OPS-12 (false or misleading federal-filing citations,
+ * 390.19/390.35 — non-BASIC codes the SMS aggregates never show) and
+ * OPS-13 (more units observed at roadside than reported).
+ *
+ * v3.4 adds the tenure ladder: score caps at 75 (authority 90-179
+ * days) and 84 (180-364 days) — Preferred requires a year of history.
+ *
  * v3.3 adds affiliate handling on NET rules (name-stem exclusion +
  * large-fleet demotion), fleet-normalised CR-01, and an active-broker
  * gate on INS-04.
@@ -279,7 +286,7 @@ trait DtTrustScoreV3
 
             'pillars' => $fail ? [] : $this->dtLegacyPillars($groups),
 
-            'model_version' => 'dt-trust-v3.3-motus',
+            'model_version' => 'dt-trust-v3.5-motus',
 
             // The short answer, ready to render: a verdict line plus the
             // checks that triggered, passed and could not be run.
@@ -292,7 +299,7 @@ trait DtTrustScoreV3
 
             'v3' => [
 
-                'model_version' => 'dt-trust-v3.3-motus',
+                'model_version' => 'dt-trust-v3.5-motus',
 
                 'risk_points' => $riskPoints,
 
@@ -587,6 +594,22 @@ trait DtTrustScoreV3
                 $g['caps'][] = ['cap' => 65, 'reason' => 'Authority younger than 90 days.'];
 
                 $g['flags'][] = 'documented_review_required';
+
+            } elseif ($ageDays < 180) {
+
+                /*
+                | v3.4 tenure ladder: no points, just a ceiling. CAVRA only
+                | mandates the 30/90-day lines, but a five-month carrier
+                | walking straight to 100 "Preferred" is commercially wrong
+                | and exactly the fraud demographic. Acceptable from day 90;
+                | Preferred (>=85) takes a year.
+                */
+
+                $g['caps'][] = ['cap' => 75, 'reason' => 'Authority 90-179 days old — Preferred requires more tenure.'];
+
+            } elseif ($ageDays < 365) {
+
+                $g['caps'][] = ['cap' => 84, 'reason' => 'Authority younger than 12 months — Preferred requires a year of history.'];
 
             }
 
@@ -1452,8 +1475,61 @@ trait DtTrustScoreV3
 
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | False / Misleading Federal Filings (OPS-12) — v3.5
+        |--------------------------------------------------------------------------
+        | Roadside citations under 390.19 (false or misleading MCS-150) and
+        | 390.35 (fraudulent or false statements or records). These map to
+        | no BASIC, so the SMS aggregates stay spotless while FMCSA has
+        | cited the carrier for lying on the very form this data model
+        | trusts (DOT 4361498: 390.19TG — 2 units observed vs 1 reported,
+        | 1-mile annual mileage). Source is the sms_input_violation table,
+        | FMCSA's rolling 24-month violation file, so every row is already
+        | in-window.
+        */
+
+        $falseFilings = ($carrier->violationDetails ?? collect([]))
+            ->filter(function ($v) {
+
+                $code = strtoupper(trim((string) ($v->viol_code ?? '')));
+
+                return str_starts_with($code, '390.19') || str_starts_with($code, '390.35');
+            });
+
+        $falseFilingCount = $falseFilings->count();
+
+        if ($falseFilingCount >= 1) {
+
+            $this->dtFire(
+                $g,
+                'OPS-12',
+                'medium',
+                $falseFilingCount === 1
+                    ? 'Cited for a false or misleading federal filing (390.19/390.35).'
+                    : $falseFilingCount.' citations for false or misleading federal filings (390.19/390.35).'
+            );
+
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Under-Reported Fleet (OPS-13) — v3.5
+        |--------------------------------------------------------------------------
+        | The mirror of OPS-11: more distinct power units seen at roadside
+        | than the carrier reports on its MCS-150.
+        */
+
+        if ($reportedUnits >= 1 && (int) $observedUnits >= 2 && (int) $observedUnits > $reportedUnits) {
+
+            $this->dtFire($g, 'OPS-13', 'low', 'More power units observed at roadside than reported to FMCSA.');
+
+        }
+
         $g['params'] = [
             'dot_age_years' => $dotAge,
+            'false_filing_citations' => $falseFilingCount,
+            'false_filing_codes' => $falseFilings->pluck('viol_code')->take(5)->all(),
             'mcs150_year' => $mcs150Year,
             'reported_power_units' => $reportedUnits ?: null,
             'observed_units' => $observedUnits,
@@ -2094,6 +2170,8 @@ trait DtTrustScoreV3
         // ── Operations & Experience ─────────────────────────────────────
         'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', ['low'], 'MCS-150 currency'],
         'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', ['low'], 'Observed vs reported fleet'],
+        'OPS-12' => ['operations_experience', 'False federal filing', 'Roadside citations under 390.19 / 390.35 in the 24-month violation file.', ['medium'], 'False or misleading filings'],
+        'OPS-13' => ['operations_experience', 'Under-reported fleet', 'Units observed at roadside against power units reported on the MCS-150.', ['low'], 'Reported vs observed fleet'],
     ];
 
     /**
@@ -2281,7 +2359,7 @@ trait DtTrustScoreV3
 
         return [
 
-            'model_version' => 'dt-trust-v3.3-motus',
+            'model_version' => 'dt-trust-v3.5-motus',
 
             'summary' => $this->dtExplainSummary($ctx, $totals),
 
