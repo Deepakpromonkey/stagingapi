@@ -235,6 +235,26 @@ trait DtTrustScoreV3
             default => 'High Risk',
         };
 
+        $explanation = $this->dtExplain($groups, [
+            'risk_points' => $riskPoints,
+            'raw_score' => $this->dtPointsToScore((float) $riskPoints),
+            'score_after_caps' => $score,
+            'overall_score' => $overall,
+            'fail' => $fail,
+            'status' => $status,
+            'legacy_status' => $legacyStatus,
+            'band' => $band,
+            'caps' => $caps,
+            'cap_applied' => $capApplied,
+            'confidence' => $confidence,
+            'confidence_cap' => $confidenceCap,
+            'confidence_inputs' => $confidenceInputs,
+            'unknown' => $unknown,
+            'flags' => array_values(array_unique($flags)),
+            'fired' => $fired,
+            'needs_manual_review' => $needsReview,
+        ]);
+
         return [
 
             'overall_score' => $overall,
@@ -256,6 +276,11 @@ trait DtTrustScoreV3
             'pillars' => $fail ? [] : $this->dtLegacyPillars($groups),
 
             'model_version' => 'dt-trust-v3.3-motus',
+
+            // Why this number: every rule we evaluated, every input we read,
+            // and the arithmetic from risk points to the gauge. Survives a
+            // Fail, where 'pillars' is deliberately empty.
+            'explanation' => $explanation,
 
             'v3' => [
 
@@ -1778,13 +1803,21 @@ trait DtTrustScoreV3
     }
 
     /** Low 125 / Medium 250 / Review 1,000 / Fail 10,000 — MCP-compatible. */
+    private const DT_TIER_POINTS_LOW = 125;
+
+    private const DT_TIER_POINTS_MEDIUM = 250;
+
+    private const DT_TIER_POINTS_REVIEW = 1000;
+
+    private const DT_TIER_POINTS_FAIL = 10000;
+
     private function dtTierPoints(string $tier): int
     {
         return match ($tier) {
-            'low' => 125,
-            'medium' => 250,
-            'review' => 1000,
-            'fail' => 10000,
+            'low' => self::DT_TIER_POINTS_LOW,
+            'medium' => self::DT_TIER_POINTS_MEDIUM,
+            'review' => self::DT_TIER_POINTS_REVIEW,
+            'fail' => self::DT_TIER_POINTS_FAIL,
         };
     }
 
@@ -1899,19 +1932,9 @@ trait DtTrustScoreV3
      */
     private function dtLegacyPillars(array $groups): array
     {
-        $weights = [
-            'safety_roadside' => 24,
-            'identity_fraud' => 20,
-            'insurance_financial' => 18,
-            'authority_compliance' => 12,
-            'crash_history' => 10,
-            'inspection_quality' => 8,
-            'operations_experience' => 8,
-        ];
-
         $pillars = [];
 
-        foreach ($weights as $key => $weight) {
+        foreach (self::DT_PILLAR_WEIGHTS as $key => $weight) {
 
             $group = $groups[$key];
 
@@ -1948,5 +1971,474 @@ trait DtTrustScoreV3
         }
 
         return $pillars;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Explainability — "why is the score this number?"
+    |--------------------------------------------------------------------------
+    | The engine already knows everything a broker would need to defend a
+    | decision: which rules fired, which inputs they read, which caps bound
+    | the gauge and how confident the data was. It just never said so out
+    | loud. dtExplain() assembles that into one block on the profile
+    | response, and unlike 'pillars' it stays populated on a Fail — a
+    | disqualified carrier is exactly when someone asks why.
+    |
+    | Nothing here participates in scoring. It reports what already happened.
+    */
+
+    /**
+     * Presentation weights for the seven pillar cards. Shared with
+     * dtLegacyPillars() so the explanation can never quote a weight the
+     * profile page does not render.
+     */
+    private const DT_PILLAR_WEIGHTS = [
+        'safety_roadside' => 24,
+        'identity_fraud' => 20,
+        'insurance_financial' => 18,
+        'authority_compliance' => 12,
+        'crash_history' => 10,
+        'inspection_quality' => 8,
+        'operations_experience' => 8,
+    ];
+
+    private const DT_GROUP_LABELS = [
+        'authority_compliance' => 'Authority & Compliance',
+        'insurance_financial' => 'Insurance & Financial',
+        'safety_roadside' => 'Safety & Roadside',
+        'crash_history' => 'Crash History',
+        'inspection_quality' => 'Inspection Quality',
+        'identity_fraud' => 'Identity & Fraud',
+        'operations_experience' => 'Operations & Experience',
+    ];
+
+    /**
+     * Every rule the engine can fire, so the response can list the ones
+     * that stayed quiet as well as the ones that did not. 'tiers' is the
+     * set of severities a rule can land on, in escalation order.
+     *
+     * Keep in step with the dtEvaluate*() methods: a rule missing here is
+     * still scored, it just reports as an unnamed finding.
+     */
+    private const DT_RULE_CATALOG = [
+
+        // ── Authority & Compliance ──────────────────────────────────────
+        'AUTH-01' => ['authority_compliance', 'Operating authority inactive', 'Common and Contract authority status on the FMCSA authority record.', ['fail']],
+        'AUTH-02' => ['authority_compliance', 'DOT number inactive', 'Presence of a DOT number and the census status code.', ['fail']],
+        'AUTH-03' => ['authority_compliance', 'Active out-of-service order', 'Out-of-service orders with no rescind date.', ['fail']],
+        'AUTH-06' => ['authority_compliance', 'Revocation pending', 'Common / contract / broker revocation-pending flags.', ['review']],
+        'AUTH-07' => ['authority_compliance', 'Application pending', 'Common / contract / broker application-pending flags.', ['low']],
+        'AUTH-08' => ['authority_compliance', 'Reinstated after revocation', 'Prior-revoke flag against a currently active authority.', ['review']],
+        'AUTH-09' => ['authority_compliance', 'Revocation history', 'Completed revocations in the authority history.', ['medium', 'review']],
+        'AUTH-10' => ['authority_compliance', 'Suspension orders', 'Suspension orders in the authority order history.', ['medium']],
+        'AUTH-11' => ['authority_compliance', 'Revocation proceedings', 'Involuntary revocation proceedings opened in the last 36 months that did not complete.', ['low', 'medium', 'review']],
+        'AUTH-12' => ['authority_compliance', 'Dual carrier + broker authority', 'Active broker authority alongside carrier authority, escalated on re-brokering markers.', ['medium', 'review']],
+        'OPS-01' => ['authority_compliance', 'Authority under 30 days old', 'Days since the newest granted carrier authority.', ['review']],
+        'OPS-04' => ['authority_compliance', 'Authority under 90 days old', 'Days since the newest granted carrier authority, or an unknown age on a first-year DOT.', ['medium']],
+
+        // ── Insurance & Financial ───────────────────────────────────────
+        'INS-01' => ['insurance_financial', 'No BIPD on file', 'BIPD amount on the authority record and in the insurance filings.', ['fail']],
+        'INS-02' => ['insurance_financial', 'BIPD below minimum', 'BIPD amount on file against the required minimum.', ['fail']],
+        'INS-03' => ['insurance_financial', 'Cargo insurance missing', 'Cargo requirement against cargo filings on record.', ['fail']],
+        'INS-04' => ['insurance_financial', 'Bond or trust missing', 'Bond / trust requirement for active broker authority.', ['low']],
+        'INS-10' => ['insurance_financial', 'Cancellation pending', 'Insurance filings with a future effective cancellation.', ['review']],
+        'INS-11' => ['insurance_financial', 'Rejected filing', 'Insurance filings recorded as rejected.', ['medium']],
+        'INS-12' => ['insurance_financial', 'Insurer churn', 'Distinct insurance companies across the filing history.', ['low', 'medium']],
+
+        // ── Safety & Roadside ───────────────────────────────────────────
+        'SAF-01' => ['safety_roadside', 'Unsatisfactory safety rating', 'FMCSA safety rating.', ['fail']],
+        'SAF-02' => ['safety_roadside', 'Conditional safety rating', 'FMCSA safety rating.', ['fail']],
+        'SMS-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving BASIC over threshold', 'Unsafe Driving measure against the national cut-point.', ['medium']],
+        'SMS-HOS_DRIV' => ['safety_roadside', 'HOS Compliance BASIC over threshold', 'Hours-of-Service measure against the national cut-point.', ['medium']],
+        'SMS-DRIV_FIT' => ['safety_roadside', 'Driver Fitness BASIC over threshold', 'Driver Fitness measure against the national cut-point.', ['medium']],
+        'SMS-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances BASIC over threshold', 'Controlled Substances measure against the national cut-point.', ['medium']],
+        'SMS-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance BASIC over threshold', 'Vehicle Maintenance measure against the national cut-point.', ['medium']],
+        'SMS-MULTI' => ['safety_roadside', 'Multiple BASICs over threshold', 'Count of BASICs at or above the intervention threshold.', ['review']],
+        'SAF-AC-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving acute/critical', 'Acute-critical indicator on the Unsafe Driving BASIC.', ['medium']],
+        'SAF-AC-HOS_DRIV' => ['safety_roadside', 'HOS acute/critical', 'Acute-critical indicator on the HOS BASIC.', ['medium']],
+        'SAF-AC-DRIV_FIT' => ['safety_roadside', 'Driver Fitness acute/critical', 'Acute-critical indicator on the Driver Fitness BASIC.', ['medium']],
+        'SAF-AC-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances acute/critical', 'Acute-critical indicator on the Controlled Substances BASIC.', ['medium']],
+        'SAF-AC-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance acute/critical', 'Acute-critical indicator on the Vehicle Maintenance BASIC.', ['medium']],
+        'SAF-10' => ['safety_roadside', 'Vehicle OOS rate elevated', 'Vehicle out-of-service rate against the national average, with 5+ vehicle inspections.', ['low', 'medium']],
+        'SAF-11' => ['safety_roadside', 'Driver OOS rate elevated', 'Driver out-of-service rate against the national average, with 5+ driver inspections.', ['low', 'medium']],
+
+        // ── Crash History ───────────────────────────────────────────────
+        'CR-01' => ['crash_history', 'Recent fatal crash', 'Fatal crashes in the last 24 months, normalised by fleet size.', ['medium', 'review']],
+        'CR-02' => ['crash_history', 'Crash rate per power unit', 'Crashes per power unit per year.', ['low', 'medium']],
+        'CR-03' => ['crash_history', 'Crash volume', 'Raw crash count over 24 months when fleet size is unreported.', ['low', 'medium']],
+        'CR-04' => ['crash_history', 'Tow-away crashes', 'Tow-away crashes in the last 24 months.', ['low']],
+
+        // ── Inspection Quality ──────────────────────────────────────────
+        'INSP-01' => ['inspection_quality', 'Violation rate', 'Share of inspections that produced violations.', ['low', 'medium']],
+        'INSP-02' => ['inspection_quality', 'Thin inspection history', 'Inspection count against 12+ months of authority.', ['low']],
+        'INSP-03' => ['inspection_quality', 'Stale inspection history', 'Time since the most recent roadside inspection.', ['low']],
+
+        // ── Identity & Fraud ────────────────────────────────────────────
+        'PRT-21' => ['identity_fraud', 'Internally blocked', 'Internal block list.', ['fail']],
+        'PRT-20' => ['identity_fraud', 'Fraud reports', 'Internal fraud reports against this carrier.', ['fail']],
+        'NET-01' => ['identity_fraud', 'Shared phone number', 'Other DOTs using the same telephone number.', ['low', 'medium', 'review']],
+        'NET-02' => ['identity_fraud', 'Shared email address', 'Other DOTs using the same email address.', ['low', 'medium', 'review']],
+        'NET-03' => ['identity_fraud', 'Shared physical address', 'Other DOTs at the same physical address.', ['low', 'medium', 'review']],
+        'NET-04' => ['identity_fraud', 'Shared roadside VINs', 'Other DOTs inspected on the same VINs.', ['low', 'medium', 'review']],
+        'ID-01' => ['identity_fraud', 'Mail-drop address', 'Physical and mailing street against known mail-drop patterns.', ['low']],
+        'ID-03' => ['identity_fraud', 'Free-provider email', 'Contact email domain against the free-provider list.', ['low']],
+
+        // ── Operations & Experience ─────────────────────────────────────
+        'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', ['low']],
+        'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', ['low']],
+    ];
+
+    /**
+     * Which rules a given unknown input silences. Missing data abstains
+     * rather than passing, so the explanation must not report these as
+     * clean — that is the difference between "we checked and it was fine"
+     * and "we could not check".
+     */
+    private const DT_UNKNOWN_BLOCKS = [
+        'authority_status' => ['AUTH-01'],
+        'authority_status_partial' => ['AUTH-01'],
+        'dot_status' => ['AUTH-02'],
+        'authority_age' => ['OPS-01', 'OPS-04'],
+        'bipd' => ['INS-01', 'INS-02'],
+        'insurance_filings_freshness' => ['INS-10', 'INS-11'],
+        'sms_measures' => [
+            'SMS-UNSAFE_DRIV', 'SMS-HOS_DRIV', 'SMS-DRIV_FIT', 'SMS-CONTR_SUBST', 'SMS-VEH_MAINT',
+            'SMS-MULTI',
+            'SAF-AC-UNSAFE_DRIV', 'SAF-AC-HOS_DRIV', 'SAF-AC-DRIV_FIT', 'SAF-AC-CONTR_SUBST', 'SAF-AC-VEH_MAINT',
+        ],
+        'basic_percentiles_insufficient_inspections' => [
+            'SMS-UNSAFE_DRIV', 'SMS-HOS_DRIV', 'SMS-DRIV_FIT', 'SMS-CONTR_SUBST', 'SMS-VEH_MAINT', 'SMS-MULTI',
+        ],
+        'unsafe_driv_cutpoint' => ['SMS-UNSAFE_DRIV'],
+        'hos_driv_cutpoint' => ['SMS-HOS_DRIV'],
+        'driv_fit_cutpoint' => ['SMS-DRIV_FIT'],
+        'contr_subst_cutpoint' => ['SMS-CONTR_SUBST'],
+        'veh_maint_cutpoint' => ['SMS-VEH_MAINT'],
+        'last_inspection_date' => ['INSP-03'],
+        'network_graph' => ['NET-01', 'NET-02', 'NET-03', 'NET-04'],
+        'mcs150_year' => ['OPS-10'],
+    ];
+
+    /**
+     * @param  array  $groups  the seven evaluated rule groups
+     * @param  array  $ctx     totals already computed by dtCalculateTrustScore()
+     */
+    private function dtExplain(array $groups, array $ctx): array
+    {
+        $blocked = [];
+
+        foreach ($ctx['unknown'] as $entry) {
+            foreach (self::DT_UNKNOWN_BLOCKS[$entry['field']] ?? [] as $ruleId) {
+                $blocked[$ruleId] = $entry['field'];
+            }
+        }
+
+        // Indexed once, not re-filtered per group: the search controller runs
+        // this engine per result row, so a 7 x 60 walk per carrier is 7 x 60
+        // too many.
+        static $catalogByGroup = null;
+
+        if ($catalogByGroup === null) {
+
+            $catalogByGroup = [];
+
+            foreach (self::DT_RULE_CATALOG as $ruleId => $entry) {
+                $catalogByGroup[$entry[0]][$ruleId] = $entry;
+            }
+
+        }
+
+        $groupBlocks = [];
+
+        foreach ($groups as $key => $group) {
+
+            $firedById = [];
+
+            foreach ($group['fired'] as $rule) {
+                $firedById[$rule['id']][] = $rule;
+            }
+
+            $rules = [];
+
+            foreach ($catalogByGroup[$key] ?? [] as $id => [, $name, $checks, $tiers]) {
+
+                $hits = $firedById[$id] ?? [];
+
+                $rules[] = [
+                    'id' => $id,
+                    'name' => $name,
+                    'checks' => $checks,
+                    'possible_tiers' => $tiers,
+                    'status' => match (true) {
+                        $hits !== [] => 'triggered',
+                        isset($blocked[$id]) => 'not_evaluated',
+                        default => 'passed',
+                    },
+                    'tier' => $hits[0]['tier'] ?? null,
+                    'points' => array_sum(array_column($hits, 'points')),
+                    'finding' => $hits === [] ? null : implode(' ', array_column($hits, 'label')),
+                    'not_evaluated_because' => $hits === [] && isset($blocked[$id])
+                        ? 'Input "'.$this->dtHumanize($blocked[$id]).'" was unavailable, so the rule abstained.'
+                        : null,
+                ];
+            }
+
+            // Anything fired that the catalog does not name still has to
+            // show up — an unlisted rule is a documentation gap, not a
+            // reason to hide points from the broker.
+            foreach ($firedById as $id => $hits) {
+
+                if (isset(self::DT_RULE_CATALOG[$id])) {
+                    continue;
+                }
+
+                $rules[] = [
+                    'id' => $id,
+                    'name' => $hits[0]['label'] ?? $id,
+                    'checks' => null,
+                    'possible_tiers' => [$hits[0]['tier']],
+                    'status' => 'triggered',
+                    'tier' => $hits[0]['tier'],
+                    'points' => array_sum(array_column($hits, 'points')),
+                    'finding' => implode(' ', array_column($hits, 'label')),
+                    'not_evaluated_because' => null,
+                ];
+            }
+
+            $counts = array_count_values(array_column($rules, 'status'));
+
+            $parameters = [];
+
+            foreach ($group['params'] as $name => $value) {
+                $parameters[] = [
+                    'key' => $name,
+                    'label' => $this->dtHumanize($name),
+                    'value' => $value,
+                ];
+            }
+
+            $groupBlocks[$key] = [
+
+                'label' => self::DT_GROUP_LABELS[$key] ?? $this->dtHumanize($key),
+
+                'pillar_weight' => self::DT_PILLAR_WEIGHTS[$key] ?? null,
+
+                'risk_points' => $group['points'],
+
+                'share_of_risk_points' => $ctx['risk_points'] > 0
+                    ? round($group['points'] / $ctx['risk_points'] * 100, 1)
+                    : 0.0,
+
+                'contains_fail' => $group['fail'],
+
+                'rules_checked' => count($rules),
+
+                'rules_triggered' => $counts['triggered'] ?? 0,
+
+                'rules_passed' => $counts['passed'] ?? 0,
+
+                'rules_not_evaluated' => $counts['not_evaluated'] ?? 0,
+
+                'rules' => $rules,
+
+                'parameters' => $parameters,
+
+                'caps' => $group['caps'],
+
+                'flags' => $group['flags'],
+            ];
+        }
+
+        $topReasons = collect($ctx['fired'])
+            ->sortByDesc('points')
+            ->take(5)
+            ->map(fn ($rule) => [
+                'id' => $rule['id'],
+                'group' => $rule['group'],
+                'tier' => $rule['tier'],
+                'points' => $rule['points'],
+                'reason' => $rule['message'] ?? $rule['label'],
+            ])
+            ->values()
+            ->all();
+
+        $totals = [
+            'rules_checked' => array_sum(array_column($groupBlocks, 'rules_checked')),
+            'rules_triggered' => array_sum(array_column($groupBlocks, 'rules_triggered')),
+            'rules_passed' => array_sum(array_column($groupBlocks, 'rules_passed')),
+            'rules_not_evaluated' => array_sum(array_column($groupBlocks, 'rules_not_evaluated')),
+        ];
+
+        return [
+
+            'model_version' => 'dt-trust-v3.3-motus',
+
+            'summary' => $this->dtExplainSummary($ctx, $totals),
+
+            'how_it_works' => [
+                'method' => 'Every finding is a rule carrying a fixed tier of risk points. Points are totalled across seven groups, then mapped onto the 0-100 gauge, so the gauge can never contradict the status.',
+                'tier_points' => [
+                    'low' => self::DT_TIER_POINTS_LOW,
+                    'medium' => self::DT_TIER_POINTS_MEDIUM,
+                    'review' => self::DT_TIER_POINTS_REVIEW,
+                    'fail' => self::DT_TIER_POINTS_FAIL,
+                ],
+                'bands' => [
+                    ['points' => 'under 1,000', 'score' => '100 - 55', 'status' => 'Acceptable'],
+                    ['points' => '1,000 - 9,999', 'score' => '54 - 19', 'status' => 'Unacceptable-Review'],
+                    ['points' => '10,000 and over', 'score' => '18 - 0', 'status' => 'Unacceptable-Fail'],
+                ],
+                'abstention' => 'Missing data never fires a rule and never counts as clean. It lowers data confidence, which caps the score instead.',
+                'caps' => 'A cap is a ceiling, not a deduction: the lowest cap that bites replaces the score outright.',
+                'pillar_weights' => 'Pillar weights are presentation only — the overall score comes from the rule totals, never from the pillar cards.',
+            ],
+
+            'score_math' => [
+                'starting_score' => 100,
+                'risk_points' => $ctx['risk_points'],
+                'score_from_points' => $ctx['raw_score'],
+                'caps_considered' => $ctx['caps'],
+                'cap_applied' => $ctx['cap_applied'],
+                'score_after_caps' => $ctx['score_after_caps'],
+                'fail_override' => $ctx['fail'],
+                'final_score' => $ctx['overall_score'],
+                'steps' => $this->dtExplainSteps($ctx),
+            ],
+
+            'outcome' => [
+                'score' => $ctx['overall_score'],
+                'grade' => $this->getGrade($ctx['overall_score']),
+                'status' => $ctx['status'],
+                'legacy_status' => $ctx['legacy_status'],
+                'band' => $ctx['band'],
+                'needs_manual_review' => $ctx['needs_manual_review'],
+            ],
+
+            'top_reasons' => $topReasons,
+
+            'rule_totals' => $totals,
+
+            'groups' => $groupBlocks,
+
+            'data_confidence' => [
+                'value' => $ctx['confidence'],
+                'cap' => $ctx['confidence_cap'],
+                'inputs' => collect($ctx['confidence_inputs'])
+                    ->map(fn ($present, $name) => [
+                        'key' => $name,
+                        'label' => $this->dtHumanize($name),
+                        'present' => $present,
+                    ])
+                    ->values()
+                    ->all(),
+                'note' => 'The share of the eight core inputs that are populated. Thin data caps the gauge rather than lowering it.',
+            ],
+
+            'inputs_unavailable' => array_map(
+                fn ($entry) => [
+                    'group' => $entry['group'],
+                    'key' => $entry['field'],
+                    'label' => $this->dtHumanize($entry['field']),
+                    'rules_abstained' => self::DT_UNKNOWN_BLOCKS[$entry['field']] ?? [],
+                ],
+                $ctx['unknown']
+            ),
+
+            'flags' => $ctx['flags'],
+        ];
+    }
+
+    /** One line a broker can read off the screen without expanding anything. */
+    private function dtExplainSummary(array $ctx, array $totals): string
+    {
+        $parts = [];
+
+        $parts[] = sprintf(
+            'Scored %d of 100 (%s) from %s risk points across %d of %d rules checked.',
+            $ctx['overall_score'],
+            $ctx['band']['label'] ?? $ctx['status'],
+            number_format($ctx['risk_points']),
+            $totals['rules_triggered'],
+            $totals['rules_checked']
+        );
+
+        if ($ctx['fail']) {
+            $parts[] = 'A Fail-tier rule fired, which pins the score to 18 regardless of the points total.';
+        } elseif ($ctx['cap_applied'] !== null) {
+            $parts[] = sprintf(
+                'Capped at %s: %s',
+                $ctx['cap_applied']['cap'],
+                $ctx['cap_applied']['reason'] ?? 'cap applied.'
+            );
+        }
+
+        if ($totals['rules_not_evaluated'] > 0) {
+            $parts[] = sprintf(
+                '%d rules could not be evaluated because their inputs are missing; they abstained rather than passing.',
+                $totals['rules_not_evaluated']
+            );
+        }
+
+        return implode(' ', $parts);
+    }
+
+    /** The arithmetic, in the order it actually happened. */
+    private function dtExplainSteps(array $ctx): array
+    {
+        $steps = [];
+
+        $steps[] = [
+            'step' => 'Start',
+            'detail' => 'Every carrier starts at 100 with zero risk points.',
+            'score' => 100,
+        ];
+
+        $steps[] = [
+            'step' => 'Risk points',
+            'detail' => number_format($ctx['risk_points']).' risk points totalled across the seven rule groups.',
+            'score' => $ctx['raw_score'],
+        ];
+
+        if ($ctx['cap_applied'] !== null) {
+            $steps[] = [
+                'step' => 'Cap',
+                'detail' => ($ctx['cap_applied']['reason'] ?? 'Score cap applied.')
+                    .' Ceiling of '.$ctx['cap_applied']['cap'].'.',
+                'score' => $ctx['score_after_caps'],
+            ];
+        }
+
+        if ($ctx['fail']) {
+            $steps[] = [
+                'step' => 'Fail override',
+                'detail' => 'A Fail-tier rule fired, so the gauge pins to 18 and the pillar cards are suppressed.',
+                'score' => 18,
+            ];
+        }
+
+        $steps[] = [
+            'step' => 'Final',
+            'detail' => 'Rounded to the gauge value shown on the profile.',
+            'score' => $ctx['overall_score'],
+        ];
+
+        return $steps;
+    }
+
+    /** snake_case input key -> something a human can read on a card. */
+    private function dtHumanize(string $key): string
+    {
+        $words = ucfirst(str_replace('_', ' ', $key));
+
+        return strtr($words, [
+            'Bipd' => 'BIPD',
+            'Dot ' => 'DOT ',
+            'Mcs150' => 'MCS-150',
+            'Oos' => 'OOS',
+            'Sms ' => 'SMS ',
+            'Vin' => 'VIN',
+            'Hos ' => 'HOS ',
+            'Pct' => '%',
+        ]);
     }
 }
