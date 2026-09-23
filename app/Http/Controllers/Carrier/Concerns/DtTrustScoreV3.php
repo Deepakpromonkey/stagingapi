@@ -235,7 +235,7 @@ trait DtTrustScoreV3
             default => 'High Risk',
         };
 
-        $explanation = $this->dtExplain($groups, [
+        $ctx = [
             'risk_points' => $riskPoints,
             'raw_score' => $this->dtPointsToScore((float) $riskPoints),
             'score_after_caps' => $score,
@@ -253,7 +253,11 @@ trait DtTrustScoreV3
             'flags' => array_values(array_unique($flags)),
             'fired' => $fired,
             'needs_manual_review' => $needsReview,
-        ]);
+        ];
+
+        $explanation = $this->dtExplain($groups, $ctx);
+
+        $whyThisScore = $this->dtWhyThisScore($ctx, $explanation);
 
         return [
 
@@ -277,9 +281,13 @@ trait DtTrustScoreV3
 
             'model_version' => 'dt-trust-v3.3-motus',
 
-            // Why this number: every rule we evaluated, every input we read,
-            // and the arithmetic from risk points to the gauge. Survives a
-            // Fail, where 'pillars' is deliberately empty.
+            // The short answer, ready to render: a verdict line plus the
+            // checks that triggered, passed and could not be run.
+            'why_this_score' => $whyThisScore,
+
+            // The long answer: every rule, every input, and the arithmetic
+            // from risk points to the gauge. Survives a Fail, where
+            // 'pillars' is deliberately empty.
             'explanation' => $explanation,
 
             'v3' => [
@@ -2023,69 +2031,69 @@ trait DtTrustScoreV3
     private const DT_RULE_CATALOG = [
 
         // ── Authority & Compliance ──────────────────────────────────────
-        'AUTH-01' => ['authority_compliance', 'Operating authority inactive', 'Common and Contract authority status on the FMCSA authority record.', ['fail']],
-        'AUTH-02' => ['authority_compliance', 'DOT number inactive', 'Presence of a DOT number and the census status code.', ['fail']],
-        'AUTH-03' => ['authority_compliance', 'Active out-of-service order', 'Out-of-service orders with no rescind date.', ['fail']],
-        'AUTH-06' => ['authority_compliance', 'Revocation pending', 'Common / contract / broker revocation-pending flags.', ['review']],
-        'AUTH-07' => ['authority_compliance', 'Application pending', 'Common / contract / broker application-pending flags.', ['low']],
-        'AUTH-08' => ['authority_compliance', 'Reinstated after revocation', 'Prior-revoke flag against a currently active authority.', ['review']],
-        'AUTH-09' => ['authority_compliance', 'Revocation history', 'Completed revocations in the authority history.', ['medium', 'review']],
-        'AUTH-10' => ['authority_compliance', 'Suspension orders', 'Suspension orders in the authority order history.', ['medium']],
-        'AUTH-11' => ['authority_compliance', 'Revocation proceedings', 'Involuntary revocation proceedings opened in the last 36 months that did not complete.', ['low', 'medium', 'review']],
-        'AUTH-12' => ['authority_compliance', 'Dual carrier + broker authority', 'Active broker authority alongside carrier authority, escalated on re-brokering markers.', ['medium', 'review']],
-        'OPS-01' => ['authority_compliance', 'Authority under 30 days old', 'Days since the newest granted carrier authority.', ['review']],
-        'OPS-04' => ['authority_compliance', 'Authority under 90 days old', 'Days since the newest granted carrier authority, or an unknown age on a first-year DOT.', ['medium']],
+        'AUTH-01' => ['authority_compliance', 'Operating authority inactive', 'Common and Contract authority status on the FMCSA authority record.', ['fail'], 'Operating authority status'],
+        'AUTH-02' => ['authority_compliance', 'DOT number inactive', 'Presence of a DOT number and the census status code.', ['fail'], 'DOT number status'],
+        'AUTH-03' => ['authority_compliance', 'Active out-of-service order', 'Out-of-service orders with no rescind date.', ['fail'], 'Out-of-service orders'],
+        'AUTH-06' => ['authority_compliance', 'Revocation pending', 'Common / contract / broker revocation-pending flags.', ['review'], 'Revocation pending'],
+        'AUTH-07' => ['authority_compliance', 'Application pending', 'Common / contract / broker application-pending flags.', ['low'], 'Application pending'],
+        'AUTH-08' => ['authority_compliance', 'Reinstated after revocation', 'Prior-revoke flag against a currently active authority.', ['review'], 'Reinstatement after revocation'],
+        'AUTH-09' => ['authority_compliance', 'Revocation history', 'Completed revocations in the authority history.', ['medium', 'review'], 'Revocation history'],
+        'AUTH-10' => ['authority_compliance', 'Suspension orders', 'Suspension orders in the authority order history.', ['medium'], 'Suspension orders'],
+        'AUTH-11' => ['authority_compliance', 'Revocation proceedings', 'Involuntary revocation proceedings opened in the last 36 months that did not complete.', ['low', 'medium', 'review'], 'Revocation proceedings'],
+        'AUTH-12' => ['authority_compliance', 'Dual carrier + broker authority', 'Active broker authority alongside carrier authority, escalated on re-brokering markers.', ['medium', 'review'], 'Carrier + broker authority'],
+        'OPS-01' => ['authority_compliance', 'Authority under 30 days old', 'Days since the newest granted carrier authority.', ['review'], 'Authority age (30 days)'],
+        'OPS-04' => ['authority_compliance', 'Authority under 90 days old', 'Days since the newest granted carrier authority, or an unknown age on a first-year DOT.', ['medium'], 'Authority age (90 days)'],
 
         // ── Insurance & Financial ───────────────────────────────────────
-        'INS-01' => ['insurance_financial', 'No BIPD on file', 'BIPD amount on the authority record and in the insurance filings.', ['fail']],
-        'INS-02' => ['insurance_financial', 'BIPD below minimum', 'BIPD amount on file against the required minimum.', ['fail']],
-        'INS-03' => ['insurance_financial', 'Cargo insurance missing', 'Cargo requirement against cargo filings on record.', ['fail']],
-        'INS-04' => ['insurance_financial', 'Bond or trust missing', 'Bond / trust requirement for active broker authority.', ['low']],
-        'INS-10' => ['insurance_financial', 'Cancellation pending', 'Insurance filings with a future effective cancellation.', ['review']],
-        'INS-11' => ['insurance_financial', 'Rejected filing', 'Insurance filings recorded as rejected.', ['medium']],
-        'INS-12' => ['insurance_financial', 'Insurer churn', 'Distinct insurance companies across the filing history.', ['low', 'medium']],
+        'INS-01' => ['insurance_financial', 'No BIPD on file', 'BIPD amount on the authority record and in the insurance filings.', ['fail'], 'BIPD on file'],
+        'INS-02' => ['insurance_financial', 'BIPD below minimum', 'BIPD amount on file against the required minimum.', ['fail'], 'BIPD minimum'],
+        'INS-03' => ['insurance_financial', 'Cargo insurance missing', 'Cargo requirement against cargo filings on record.', ['fail'], 'Cargo insurance'],
+        'INS-04' => ['insurance_financial', 'Bond or trust missing', 'Bond / trust requirement for active broker authority.', ['low'], 'Bond or trust'],
+        'INS-10' => ['insurance_financial', 'Cancellation pending', 'Insurance filings with a future effective cancellation.', ['review'], 'Insurance cancellation'],
+        'INS-11' => ['insurance_financial', 'Rejected filing', 'Insurance filings recorded as rejected.', ['medium'], 'Filing rejections'],
+        'INS-12' => ['insurance_financial', 'Insurer churn', 'Distinct insurance companies across the filing history.', ['low', 'medium'], 'Insurer churn'],
 
         // ── Safety & Roadside ───────────────────────────────────────────
-        'SAF-01' => ['safety_roadside', 'Unsatisfactory safety rating', 'FMCSA safety rating.', ['fail']],
-        'SAF-02' => ['safety_roadside', 'Conditional safety rating', 'FMCSA safety rating.', ['fail']],
-        'SMS-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving BASIC over threshold', 'Unsafe Driving measure against the national cut-point.', ['medium']],
-        'SMS-HOS_DRIV' => ['safety_roadside', 'HOS Compliance BASIC over threshold', 'Hours-of-Service measure against the national cut-point.', ['medium']],
-        'SMS-DRIV_FIT' => ['safety_roadside', 'Driver Fitness BASIC over threshold', 'Driver Fitness measure against the national cut-point.', ['medium']],
-        'SMS-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances BASIC over threshold', 'Controlled Substances measure against the national cut-point.', ['medium']],
-        'SMS-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance BASIC over threshold', 'Vehicle Maintenance measure against the national cut-point.', ['medium']],
-        'SMS-MULTI' => ['safety_roadside', 'Multiple BASICs over threshold', 'Count of BASICs at or above the intervention threshold.', ['review']],
-        'SAF-AC-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving acute/critical', 'Acute-critical indicator on the Unsafe Driving BASIC.', ['medium']],
-        'SAF-AC-HOS_DRIV' => ['safety_roadside', 'HOS acute/critical', 'Acute-critical indicator on the HOS BASIC.', ['medium']],
-        'SAF-AC-DRIV_FIT' => ['safety_roadside', 'Driver Fitness acute/critical', 'Acute-critical indicator on the Driver Fitness BASIC.', ['medium']],
-        'SAF-AC-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances acute/critical', 'Acute-critical indicator on the Controlled Substances BASIC.', ['medium']],
-        'SAF-AC-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance acute/critical', 'Acute-critical indicator on the Vehicle Maintenance BASIC.', ['medium']],
-        'SAF-10' => ['safety_roadside', 'Vehicle OOS rate elevated', 'Vehicle out-of-service rate against the national average, with 5+ vehicle inspections.', ['low', 'medium']],
-        'SAF-11' => ['safety_roadside', 'Driver OOS rate elevated', 'Driver out-of-service rate against the national average, with 5+ driver inspections.', ['low', 'medium']],
+        'SAF-01' => ['safety_roadside', 'Unsatisfactory safety rating', 'FMCSA safety rating.', ['fail'], 'Safety rating (Unsatisfactory)'],
+        'SAF-02' => ['safety_roadside', 'Conditional safety rating', 'FMCSA safety rating.', ['fail'], 'Safety rating (Conditional)'],
+        'SMS-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving BASIC over threshold', 'Unsafe Driving measure against the national cut-point.', ['medium'], 'Unsafe Driving BASIC'],
+        'SMS-HOS_DRIV' => ['safety_roadside', 'HOS Compliance BASIC over threshold', 'Hours-of-Service measure against the national cut-point.', ['medium'], 'HOS Compliance BASIC'],
+        'SMS-DRIV_FIT' => ['safety_roadside', 'Driver Fitness BASIC over threshold', 'Driver Fitness measure against the national cut-point.', ['medium'], 'Driver Fitness BASIC'],
+        'SMS-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances BASIC over threshold', 'Controlled Substances measure against the national cut-point.', ['medium'], 'Controlled Substances BASIC'],
+        'SMS-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance BASIC over threshold', 'Vehicle Maintenance measure against the national cut-point.', ['medium'], 'Vehicle Maintenance BASIC'],
+        'SMS-MULTI' => ['safety_roadside', 'Multiple BASICs over threshold', 'Count of BASICs at or above the intervention threshold.', ['review'], 'Multiple BASICs over threshold'],
+        'SAF-AC-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving acute/critical', 'Acute-critical indicator on the Unsafe Driving BASIC.', ['medium'], 'Unsafe Driving acute/critical'],
+        'SAF-AC-HOS_DRIV' => ['safety_roadside', 'HOS acute/critical', 'Acute-critical indicator on the HOS BASIC.', ['medium'], 'HOS acute/critical'],
+        'SAF-AC-DRIV_FIT' => ['safety_roadside', 'Driver Fitness acute/critical', 'Acute-critical indicator on the Driver Fitness BASIC.', ['medium'], 'Driver Fitness acute/critical'],
+        'SAF-AC-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances acute/critical', 'Acute-critical indicator on the Controlled Substances BASIC.', ['medium'], 'Controlled Substances acute/critical'],
+        'SAF-AC-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance acute/critical', 'Acute-critical indicator on the Vehicle Maintenance BASIC.', ['medium'], 'Vehicle Maintenance acute/critical'],
+        'SAF-10' => ['safety_roadside', 'Vehicle OOS rate elevated', 'Vehicle out-of-service rate against the national average, with 5+ vehicle inspections.', ['low', 'medium'], 'Vehicle OOS rate'],
+        'SAF-11' => ['safety_roadside', 'Driver OOS rate elevated', 'Driver out-of-service rate against the national average, with 5+ driver inspections.', ['low', 'medium'], 'Driver OOS rate'],
 
         // ── Crash History ───────────────────────────────────────────────
-        'CR-01' => ['crash_history', 'Recent fatal crash', 'Fatal crashes in the last 24 months, normalised by fleet size.', ['medium', 'review']],
-        'CR-02' => ['crash_history', 'Crash rate per power unit', 'Crashes per power unit per year.', ['low', 'medium']],
-        'CR-03' => ['crash_history', 'Crash volume', 'Raw crash count over 24 months when fleet size is unreported.', ['low', 'medium']],
-        'CR-04' => ['crash_history', 'Tow-away crashes', 'Tow-away crashes in the last 24 months.', ['low']],
+        'CR-01' => ['crash_history', 'Recent fatal crash', 'Fatal crashes in the last 24 months, normalised by fleet size.', ['medium', 'review'], 'Recent fatal crashes'],
+        'CR-02' => ['crash_history', 'Crash rate per power unit', 'Crashes per power unit per year.', ['low', 'medium'], 'Crash rate per power unit'],
+        'CR-03' => ['crash_history', 'Crash volume', 'Raw crash count over 24 months when fleet size is unreported.', ['low', 'medium'], 'Crash volume'],
+        'CR-04' => ['crash_history', 'Tow-away crashes', 'Tow-away crashes in the last 24 months.', ['low'], 'Tow-away crashes'],
 
         // ── Inspection Quality ──────────────────────────────────────────
-        'INSP-01' => ['inspection_quality', 'Violation rate', 'Share of inspections that produced violations.', ['low', 'medium']],
-        'INSP-02' => ['inspection_quality', 'Thin inspection history', 'Inspection count against 12+ months of authority.', ['low']],
-        'INSP-03' => ['inspection_quality', 'Stale inspection history', 'Time since the most recent roadside inspection.', ['low']],
+        'INSP-01' => ['inspection_quality', 'Violation rate', 'Share of inspections that produced violations.', ['low', 'medium'], 'Violation rate'],
+        'INSP-02' => ['inspection_quality', 'Thin inspection history', 'Inspection count against 12+ months of authority.', ['low'], 'Inspection history depth'],
+        'INSP-03' => ['inspection_quality', 'Stale inspection history', 'Time since the most recent roadside inspection.', ['low'], 'Inspection recency'],
 
         // ── Identity & Fraud ────────────────────────────────────────────
-        'PRT-21' => ['identity_fraud', 'Internally blocked', 'Internal block list.', ['fail']],
-        'PRT-20' => ['identity_fraud', 'Fraud reports', 'Internal fraud reports against this carrier.', ['fail']],
-        'NET-01' => ['identity_fraud', 'Shared phone number', 'Other DOTs using the same telephone number.', ['low', 'medium', 'review']],
-        'NET-02' => ['identity_fraud', 'Shared email address', 'Other DOTs using the same email address.', ['low', 'medium', 'review']],
-        'NET-03' => ['identity_fraud', 'Shared physical address', 'Other DOTs at the same physical address.', ['low', 'medium', 'review']],
-        'NET-04' => ['identity_fraud', 'Shared roadside VINs', 'Other DOTs inspected on the same VINs.', ['low', 'medium', 'review']],
-        'ID-01' => ['identity_fraud', 'Mail-drop address', 'Physical and mailing street against known mail-drop patterns.', ['low']],
-        'ID-03' => ['identity_fraud', 'Free-provider email', 'Contact email domain against the free-provider list.', ['low']],
+        'PRT-21' => ['identity_fraud', 'Internally blocked', 'Internal block list.', ['fail'], 'Internal block list'],
+        'PRT-20' => ['identity_fraud', 'Fraud reports', 'Internal fraud reports against this carrier.', ['fail'], 'Fraud reports'],
+        'NET-01' => ['identity_fraud', 'Shared phone number', 'Other DOTs using the same telephone number.', ['low', 'medium', 'review'], 'Shared phone number'],
+        'NET-02' => ['identity_fraud', 'Shared email address', 'Other DOTs using the same email address.', ['low', 'medium', 'review'], 'Shared email address'],
+        'NET-03' => ['identity_fraud', 'Shared physical address', 'Other DOTs at the same physical address.', ['low', 'medium', 'review'], 'Shared physical address'],
+        'NET-04' => ['identity_fraud', 'Shared roadside VINs', 'Other DOTs inspected on the same VINs.', ['low', 'medium', 'review'], 'Shared roadside VINs'],
+        'ID-01' => ['identity_fraud', 'Mail-drop address', 'Physical and mailing street against known mail-drop patterns.', ['low'], 'Mail-drop address'],
+        'ID-03' => ['identity_fraud', 'Free-provider email', 'Contact email domain against the free-provider list.', ['low'], 'Email provider'],
 
         // ── Operations & Experience ─────────────────────────────────────
-        'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', ['low']],
-        'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', ['low']],
+        'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', ['low'], 'MCS-150 currency'],
+        'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', ['low'], 'Observed vs reported fleet'],
     ];
 
     /**
@@ -2160,13 +2168,14 @@ trait DtTrustScoreV3
 
             $rules = [];
 
-            foreach ($catalogByGroup[$key] ?? [] as $id => [, $name, $checks, $tiers]) {
+            foreach ($catalogByGroup[$key] ?? [] as $id => [, $name, $checks, $tiers, $subject]) {
 
                 $hits = $firedById[$id] ?? [];
 
                 $rules[] = [
                     'id' => $id,
                     'name' => $name,
+                    'subject' => $subject,
                     'checks' => $checks,
                     'possible_tiers' => $tiers,
                     'status' => match (true) {
@@ -2195,6 +2204,7 @@ trait DtTrustScoreV3
                 $rules[] = [
                     'id' => $id,
                     'name' => $hits[0]['label'] ?? $id,
+                    'subject' => $hits[0]['label'] ?? $id,
                     'checks' => null,
                     'possible_tiers' => [$hits[0]['tier']],
                     'status' => 'triggered',
@@ -2456,5 +2466,157 @@ trait DtTrustScoreV3
         }
 
         return implode(' ', $words);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Why This Score — the short answer
+    |--------------------------------------------------------------------------
+    | dtExplain() is the audit trail: seven groups, rule catalog, score
+    | arithmetic, confidence inputs. Right for a drill-down, far too much
+    | for the line a broker reads before deciding to book.
+    |
+    | This is that line, plus three flat lists. One verdict, one sentence,
+    | and every check sorted into triggered / passed / not checked with a
+    | plain-English name. No nesting by group, no tier vocabulary, no
+    | points arithmetic to interpret.
+    */
+
+    /** Tier -> the word a broker uses, not the word the engine uses. */
+    private const DT_SEVERITY_LABELS = [
+        'low' => 'Low',
+        'medium' => 'Medium',
+        'review' => 'High',
+        'fail' => 'Critical',
+    ];
+
+    private function dtWhyThisScore(array $ctx, array $explanation): array
+    {
+        $triggered = [];
+
+        $passed = [];
+
+        $notChecked = [];
+
+        foreach ($explanation['groups'] as $group) {
+
+            foreach ($group['rules'] as $rule) {
+
+                // Triggered rows name the problem ("DOT number inactive");
+                // passed and not-checked rows name the subject ("DOT number
+                // status"), or a clean list reads as a list of faults.
+                $row = ['area' => $group['label']];
+
+                if ($rule['status'] === 'triggered') {
+
+                    $triggered[] = ['check' => $rule['name']] + $row + [
+                        'severity' => self::DT_SEVERITY_LABELS[$rule['tier']] ?? $rule['tier'],
+                        'points' => $rule['points'],
+                        'result' => $rule['finding'],
+                    ];
+
+                } elseif ($rule['status'] === 'passed') {
+
+                    $passed[] = ['check' => $rule['subject']] + $row;
+
+                } else {
+
+                    $notChecked[] = ['check' => $rule['subject']] + $row
+                        + ['reason' => $rule['not_evaluated_because']];
+
+                }
+
+            }
+
+        }
+
+        // Worst first — the broker should not have to scan for the reason
+        // that actually matters.
+        usort($triggered, fn ($a, $b) => $b['points'] <=> $a['points']);
+
+        [$verdict, $message, $color] = $this->dtVerdict($ctx);
+
+        return [
+
+            'score' => $ctx['overall_score'],
+
+            'grade' => $this->getGrade($ctx['overall_score']),
+
+            'verdict' => $verdict,
+
+            'message' => $message,
+
+            'color' => $color,
+
+            'detail' => $this->dtVerdictDetail($ctx, $triggered, $passed, $notChecked),
+
+            'counts' => [
+                'total' => count($triggered) + count($passed) + count($notChecked),
+                'triggered' => count($triggered),
+                'passed' => count($passed),
+                'not_checked' => count($notChecked),
+            ],
+
+            'triggered' => $triggered,
+
+            'passed' => $passed,
+
+            'not_checked' => $notChecked,
+        ];
+    }
+
+    /**
+     * Three outcomes, because a booking decision has three answers.
+     * A Fail is unappealable; a Review or a sub-70 gauge means someone
+     * looks first; anything else is bookable.
+     */
+    private function dtVerdict(array $ctx): array
+    {
+        if ($ctx['fail']) {
+            return ['disqualified', 'Disqualified — do not book', '#B42318'];
+        }
+
+        if ($ctx['status'] === 'Unacceptable-Review' || $ctx['overall_score'] < 70) {
+            return ['medium_risk', 'Medium risk — review before booking', '#D9822B'];
+        }
+
+        return ['good_to_go', 'Good to go', '#1B7A4D'];
+    }
+
+    /** One sentence saying what drove it. */
+    private function dtVerdictDetail(array $ctx, array $triggered, array $passed, array $notChecked): string
+    {
+        if ($ctx['fail']) {
+
+            $reasons = array_column(array_filter(
+                $triggered,
+                fn ($row) => $row['severity'] === 'Critical'
+            ), 'result');
+
+            return $reasons === []
+                ? 'A blocking check failed.'
+                : implode(' ', $reasons);
+        }
+
+        $parts = [];
+
+        if ($triggered === []) {
+            $parts[] = 'Nothing triggered — cleared all '.count($passed).' checks we could run.';
+        } else {
+            $parts[] = count($triggered) === 1
+                ? '1 check triggered: '.$triggered[0]['result']
+                : count($triggered).' checks triggered, worst first: '.$triggered[0]['result'];
+        }
+
+        if ($ctx['cap_applied'] !== null) {
+            $parts[] = 'Score held at '.$ctx['cap_applied']['cap'].' — '
+                .lcfirst(rtrim($ctx['cap_applied']['reason'] ?? 'a cap applied.', '.')).'.';
+        }
+
+        if ($notChecked !== []) {
+            $parts[] = count($notChecked).' checks could not be run on missing data.';
+        }
+
+        return implode(' ', $parts);
     }
 }
