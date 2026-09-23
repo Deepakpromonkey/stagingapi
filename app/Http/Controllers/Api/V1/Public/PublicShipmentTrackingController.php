@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api\V1\Public;
 use App\Http\Controllers\Api\V1\BaseController;
 use App\Models\Eld\EldLocation;
 use App\Models\Shipment;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The page a customer opens with nothing but a link — no login, no company
@@ -13,15 +15,19 @@ use App\Models\Shipment;
  * answers with a token, not a uuid (see the tracking_token migration for why
  * that split matters), and it never returns anything that identifies the
  * carrier, the driver, or this broker's internal ids — only what a shipper
- * needs in order to know where their freight is.
+ * needs in order to know where their freight is. That guarantee applies
+ * identically to every tracking_method — a driver_phone load's GPS trail
+ * comes off driver_locations, but the field selection there is exactly as
+ * tight as EldLocation's below, on purpose.
  *
  * `state` is the coarse status (pending/in_transit/delivered/cancelled);
  * `milestone` is the finer-grained stage within in_transit — one of
- * Shipment::MILESTONES, via Shipment::eldMilestone() (see there for why
+ * Shipment::MILESTONES, via Shipment::currentMilestone() (see there for why
  * arrived_at_origin/destination only populate for a load whose origin and
- * destination were picked from the map autocomplete, not typed by hand).
- * The same method backs the broker's own /eld/track endpoint, so the two
- * views can never disagree about what stage a load is in.
+ * destination were picked from the map autocomplete, not typed by hand, on
+ * the ELD path). The same method backs the broker's own /eld/track endpoint
+ * for ELD loads, so the two views can never disagree about what stage an
+ * ELD load is in.
  */
 class PublicShipmentTrackingController extends BaseController
 {
@@ -58,10 +64,22 @@ class PublicShipmentTrackingController extends BaseController
         // included — a completed load's whole point on this page is showing
         // the finished journey, all four steps checked off, not just the
         // fact that it's done.
+        //
+        // arrived_at_origin_at / arrived_at_destination_at stay ELD-only
+        // below on purpose — those two columns are only ever written by
+        // EldTrackingService's geofencing pass, so a driver_phone load has
+        // nothing real to put there. `milestone` alone (from
+        // currentMilestone(), which does read the driver-app's own
+        // timestamps for that path) is what the page actually renders the
+        // stepper from - see EldMilestones.jsx.
         $base += [
-            'milestone' => $shipment->eldMilestone(),
-            'arrived_at_origin_at' => optional($shipment->arrived_at_origin_at)->toIso8601String(),
-            'arrived_at_destination_at' => optional($shipment->arrived_at_destination_at)->toIso8601String(),
+            'milestone' => $shipment->currentMilestone(),
+            'arrived_at_origin_at' => $shipment->tracking_method === 'eld'
+                ? optional($shipment->arrived_at_origin_at)->toIso8601String()
+                : null,
+            'arrived_at_destination_at' => $shipment->tracking_method === 'eld'
+                ? optional($shipment->arrived_at_destination_at)->toIso8601String()
+                : null,
         ];
 
         if ($shipment->status === 'completed') {
@@ -74,7 +92,7 @@ class PublicShipmentTrackingController extends BaseController
         }
 
         return $base + [
-            'state' => $shipment->eld_tracking_started_at ? 'in_transit' : 'pending',
+            'state' => $this->isInTransit($shipment) ? 'in_transit' : 'pending',
 
             // What the page's own poll rate is paced against — no reason to
             // ask more often than the broker's own chosen tracking
@@ -86,35 +104,99 @@ class PublicShipmentTrackingController extends BaseController
     }
 
     /**
-     * Only ELD loads have anywhere to read a position from right now —
-     * driver-phone tracking has no live location write path yet. A load on
-     * that method returns null here rather than erroring, same as an ELD load
-     * that hasn't reported in yet: "no position available" is a normal state
-     * for this page, not a fault.
+     * ELD loads keep the exact existing check - a load whose poller has
+     * actually been started, not merely "active" in status (the two can be
+     * briefly out of step around Start/Stop). Everything else has no such
+     * column to check, so status itself - which the broker's own dispatch
+     * action sets - is the only signal there is.
+     */
+    private function isInTransit(Shipment $shipment): bool
+    {
+        if ($shipment->tracking_method === 'eld') {
+            return (bool) $shipment->eld_tracking_started_at;
+        }
+
+        return $shipment->status === 'active';
+    }
+
+    /**
+     * The live position, read from whichever source this shipment's
+     * tracking method actually writes to.
+     *
+     * ELD loads: unchanged, EldLocation exactly as before.
+     *
+     * Everything else: the driver app's own driver_locations table (a
+     * separate app's table in this same database — see
+     * DriverActivityService's docblock), latest row by shipment_uuid.
+     * Field selection is deliberately as tight as the ELD branch's: lat,
+     * lng, a timestamp, nothing that names the driver.
+     *
+     * A load on either path with nothing to report returns null rather
+     * than erroring — "no position available" is a normal state for this
+     * page, not a fault. A query against a table that does not exist in
+     * this environment (the driver app's migrations never ran here, e.g.
+     * in tests) degrades the same way rather than 500ing a public page.
      */
     private function currentPosition(Shipment $shipment): ?array
     {
-        if ($shipment->tracking_method !== 'eld'
-            || ! $shipment->eld_connection_id
-            || ! $shipment->eld_vehicle_terminal_id) {
+        if ($shipment->tracking_method === 'eld') {
+
+            if (! $shipment->eld_connection_id || ! $shipment->eld_vehicle_terminal_id) {
+                return null;
+            }
+
+            $location = EldLocation::query()
+                ->where('eld_connection_id', $shipment->eld_connection_id)
+                ->where('vehicle_terminal_id', $shipment->eld_vehicle_terminal_id)
+                ->orderByDesc('located_at')
+                ->first(['latitude', 'longitude', 'description', 'located_at']);
+
+            if (! $location) {
+                return null;
+            }
+
+            return [
+                'latitude' => $location->latitude,
+                'longitude' => $location->longitude,
+                'description' => $location->description,
+                'last_updated_at' => optional($location->located_at)->toIso8601String(),
+            ];
+        }
+
+        if (! $shipment->uuid) {
             return null;
         }
 
-        $location = EldLocation::query()
-            ->where('eld_connection_id', $shipment->eld_connection_id)
-            ->where('vehicle_terminal_id', $shipment->eld_vehicle_terminal_id)
-            ->orderByDesc('located_at')
-            ->first(['latitude', 'longitude', 'description', 'located_at']);
+        try {
+            $ping = DB::table('driver_locations')
+                ->where('shipment_uuid', $shipment->uuid)
+                ->orderByDesc('id')
+                ->first(['lat', 'lng', 'created_at']);
+        } catch (\Throwable $e) {
+            Log::warning('[PublicTracking] driver_locations lookup failed', [
+                'shipment_uuid' => $shipment->uuid,
+                'error' => $e->getMessage(),
+            ]);
 
-        if (! $location) {
+            return null;
+        }
+
+        if (! $ping) {
             return null;
         }
 
         return [
-            'latitude' => $location->latitude,
-            'longitude' => $location->longitude,
-            'description' => $location->description,
-            'last_updated_at' => optional($location->located_at)->toIso8601String(),
+            'latitude' => (float) $ping->lat,
+            'longitude' => (float) $ping->lng,
+            'description' => null,
+
+            // A raw DB::table() row hands back created_at as a plain
+            // string, not a Carbon instance - Eloquent's date casting is
+            // what usually does that conversion, and there is no model
+            // here to do it.
+            'last_updated_at' => $ping->created_at
+                ? \Illuminate\Support\Carbon::parse($ping->created_at)->toIso8601String()
+                : null,
         ];
     }
 }

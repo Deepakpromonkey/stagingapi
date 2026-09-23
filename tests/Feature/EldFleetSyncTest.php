@@ -4,7 +4,6 @@ namespace Tests\Feature;
 
 use App\Models\Eld\EldConnection;
 use App\Models\Eld\EldDriver;
-use App\Models\Eld\EldHosLog;
 use App\Models\Eld\EldLocation;
 use App\Models\Eld\EldSyncCheckpoint;
 use App\Models\Eld\EldVehicle;
@@ -68,6 +67,10 @@ class EldFleetSyncTest extends TestCase
     /**
      * A fleet spread over two pages, so a walk that stopped on a short page
      * would lose the tail of it.
+     *
+     * No /hos/logs fixture on purpose - EldSyncService::sync() no longer
+     * attempts that resource at all (nothing in the app ever read
+     * EldHosLog), so there is no request for one to answer.
      */
     private function fakeFleet(array $overrides = []): void
     {
@@ -124,18 +127,6 @@ class EldFleetSyncTest extends TestCase
                     'metadata' => ['modifiedAt' => '2026-09-06T11:00:00.000Z'],
                 ]],
             ]),
-
-            $this->base.'/hos/logs*' => Http::response([
-                'results' => [[
-                    'id' => 'hos_1',
-                    'driver' => 'drv_1',
-                    'vehicle' => 'vcl_1',
-                    'type' => 'driving',
-                    'startTime' => '2026-09-06T08:00:00.000Z',
-                    'endTime' => '2026-09-06T14:00:00.000Z',
-                    'metadata' => ['modifiedAt' => '2026-09-06T15:00:00.000Z'],
-                ]],
-            ]),
         ]);
     }
 
@@ -163,14 +154,6 @@ class EldFleetSyncTest extends TestCase
         $this->assertSame('1HGCM82633A004352', $vehicle->vin);
 
         $this->assertSame('jdoe', EldDriver::firstOrFail()->username);
-
-        $log = EldHosLog::firstOrFail();
-        $this->assertSame('driving', $log->duty_status);
-        $this->assertSame('drv_1', $log->driver_terminal_id);
-
-        // Derived where the provider does not report it — and never negative,
-        // whichever way round Carbon subtracts.
-        $this->assertSame(21600, $log->duration_seconds);
 
         $location = EldLocation::firstOrFail();
         $this->assertSame('1.5 miles from Austin, TX', $location->description);
@@ -204,7 +187,6 @@ class EldFleetSyncTest extends TestCase
 
         $this->assertSame(2, EldVehicle::count());
         $this->assertSame(1, EldDriver::count());
-        $this->assertSame(1, EldHosLog::count());
         $this->assertSame(1, EldLocation::count());
     }
 
@@ -250,11 +232,17 @@ class EldFleetSyncTest extends TestCase
     {
         // Terminal's real answer when a model is not entitled on the account:
         // it names the permission, and it will say the same on every retry.
+        //
+        // locations, not hos: hos is never attempted any more (see
+        // fakeFleet()'s own docblock), so it can no longer stand in for "a
+        // resource this account cannot read" - locations is the resource
+        // that guarantee actually needs covering today, and it is
+        // permission-gated on real Terminal accounts the same way hos was.
         $this->fakeFleet([
-            $this->base.'/hos/logs*' => Http::response([
+            $this->base.'/vehicles/*/locations*' => Http::response([
                 'code' => 'forbidden',
                 'message' => 'Forbidden Request',
-                'detail' => 'Oops! Your Terminal account requires the following permissions to perform this operation: hos:read.',
+                'detail' => 'Oops! Your Terminal account requires the following permissions to perform this operation: vehicle-location:read.',
             ], 403),
         ]);
 
@@ -268,13 +256,12 @@ class EldFleetSyncTest extends TestCase
         $this->assertSame(EldConnection::SYNC_COMPLETED, $connection->sync_status);
         $this->assertSame(2, EldVehicle::count());
         $this->assertSame(1, EldDriver::count());
-        $this->assertSame(1, EldLocation::count());
-        $this->assertSame(0, EldHosLog::count());
+        $this->assertSame(0, EldLocation::count());
 
-        // And says what it could not, so an empty hours-of-service column reads
-        // as "refused" rather than "the driver never drove".
-        $this->assertStringContainsString('hos', (string) $connection->last_sync_error);
-        $this->assertStringContainsString('hos:read', (string) $connection->last_sync_error);
+        // And says what it could not, so a blank live-position column reads
+        // as "refused" rather than "the truck never moved".
+        $this->assertStringContainsString('locations', (string) $connection->last_sync_error);
+        $this->assertStringContainsString('vehicle-location:read', (string) $connection->last_sync_error);
     }
 
     public function test_a_transient_failure_still_fails_the_pass(): void

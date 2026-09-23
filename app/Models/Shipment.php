@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 
 class Shipment extends Model
 {
@@ -207,6 +208,62 @@ public function eldMilestone(): ?string
     }
 
     if ($this->arrived_at_origin_at) {
+        return 'in_transit';
+    }
+
+    return 'arrived_at_origin';
+}
+
+/**
+ * The current milestone, from whichever source this shipment's tracking
+ * method actually writes to.
+ *
+ * ELD loads delegate straight to eldMilestone() - untouched, so the
+ * broker's own /eld/track endpoint and every existing ELD test keep
+ * reading exactly the value they always have.
+ *
+ * driver_phone (and anything else non-ELD) loads have no
+ * arrived_at_origin_at / arrived_at_destination_at of their own - those
+ * two columns are written only by EldTrackingService's geofencing pass.
+ * The driver app writes shipper_arrived_at / receiver_arrived_at onto
+ * shipment_journeys instead - a separate app's table in this same
+ * database, read directly the same way DriverActivityService reads it
+ * (see that class's docblock). Same four-stage shape as eldMilestone(),
+ * different source, no shared state between the two paths.
+ *
+ * The query is guarded the same way currentPosition() guards its own read
+ * of the driver app's tables: a driver_phone load is still "in transit,
+ * first stage" while shipment_journeys is unreachable, never a 500 on the
+ * one endpoint a stranger with a link is expected to be able to call.
+ */
+public function currentMilestone(): ?string
+{
+    if ($this->status === 'completed') {
+        return 'delivered';
+    }
+
+    if ($this->status !== 'active') {
+        return null;
+    }
+
+    if ($this->tracking_method === 'eld') {
+        return $this->eldMilestone();
+    }
+
+    try {
+        $journey = DB::table('shipment_journeys')
+            ->where('shipment_id', $this->id)
+            ->latest('id')
+            ->first(['shipper_arrived_at', 'receiver_arrived_at']);
+    } catch (\Throwable) {
+        return 'arrived_at_origin';
+    }
+
+    if ($journey?->receiver_arrived_at) {
+        return 'arrived_at_destination';
+    }
+
+    if ($journey?->shipper_arrived_at) {
         return 'in_transit';
     }
 
