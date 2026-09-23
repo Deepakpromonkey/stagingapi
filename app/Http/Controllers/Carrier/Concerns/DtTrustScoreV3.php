@@ -2425,20 +2425,36 @@ trait DtTrustScoreV3
         return $steps;
     }
 
-    /** snake_case input key -> something a human can read on a card. */
+    /**
+     * snake_case input key -> something a human can read on a card.
+     *
+     * Word by word, because the acronyms have to survive: "vehicle_oos_pct"
+     * is "Vehicle OOS %", not "Vehicle oos pct".
+     */
     private function dtHumanize(string $key): string
     {
-        $words = ucfirst(str_replace('_', ' ', $key));
+        $acronyms = [
+            'bipd' => 'BIPD',
+            'dot' => 'DOT',
+            'hos' => 'HOS',
+            'mcs150' => 'MCS-150',
+            'oos' => 'OOS',
+            'pct' => '%',
+            'sms' => 'SMS',
+            'vin' => 'VIN',
+            'vins' => 'VINs',
+            'id' => 'ID',
+            'mc' => 'MC',
+        ];
 
-        return strtr($words, [
-            'Bipd' => 'BIPD',
-            'Dot ' => 'DOT ',
-            'Mcs150' => 'MCS-150',
-            'Oos' => 'OOS',
-            'Sms ' => 'SMS ',
-            'Vin' => 'VIN',
-            'Hos ' => 'HOS ',
-            'Pct' => '%',
-        ]);
+        $words = [];
+
+        foreach (explode('_', $key) as $index => $word) {
+
+            $words[] = $acronyms[$word] ?? ($index === 0 ? ucfirst($word) : $word);
+
+        }
+
+        return implode(' ', $words);
     }
 }
