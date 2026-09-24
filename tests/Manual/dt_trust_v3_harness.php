@@ -754,6 +754,19 @@ check('M&M replica -> 375 pts, 83, tenure cap not binding, manual review on',
     && $r['v3']['needs_manual_review'] === true,
     json_encode([$r['v3']['risk_points'], $r['overall_score'], $r['v3']['score_cap_applied'], $r['v3']['rules_fired']]));
 
+/* 50. why_this_score rows carry their inputs, and a binding cap is named */
+$r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(300))])])]);
+$w = $r['why_this_score'];
+$age = array_values(array_filter($w['passed'], fn ($x) => $x['check'] === 'Authority age (90 days)'))[0] ?? null;
+check('why_this_score: authority-age row shows 300 days, score_cap names the 84 ceiling',
+    ($age['parameters'][0]['display'] ?? null) === '300 days'
+    && ($w['score_cap']['cap'] ?? null) === 84 && ($w['score_cap']['score_before_cap'] ?? null) === 100,
+    json_encode([$age, $w['score_cap']]));
+
+$r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(400))])])]);
+check('why_this_score: no cap -> score_cap null', $r['why_this_score']['score_cap'] === null,
+    json_encode($r['why_this_score']['score_cap']));
+
 echo "\n{$pass} passed, {$fail} failed\n";
 exit($fail === 0 ? 0 : 1);
 

@@ -2568,6 +2568,170 @@ trait DtTrustScoreV3
         'fail' => 'Critical',
     ];
 
+    /**
+     * Rule -> the group parameters it reads, so each why_this_score row can
+     * show the numbers behind the verdict ("Authority age: 322 days").
+     * Keys are looked up across all groups; "a.b" reaches into an array
+     * parameter. A rule with no entry simply shows no values.
+     */
+    private const DT_RULE_PARAMS = [
+        'AUTH-01' => ['common_authority', 'contract_authority'],
+        'AUTH-03' => ['active_oos_orders'],
+        'AUTH-08' => ['prior_revoke_flag', 'common_authority'],
+        'AUTH-09' => ['revocation_count'],
+        'AUTH-10' => ['suspension_orders'],
+        'AUTH-12' => ['broker_authority', 'common_authority', 'contract_authority'],
+        'OPS-01' => ['carrier_authority_age_days'],
+        'OPS-04' => ['carrier_authority_age_days'],
+        'INS-01' => ['bipd_on_file_amount'],
+        'INS-02' => ['bipd_on_file_amount', 'bipd_required_amount'],
+        'INS-03' => ['cargo_required'],
+        'INS-04' => ['bond_required', 'broker_authority'],
+        'INS-10' => ['pending_filings'],
+        'INS-11' => ['rejected_filings'],
+        'INS-12' => ['insurance_company_changes'],
+        'SAF-01' => ['safety_rating'],
+        'SAF-02' => ['safety_rating'],
+        'SMS-UNSAFE_DRIV' => ['unsafe_driv_measure'],
+        'SMS-HOS_DRIV' => ['hos_driv_measure'],
+        'SMS-DRIV_FIT' => ['driv_fit_measure'],
+        'SMS-CONTR_SUBST' => ['contr_subst_measure'],
+        'SMS-VEH_MAINT' => ['veh_maint_measure'],
+        'SMS-MULTI' => ['basics_over_threshold'],
+        'SAF-10' => ['vehicle_oos_pct', 'natl_vehicle_oos_pct'],
+        'SAF-11' => ['driver_oos_pct', 'natl_driver_oos_pct'],
+        'CR-01' => ['fatalities_24mo', 'power_units'],
+        'CR-02' => ['crashes_per_unit_year', 'crashes_24mo', 'power_units'],
+        'CR-03' => ['crashes_24mo'],
+        'CR-04' => ['tow_away_24mo'],
+        'INSP-01' => ['violation_rate', 'inspections_with_violations', 'inspection_count'],
+        'INSP-02' => ['inspection_count', 'carrier_authority_age_days'],
+        'INSP-03' => ['last_inspection_days_ago'],
+        'NET-01' => ['network_graph.phone'],
+        'NET-02' => ['network_graph.email'],
+        'NET-03' => ['network_graph.address'],
+        'NET-04' => ['network_graph.vin'],
+        'ID-01' => ['virtual_address'],
+        'ID-03' => ['email'],
+        'OPS-10' => ['mcs150_year'],
+        'OPS-11' => ['reported_power_units', 'observed_units'],
+        'OPS-12' => ['false_filing_citations', 'false_filing_codes'],
+        'OPS-13' => ['observed_units', 'reported_power_units'],
+    ];
+
+    /** Parameter key -> [card label, display format]. */
+    private const DT_PARAM_LABELS = [
+        'common_authority' => ['Common authority', 'authority'],
+        'contract_authority' => ['Contract authority', 'authority'],
+        'broker_authority' => ['Broker authority', 'authority'],
+        'active_oos_orders' => ['Active out-of-service orders', 'count'],
+        'prior_revoke_flag' => ['Previously revoked', 'flag'],
+        'revocation_count' => ['Revocations on record', 'count'],
+        'suspension_orders' => ['Suspension orders', 'count'],
+        'carrier_authority_age_days' => ['Authority age', 'days'],
+        'bipd_on_file_amount' => ['BIPD on file', 'usd'],
+        'bipd_required_amount' => ['BIPD required', 'usd'],
+        'cargo_required' => ['Cargo insurance required', 'flag'],
+        'bond_required' => ['Bond / trust required', 'flag'],
+        'pending_filings' => ['Pending insurance filings', 'count'],
+        'rejected_filings' => ['Rejected filings', 'count'],
+        'insurance_company_changes' => ['Insurance companies on record', 'count'],
+        'safety_rating' => ['Safety rating', 'text'],
+        'unsafe_driv_measure' => ['Unsafe Driving measure', 'number'],
+        'hos_driv_measure' => ['HOS measure', 'number'],
+        'driv_fit_measure' => ['Driver Fitness measure', 'number'],
+        'contr_subst_measure' => ['Controlled Substances measure', 'number'],
+        'veh_maint_measure' => ['Vehicle Maintenance measure', 'number'],
+        'basics_over_threshold' => ['BASICs over threshold', 'count'],
+        'vehicle_oos_pct' => ['Vehicle OOS rate', 'pct'],
+        'natl_vehicle_oos_pct' => ['National vehicle OOS average', 'pct'],
+        'driver_oos_pct' => ['Driver OOS rate', 'pct'],
+        'natl_driver_oos_pct' => ['National driver OOS average', 'pct'],
+        'fatalities_24mo' => ['Fatalities (24 months)', 'count'],
+        'power_units' => ['Power units', 'count'],
+        'crashes_per_unit_year' => ['Crashes per power unit per year', 'number'],
+        'crashes_24mo' => ['Crashes (24 months)', 'count'],
+        'tow_away_24mo' => ['Tow-away crashes (24 months)', 'count'],
+        'violation_rate' => ['Violation rate', 'ratio'],
+        'inspections_with_violations' => ['Inspections with violations', 'count'],
+        'inspection_count' => ['Roadside inspections', 'count'],
+        'last_inspection_days_ago' => ['Last inspection', 'days_ago'],
+        'network_graph.phone' => ['Other carriers on this phone', 'count'],
+        'network_graph.email' => ['Other carriers on this email', 'count'],
+        'network_graph.address' => ['Other carriers at this address', 'count'],
+        'network_graph.vin' => ['Other carriers on these VINs', 'count'],
+        'virtual_address' => ['Mail-drop address', 'flag'],
+        'email' => ['Contact email', 'text'],
+        'mcs150_year' => ['Last MCS-150 filed', 'year'],
+        'reported_power_units' => ['Power units reported', 'count'],
+        'observed_units' => ['Power units seen at roadside', 'count'],
+        'false_filing_citations' => ['False-filing citations', 'count'],
+        'false_filing_codes' => ['Citation codes', 'list'],
+    ];
+
+    /** The parameters one rule read, labelled and formatted for a card. */
+    private function dtRuleParameters(string $ruleId, array $params): array
+    {
+        $rows = [];
+
+        foreach (self::DT_RULE_PARAMS[$ruleId] ?? [] as $key) {
+
+            // Plain lookup, not data_get(): the manual harness runs this
+            // trait without the framework helpers.
+            $value = $params;
+
+            foreach (explode('.', $key) as $segment) {
+                $value = is_array($value) ? ($value[$segment] ?? null) : null;
+            }
+
+            [$label, $format] = self::DT_PARAM_LABELS[$key] ?? [$this->dtHumanize($key), 'text'];
+
+            // An empty code list next to a zero count says nothing new.
+            if ($format === 'list' && empty($value)) {
+                continue;
+            }
+
+            $rows[] = [
+                'key' => $key,
+                'label' => $label,
+                'value' => $value,
+                'display' => $this->dtParamDisplay($format, $value),
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function dtParamDisplay(string $format, $value): string
+    {
+        if ($value === null || $value === '') {
+            return 'Not available';
+        }
+
+        return match ($format) {
+            'authority' => match (strtoupper((string) $value)) {
+                'A' => 'Active',
+                'I' => 'Inactive',
+                'N' => 'None',
+                default => (string) $value,
+            },
+            'flag' => match (true) {
+                is_bool($value) => $value ? 'Yes' : 'No',
+                in_array(strtoupper((string) $value), ['Y', 'YES', '1', 'TRUE'], true) => 'Yes',
+                default => 'No',
+            },
+            'usd' => '$'.number_format((float) $value),
+            'pct' => rtrim(rtrim(number_format((float) $value, 2), '0'), '.').'%',
+            'ratio' => rtrim(rtrim(number_format((float) $value * 100, 1), '0'), '.').'%',
+            'days' => number_format((int) $value).' days',
+            'days_ago' => number_format((int) $value).' days ago',
+            'count', 'year' => (string) (int) $value,
+            'number' => rtrim(rtrim(number_format((float) $value, 2), '0'), '.'),
+            'list' => implode(', ', (array) $value),
+            default => is_array($value) ? implode(', ', $value) : (string) $value,
+        };
+    }
+
     private function dtWhyThisScore(array $ctx, array $explanation): array
     {
         $triggered = [];
@@ -2576,6 +2740,16 @@ trait DtTrustScoreV3
 
         $notChecked = [];
 
+        // One flat lookup: a rule can read a parameter another group
+        // recorded (AUTH-08 reads the census prior-revoke flag).
+        $params = [];
+
+        foreach ($explanation['groups'] as $group) {
+            foreach ($group['parameters'] as $parameter) {
+                $params[$parameter['key']] ??= $parameter['value'];
+            }
+        }
+
         foreach ($explanation['groups'] as $group) {
 
             foreach ($group['rules'] as $rule) {
@@ -2583,7 +2757,10 @@ trait DtTrustScoreV3
                 // Triggered rows name the problem ("DOT number inactive");
                 // passed and not-checked rows name the subject ("DOT number
                 // status"), or a clean list reads as a list of faults.
-                $row = ['area' => $group['label']];
+                $row = [
+                    'area' => $group['label'],
+                    'parameters' => $this->dtRuleParameters($rule['id'], $params),
+                ];
 
                 if ($rule['status'] === 'triggered') {
 
@@ -2627,6 +2804,16 @@ trait DtTrustScoreV3
             'color' => $color,
 
             'detail' => $this->dtVerdictDetail($ctx, $triggered, $passed, $notChecked),
+
+            // A cap is not a triggered check, so without this a clean
+            // 10-month carrier shows nothing wrong yet sits at 84.
+            'score_cap' => $ctx['fail'] || $ctx['cap_applied'] === null ? null : [
+                'cap' => $ctx['cap_applied']['cap'],
+                'reason' => $ctx['cap_applied']['reason'] ?? null,
+                'area' => self::DT_GROUP_LABELS[$ctx['cap_applied']['group']]
+                    ?? $this->dtHumanize($ctx['cap_applied']['group']),
+                'score_before_cap' => (int) round($ctx['raw_score']),
+            ],
 
             'counts' => [
                 'total' => count($triggered) + count($passed) + count($notChecked),
