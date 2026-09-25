@@ -177,6 +177,13 @@ class CarrierShortlistController extends Controller
                     'authorityHistory:dot_number,op_auth_type,original_action_desc,orig_served_date,disp_action_desc',
                     'crashes:dot_number,report_date,fatalities,injuries,tow_away',
                     'inspections:dot_number,insp_date,vin',
+
+                    // Column-limited for the same reason - the underlying
+                    // table (sms_input_violation) is 6.7M+ rows, busiest
+                    // carriers 10,000-14,000+ violations each. Needed for
+                    // OPS-12 (v3.5): false/misleading federal filing
+                    // citations, unguarded on $carrier->violationDetails.
+                    'violationDetails:dot_number,viol_code',
                 ])
                 ->get();
         } catch (\Throwable $e) {
