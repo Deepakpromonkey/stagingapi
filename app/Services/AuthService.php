@@ -123,6 +123,16 @@ class AuthService
             ->first();
 
         if (! $user || ! Hash::check($data['password'], $user->password)) {
+            // The caller is told the same thing either way, so an address
+            // cannot be probed for. The trail still records which it was.
+            AuditLog::record(AuditLog::LOGIN_FAILED, $user, null, [
+                'email' => $data['email'],
+                'reason' => $user
+                    ? AuditLog::REASON_BAD_PASSWORD
+                    : AuditLog::REASON_UNKNOWN_EMAIL,
+                'portal' => 'broker',
+            ]);
+
             throw ValidationException::withMessages([
                 'email' => ['Invalid email or password.'],
             ]);
@@ -138,6 +148,10 @@ class AuthService
                 request()->ip()
             );
 
+            AuditLog::record(AuditLog::OTP_SENT, $user, $user, [
+                'portal' => 'broker',
+            ]);
+
             return [
                 'requires_otp' => true,
                 'otp_session' => $otpData['otp_session'],
@@ -148,6 +162,11 @@ class AuthService
         $user->tokens()->delete();
 
         $token = $user->createToken('broker-api')->plainTextToken;
+
+        AuditLog::record(AuditLog::LOGIN_SUCCEEDED, $user, $user, [
+            'portal' => 'broker',
+            'second_factor' => false,
+        ]);
 
         return [
             'requires_otp' => false,
@@ -163,6 +182,11 @@ class AuthService
     public function changePassword(User $user, array $data): User
     {
         if (! Hash::check($data['current_password'], $user->password)) {
+            AuditLog::record(AuditLog::PASSWORD_CHANGE_REFUSED, $user, $user, [
+                'reason' => AuditLog::REASON_BAD_PASSWORD,
+                'portal' => 'broker',
+            ]);
+
             throw ValidationException::withMessages([
                 'current_password' => ['Your current password is incorrect.'],
             ]);
@@ -180,6 +204,10 @@ class AuthService
         $user->tokens()
             ->when($currentToken, fn ($query) => $query->where('id', '!=', $currentToken->id))
             ->delete();
+
+        AuditLog::record(AuditLog::PASSWORD_CHANGED, $user, $user, [
+            'portal' => 'broker',
+        ]);
 
         return $user->fresh()->load('company.subscription', 'roles.permissions', 'permissions');
     }
@@ -229,6 +257,12 @@ class AuthService
         ]);
 
         $token = $user->createToken('broker-api')->plainTextToken;
+
+        AuditLog::record(AuditLog::LOGIN_SUCCEEDED, $user, $user, [
+            'portal' => 'broker',
+            'second_factor' => true,
+            'device_remembered' => ! empty($data['remember_device']),
+        ]);
 
         return [
             'token' => $token,

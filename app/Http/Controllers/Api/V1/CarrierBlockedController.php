@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Carriers\Carrier;
 use App\Models\CarrierBlocked;
+use App\Services\AuditLog;
 use App\Services\Carrier\DtSearchScoringService;
 use Illuminate\Http\Request;
 
@@ -125,6 +126,11 @@ class CarrierBlockedController extends Controller
         CarrierBlocked::where('company_id', $request->user()->company_id)
             ->where('carrier_id', $carrierId)
             ->delete();
+
+        AuditLog::recordByCurrentUser(AuditLog::RECORD_DELETED, null, [
+            'record' => 'carrier_blocklist_entry',
+            'carrier_id' => $carrierId,
+        ]);
 
         return response()->json([
             'status' => 'success',

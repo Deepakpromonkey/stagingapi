@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\CarrierQuestion;
+use App\Services\AuditLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -73,6 +74,10 @@ class CarrierQuestionController extends Controller
         if (!$question) {
             return response()->json(['status' => 'error', 'message' => 'Question not found or unauthorized.'], 404);
         }
+
+        AuditLog::recordByCurrentUser(AuditLog::RECORD_DELETED, $question, [
+            'record' => 'carrier_question',
+        ]);
 
         $question->delete();
 

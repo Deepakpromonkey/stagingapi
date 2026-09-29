@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\EmailTemplate;
 
 use App\Http\Controllers\Api\V1\BaseController;
+use App\Services\AuditLog;
 use App\Http\Requests\EmailTemplate\StoreEmailTemplateRequest;
 use App\Http\Requests\EmailTemplate\UpdateEmailTemplateRequest;
 use App\Http\Resources\EmailTemplateResource;
@@ -167,6 +168,10 @@ class EmailTemplateController extends BaseController
         if (! $template) {
             return $this->error('Email template not found.', null, 404);
         }
+
+        AuditLog::recordByCurrentUser(AuditLog::RECORD_DELETED, $template, [
+            'record' => 'email_template',
+        ]);
 
         $this->emailTemplateService->delete($template);
 

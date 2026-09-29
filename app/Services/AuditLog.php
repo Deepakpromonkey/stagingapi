@@ -31,11 +31,17 @@ class AuditLog
     public const PASSWORD_RESET_COMPLETED = 'password.reset_completed';
     public const PASSWORD_CHANGED = 'password.changed';
 
+    /** Someone signed in tried to change a password and got the old one wrong. */
+    public const PASSWORD_CHANGE_REFUSED = 'password.change_refused';
+
     /* Who can get in. */
     public const USER_INVITED = 'user.invited';
     public const INVITATION_RESENT = 'user.invitation_resent';
     public const USER_REMOVED = 'user.removed';
     public const ROLE_CHANGED = 'user.role_changed';
+
+    /** Switched on or off, which decides whether they can sign in at all. */
+    public const ACCOUNT_STATUS_CHANGED = 'user.status_changed';
 
     /* Anything else worth keeping a year. */
     public const RECORD_DELETED = 'record.deleted';

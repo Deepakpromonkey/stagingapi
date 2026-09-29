@@ -8,6 +8,7 @@ use App\Models\CarrierConnectRequest;
 use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierUser;
 use App\Models\EmailTemplate;
+use App\Services\AuditLog;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -424,6 +425,11 @@ class CarrierAccountService
     public function changePassword(CarrierUser $carrierUser, array $data): CarrierUser
     {
         if (! Hash::check($data['current_password'], $carrierUser->password)) {
+            AuditLog::record(AuditLog::PASSWORD_CHANGE_REFUSED, $carrierUser, $carrierUser, [
+                'reason' => AuditLog::REASON_BAD_PASSWORD,
+                'portal' => 'carrier',
+            ]);
+
             throw ValidationException::withMessages([
                 'current_password' => ['Your current password is incorrect.'],
             ]);
@@ -440,6 +446,10 @@ class CarrierAccountService
         $carrierUser->tokens()
             ->when($currentToken, fn ($query) => $query->where('id', '!=', $currentToken->id))
             ->delete();
+
+        AuditLog::record(AuditLog::PASSWORD_CHANGED, $carrierUser, $carrierUser, [
+            'portal' => 'carrier',
+        ]);
 
         return $carrierUser->fresh()->load('carrierCompany', 'roles.permissions');
     }
