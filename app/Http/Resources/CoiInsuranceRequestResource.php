@@ -31,6 +31,15 @@ class CoiInsuranceRequestResource extends JsonResource
             'status' => $this->status,
             'status_label' => $this->statusLabel(),
 
+            // Who on the company account raised it - only present when the
+            // caller eager-loaded the relation (index()/show() both do; a
+            // caller that doesn't skips this rather than lazy-loading a
+            // query per row).
+            'raised_by' => $this->whenLoaded(
+                'user',
+                fn () => $this->user ? trim($this->user->first_name.' '.$this->user->last_name) : null,
+            ),
+
             'recipient_email' => $this->recipient_email,
             'recipient_source' => $this->recipient_source,
 

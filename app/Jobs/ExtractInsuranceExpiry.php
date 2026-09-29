@@ -179,6 +179,10 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
      */
     public function failed(\Throwable $e): void
     {
+        // The full detail - which for a malformed-JSON failure includes the
+        // model's entire (possibly truncated, possibly thousands of
+        // characters long) raw answer - goes here, for whoever is actually
+        // debugging this. It never goes on the row itself; see below.
         Log::error('COI insurance expiry extraction failed', [
             'response_id' => $this->responseId,
             'error' => $e->getMessage(),
@@ -189,7 +193,14 @@ class ExtractInsuranceExpiry implements ShouldBeUnique, ShouldQueue
         $response?->request?->forceFill([
             'status' => CoiInsuranceRequest::STATUS_FAILED,
             'resolved_at' => now(),
-            'last_error' => 'Could not read an expiry date from the reply: '.$e->getMessage(),
+
+            // Capped, not the raw exception message - a malformed-JSON
+            // failure's message is the model's entire answer appended
+            // verbatim (see InsuranceExpiryExtractor::parseDetails()), which
+            // is not something a broker should ever see on this row or in
+            // an API response. The full version is in the log line above.
+            'last_error' => 'Could not read an expiry date from the reply: '
+                .\Illuminate\Support\Str::limit($e->getMessage(), 150),
         ])->save();
     }
 }

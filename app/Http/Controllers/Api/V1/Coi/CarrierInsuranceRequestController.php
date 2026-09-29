@@ -37,7 +37,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $insuranceRequest = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
             ->where('dot_number', $dot)
-            ->with('latestResponse')
+            ->with(['latestResponse', 'user:id,first_name,last_name'])
             ->latest('id')
             ->first();
 
@@ -60,7 +60,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $requests = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
             ->when($request->filled('status'), fn ($query) => $query->where('status', $request->string('status')))
-            ->with('latestResponse')
+            ->with(['latestResponse', 'user:id,first_name,last_name'])
             ->latest('id')
             ->paginate(min((int) $request->integer('per_page', 25), 100));
 
@@ -105,7 +105,11 @@ class CarrierInsuranceRequestController extends Controller
             ], 422);
         }
 
-        $insuranceRequest->load('latestResponse');
+        // Not necessarily $request->user() - raise() is idempotent per
+        // company and DOT, so this can be an existing request a teammate
+        // raised earlier, not a new one from this caller. Loaded properly
+        // rather than assumed, same as index()/show().
+        $insuranceRequest->load(['latestResponse', 'user:id,first_name,last_name']);
 
         return response()->json([
             'status' => 'success',

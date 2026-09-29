@@ -145,8 +145,13 @@ return [
 
         // A certificate yields far more than a sentence of prose does — every
         // coverage row, its exclusions, its scheduled units — and an answer cut
-        // off mid-JSON is thrown away whole.
-        'max_tokens_with_document' => (int) env('COI_LLM_MAX_TOKENS_WITH_DOCUMENT', 4096),
+        // off mid-JSON is thrown away whole. 4096 was still too tight in
+        // practice: a real reply with a 26-vehicle scheduled-auto policy hit
+        // it and lost the whole reading over one truncated string. The ceiling
+        // costs nothing when unused - Anthropic bills for tokens actually
+        // generated, not the limit - so doubled with real headroom instead of
+        // tuning it fleet by fleet.
+        'max_tokens_with_document' => (int) env('COI_LLM_MAX_TOKENS_WITH_DOCUMENT', 8192),
 
         // The reply body is truncated to this before it is sent, so a mail
         // with a 200-page quoted history cannot turn into a large bill.
