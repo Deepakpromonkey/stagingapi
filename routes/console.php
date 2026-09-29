@@ -151,3 +151,13 @@ Schedule::command('eld:poll-shipments')
     ->everyMinute()
     ->withoutOverlapping(5)
     ->onOneServer();
+/*
+| Drop audit trail entries once they pass the one year retention in
+| config/activitylog.php.
+|
+| --force is required because the command asks for confirmation when
+| APP_ENV=production, and the scheduler has no one to answer it.
+*/
+Schedule::command('activitylog:clean --force')
+    ->dailyAt('02:00')
+    ->onOneServer();
