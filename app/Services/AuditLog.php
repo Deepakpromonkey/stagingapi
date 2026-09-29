@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\NotifyTeamsOfAuditEvent;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
@@ -108,13 +109,77 @@ class AuditLog
             // wrong for an event that has no actor, so ask for anonymous.
             $causer ? $logger->causedBy($causer) : $logger->causedByAnonymous();
 
-            $logger->log($event);
+            $activity = $logger->log($event);
         } catch (\Throwable $e) {
             Log::error('Audit trail entry could not be recorded', [
                 'event' => $event,
                 'error' => $e->getMessage(),
             ]);
+
+            return;
         }
+
+        self::announce($event, $subject, $causer, $activity);
+    }
+
+    /**
+     * Put the event in front of the team, if a channel is configured.
+     *
+     * Separate from the write above, and after it: the trail is the record,
+     * the channel is a convenience. A notification that cannot be raised must
+     * never cost us the entry, so this runs only once the row is safely down,
+     * and swallows its own failures.
+     */
+    private static function announce(
+        string $event,
+        ?Model $subject,
+        ?Model $causer,
+        mixed $activity
+    ): void {
+        try {
+            if (! TeamsNotifier::shouldPost($event)) {
+                return;
+            }
+
+            NotifyTeamsOfAuditEvent::dispatch(
+                $event,
+                self::describe($causer),
+                self::describe($subject),
+                // What the trail kept, not what the caller passed: the
+                // credential stripping has already happened by here.
+                is_object($activity) ? (array) ($activity->properties?->toArray() ?? []) : [],
+                now()->toDayDateTimeString(),
+            );
+        } catch (\Throwable $e) {
+            Log::warning('Teams audit alert could not be queued', [
+                'event' => $event,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * A person the channel can recognise, rather than a row id.
+     */
+    private static function describe(?Model $model): ?string
+    {
+        if (! $model) {
+            return null;
+        }
+
+        $name = trim(implode(' ', array_filter([
+            $model->first_name ?? null,
+            $model->last_name ?? null,
+        ]))) ?: ($model->name ?? null);
+
+        $email = $model->email ?? $model->phone_e164 ?? null;
+
+        return match (true) {
+            $name && $email => "{$name} ({$email})",
+            (bool) $email => (string) $email,
+            (bool) $name => (string) $name,
+            default => class_basename($model).' #'.$model->getKey(),
+        };
     }
 
     /**
