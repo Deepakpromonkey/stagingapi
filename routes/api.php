@@ -486,6 +486,11 @@ Route::prefix('v1')->group(function () {
         Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter'])
         ->middleware('throttle:10,1');
 
+        // Polled by the search page for carriers a search returned with
+        // dt_score: null - see AdvancedCarrierSearchController::scores().
+        Route::get('/carrier/scores', [AdvancedCarrierSearchController::class, 'scores']);
+
+
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 

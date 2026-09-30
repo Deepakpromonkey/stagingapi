@@ -84,10 +84,20 @@ Schedule::command('eld:sync-active')
 |
 | `default` is named first because Laravel drains queues in order, and a broker
 | waiting on a request should not queue behind a VIN batch or a fleet import.
-| `eld` is last for the same reason: a first sync after a carrier connects can
-| run for minutes on a large fleet, and nothing is waiting on it. The connection
-| named explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
-| would watch the wrong connection and sit idle forever. See docs/vin-decoding.md.
+| `eld` is last because a first sync after a carrier connects can run for
+| minutes on a large fleet, and nothing is waiting on it. The connection named
+| explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
+| would watch the wrong connection and sit idle forever. See
+| docs/vin-decoding.md.
+|
+| No `dt-score` here on purpose. AdvancedCarrierSearchController's DT scoring
+| (ScoreCarrierSearchPage) dispatches ->afterResponse() instead of onto a
+| queue - it runs inline right after that request's own response goes out,
+| not on this worker's schedule, because a broker waiting on a score benefits
+| from seconds, not from however long until this next runs. See that job's
+| own docblock. The job still declares onQueue('dt-score') so it stays
+| dispatchable as a real queued job if some future call site needs that -
+| if one ever does, add `dt-score` back to the list below for it.
 |
 | Delayed jobs are not "available", so the VIN batches' pacing survives this:
 | the worker exits, and the next run picks up whatever has come due.

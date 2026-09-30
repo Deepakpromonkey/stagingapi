@@ -5,12 +5,13 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Carriers\Carrier;
 use App\Models\CarrierBlocked;
+use App\Services\Carrier\DtSearchScoringService;
 use Illuminate\Http\Request;
 
 class CarrierBlockedController extends Controller
 {
     // 1. GET API to show all Blocked Carriers
-    public function index(Request $request)
+    public function index(Request $request, DtSearchScoringService $scoring)
     {
         // The carrier relation crosses to the EC2 census view, whose rows are
         // very wide. Eager-loading it unqualified pulled every column of every
@@ -39,8 +40,18 @@ class CarrierBlockedController extends Controller
             ->latest()
             ->get();
 
-        $carriers = $blockedList->map(function (CarrierBlocked $entry) {
+        // Blocklists are short (a handful to a few dozen carriers, not
+        // thousands like the shortlist), so every carrier on the page gets
+        // enriched synchronously - no pagination, no background job needed.
+        // See DtSearchScoringService::enrichCarriers() for why this doesn't
+        // duplicate the shortlist page's own copy of the same logic.
+        $carrierIds = $blockedList->pluck('carrier_id')->filter()->unique()->values()->all();
+        $enriched = $scoring->enrichCarriers($carrierIds);
+
+        $carriers = $blockedList->map(function (CarrierBlocked $entry) use ($enriched) {
             $carrier = $entry->carrier?->toArray() ?? [];
+
+            $carrier += $enriched[$entry->carrier_id] ?? [];
 
             $carrier['blocked_by'] = $entry->user
                 ? trim($entry->user->first_name . ' ' . $entry->user->last_name)
