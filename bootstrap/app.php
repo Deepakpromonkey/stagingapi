@@ -33,6 +33,20 @@ return Application::configure(basePath: dirname(__DIR__))
             'permission' => PermissionMiddleware::class,
             'role_or_permission' => RoleOrPermissionMiddleware::class,
         ]);
+
+        /*
+        | This app has no web login page at all (see routes/web.php - a
+        | welcome view and two public token links, nothing auth-guarded), so
+        | there is no route named `login` to redirect anyone to, ever.
+        | Laravel's default guest-redirect only skips itself when the
+        | request "expects JSON"; otherwise it tries route('login') and
+        | throws RouteNotFoundException instead of the 401 the caller
+        | should have gotten - happens to any client (Postman, a mobile
+        | app, a webhook) that does not happen to send
+        | Accept: application/json. Unconditionally null removes the
+        | redirect attempt everywhere, not just under api/*.
+        */
+        $middleware->redirectGuestsTo(fn () => null);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
