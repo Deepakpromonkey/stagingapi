@@ -743,6 +743,19 @@ class CarrierConnectController extends BaseController
             }
         }
 
+        /*
+        | Re-derive the documents flag from the files actually attached.
+        |
+        | The wizard draws each slot from `documents` but gates Continue on
+        | `documents_completed`, so a request whose rows and flag disagree shows
+        | both files and still refuses to move on. Staging got there when
+        | request ids were reused and new invitations picked up the old rows
+        | without the flag. Left alone once signed: the step is long past.
+        */
+        if ($connectRequest->signed_at === null) {
+            $this->syncDocumentsCompletion($connectRequest);
+        }
+
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
         // eldConnection included so a carrier returning to the wizard sees the
