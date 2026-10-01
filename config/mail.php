@@ -59,6 +59,15 @@ return [
             'transport' => 'ses',
         ],
 
+        // SendGrid over HTTPS instead of SMTP - see AppServiceProvider::boot()
+        // for why. Same account, same key the 'smtp' mailer above already
+        // carries in MAIL_PASSWORD; set separately here so switching mailers
+        // doesn't require moving the key between env vars.
+        'sendgrid_api' => [
+            'transport' => 'sendgrid_api',
+            'key' => env('SENDGRID_API_KEY'),
+        ],
+
         'postmark' => [
             'transport' => 'postmark',
             // 'message_stream_id' => env('POSTMARK_MESSAGE_STREAM_ID'),

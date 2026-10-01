@@ -24,7 +24,7 @@ class CarrierImportController extends Controller
         $fileStream = fopen($file->getRealPath(), 'r');
 
         // 2. Read the first row to get the column headers
-        $headers = fgetcsv($fileStream);
+        $headers = fgetcsv($fileStream, escape: '\\');
         $headers = array_map('strtolower', array_map('trim', $headers));
 
         // 3. Smart check: Figure out which column contains the DOT number
@@ -49,7 +49,7 @@ class CarrierImportController extends Controller
 
         // 4. Extract ALL DOT numbers from the CSV into a simple array
         $csvDotNumbers = [];
-        while (($row = fgetcsv($fileStream)) !== false) {
+        while (($row = fgetcsv($fileStream, escape: '\\')) !== false) {
             $dot = trim($row[$dotColumnIndex] ?? '');
             if (!empty($dot)) {
                 $csvDotNumbers[] = $dot;

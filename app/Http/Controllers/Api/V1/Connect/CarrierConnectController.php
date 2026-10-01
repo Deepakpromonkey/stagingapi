@@ -334,6 +334,234 @@ class CarrierConnectController extends BaseController
         );
     }
 
+    /** Emailing hundreds of carriers off one bad paste is not a typo you can undo. */
+    private const BULK_IMPORT_MAX_ROWS = 200;
+
+    /**
+     * The Import button on the Connected Carriers page - invites every DOT
+     * number in an uploaded CSV in one go.
+     *
+     * Same two rules store() enforces: the company needs an active broker
+     * agreement on file before anyone can be invited, and a carrier is only
+     * invited if its FMCSA record has a usable email. Always sends to that
+     * address - store()'s alternate-email-with-approval path is an
+     * interactive, one-carrier-at-a-time flow, and has no sane meaning
+     * across a file of dozens or hundreds of rows, so bulk import doesn't
+     * offer it.
+     *
+     * The create-or-refresh block below is store()'s own FMCSA-address path,
+     * duplicated rather than shared - same judgement call already on record
+     * for CarrierShortlistController's copy of its scoring logic: this
+     * touches a live, tested invitation flow (real mail, a real agreement
+     * requirement) that is not to be disturbed for a second caller. Keep
+     * the two in step by hand if that path changes.
+     *
+     * Never aborts the whole file over one bad row - a DOT that doesn't
+     * resolve, or has no usable email, is recorded in the response instead
+     * of stopping everything after it.
+     */
+    public function bulkImport(Request $request)
+    {
+        $request->validate([
+            'file' => ['required', 'file', 'mimes:csv,txt', 'max:10240'],
+        ]);
+
+        $user = $request->user();
+
+        $agreement = BrokerAgreementDocument::forCompany($user->company_id)
+            ->active()
+            ->latest()
+            ->first();
+
+        if (! $agreement) {
+            return $this->error(
+                'Upload your broker agreement before sending onboarding invitations. '
+                .'Without one the carrier cannot sign at the final step.',
+                null,
+                422
+            );
+        }
+
+        $dots = $this->parseImportDots($request->file('file'));
+
+        if (empty($dots)) {
+            return $this->error(
+                'No DOT numbers were found in that file. It needs a column headed DOT, '
+                .'DOT Number, dot_number or USDOT.',
+                null,
+                422
+            );
+        }
+
+        if (count($dots) > self::BULK_IMPORT_MAX_ROWS) {
+            return $this->error(
+                'That file has '.count($dots).' rows - imports are capped at '
+                .self::BULK_IMPORT_MAX_ROWS.' at a time, so a bad paste cannot email '
+                .'hundreds of carriers at once.',
+                null,
+                422
+            );
+        }
+
+        $invited = [];
+        $skipped = [];
+        $toMail = [];
+
+        foreach ($dots as $dot) {
+            $carrier = $this->findCarrier($dot);
+
+            if (! $carrier) {
+                $skipped[] = ['dot_number' => $dot, 'reason' => 'No carrier found with this DOT number.'];
+
+                continue;
+            }
+
+            $email = trim((string) (config('carrier_connect.test_email') ?: $carrier->email_address));
+
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $skipped[] = [
+                    'dot_number' => $carrier->dot_number,
+                    'legal_name' => $carrier->legal_name,
+                    'reason' => 'No usable email address on file.',
+                ];
+
+                continue;
+            }
+
+            $connectRequest = DB::transaction(function () use ($user, $carrier, $email, $agreement) {
+                $connectRequest = CarrierConnectRequest::firstOrNew([
+                    'company_id' => $user->company_id,
+                    'carrier_row_id' => $carrier->row_id,
+                ]);
+
+                $isNew = ! $connectRequest->exists;
+
+                if ($isNew) {
+                    $connectRequest->uuid = Str::uuid();
+                    $connectRequest->token = Str::random(64);
+                    $connectRequest->status = CarrierConnectRequest::STATUS_NEW;
+                }
+
+                $connectRequest->fill([
+                    'user_id' => $user->id,
+                    'carrier_dot_number' => $carrier->dot_number,
+                    'carrier_legal_name' => $carrier->legal_name ?: $carrier->dba_name,
+                    'carrier_phone' => $carrier->telephone,
+                    'agreement_document_id' => $agreement->id,
+                    'carrier_email' => $email,
+                    'pending_email' => null,
+                    'pending_email_token' => null,
+                    'pending_email_requested_at' => null,
+                    'pending_email_approved_at' => null,
+                    'sent_on' => now(),
+                ]);
+
+                $connectRequest->save();
+
+                if ($isNew) {
+                    $this->prefillFromPreviousOnboarding($connectRequest);
+                }
+
+                return $connectRequest->fresh(['company']);
+            });
+
+            $invited[] = [
+                'dot_number' => $carrier->dot_number,
+                'legal_name' => $connectRequest->carrier_legal_name,
+            ];
+
+            $toMail[] = $connectRequest;
+        }
+
+        if (! empty($toMail)) {
+            // One deferred callback for the whole batch, not one dispatch per
+            // row - afterResponse() registers a terminating callback, and a
+            // hundred of those is a hundred closures Laravel walks through
+            // for no reason a single loop doesn't already cover.
+            $this->afterResponse(function () use ($toMail, $user) {
+                foreach ($toMail as $connectRequest) {
+                    $this->sendInvitationMail($connectRequest, $user);
+                }
+            });
+        }
+
+        return $this->success([
+            'invited' => $invited,
+            'skipped' => $skipped,
+            'total_invited' => count($invited),
+            'total_skipped' => count($skipped),
+        ], count($invited).' of '.count($dots).' carriers invited.');
+    }
+
+    /**
+     * DOT numbers out of an uploaded CSV/TXT file.
+     *
+     * Recognises the same header spellings CarrierImportModal already
+     * advertises elsewhere in the app (DOT, DOT Number, dot_number, USDOT),
+     * case-insensitively. Any other column is ignored. If no recognised
+     * header is found, the first row is treated as data rather than a
+     * header - so a bare single-column list of DOT numbers with no header
+     * at all still works, and nothing is silently dropped for lacking one.
+     *
+     * @return array<int, string>
+     */
+    private function parseImportDots($file): array
+    {
+        $handle = fopen($file->getRealPath(), 'r');
+
+        if (! $handle) {
+            return [];
+        }
+
+        // Escape char pinned explicitly - PHP 8.4 deprecates the implicit
+        // default, and DOT numbers never contain one anyway.
+        $header = fgetcsv($handle, escape: '\\');
+
+        if ($header === false) {
+            fclose($handle);
+
+            return [];
+        }
+
+        $aliases = ['dot', 'dot number', 'dot_number', 'usdot'];
+        $normalized = array_map(fn ($h) => strtolower(trim((string) $h)), $header);
+
+        $dotIndex = null;
+
+        foreach ($normalized as $i => $name) {
+            if (in_array($name, $aliases, true)) {
+                $dotIndex = $i;
+
+                break;
+            }
+        }
+
+        $dots = [];
+
+        if ($dotIndex === null) {
+            $dotIndex = 0;
+
+            $first = preg_replace('/[^0-9]/', '', (string) ($header[0] ?? ''));
+
+            if ($first !== '') {
+                $dots[] = $first;
+            }
+        }
+
+        while (($line = fgetcsv($handle, escape: '\\')) !== false) {
+            $raw = trim((string) ($line[$dotIndex] ?? ''));
+            $dot = preg_replace('/[^0-9]/', '', $raw);
+
+            if ($dot !== '') {
+                $dots[] = $dot;
+            }
+        }
+
+        fclose($handle);
+
+        return array_values(array_unique($dots));
+    }
+
     /**
      * The link in the approval email, opened from the carrier's FMCSA-registered
      * inbox. Reaching it is the carrier's consent to onboarding being run

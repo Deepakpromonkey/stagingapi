@@ -543,6 +543,8 @@ Route::prefix('v1')->group(function () {
 
         Route::post('/carrier-connect', [CarrierConnectController::class, 'store'])
             ->middleware(PermissionMiddleware::using('send-invitation-approved-carriers'));
+        Route::post('/carrier-connect/bulk-import', [CarrierConnectController::class, 'bulkImport'])
+            ->middleware(PermissionMiddleware::using('send-invitation-approved-carriers'));
         Route::get('/carrier-connect/{uuid}/files/{type}', [CarrierConnectController::class, 'downloadFile']);
 
         // shortlist carriers

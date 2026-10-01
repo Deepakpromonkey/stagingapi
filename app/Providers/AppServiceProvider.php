@@ -5,7 +5,10 @@ namespace App\Providers;
 use Anthropic\Client as AnthropicClient;
 use App\Models\User;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
+use Symfony\Component\Mailer\Bridge\Sendgrid\Transport\SendgridTransportFactory;
+use Symfony\Component\Mailer\Transport\Dsn;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -50,6 +53,29 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        /*
+         | SendGrid over its HTTP API instead of SMTP.
+         |
+         | Every outbound port SMTP needs (25, 465, 587) is blocked on this
+         | network - confirmed directly: all three time out, while HTTPS to
+         | SendGrid itself returns a normal response. The SMTP mailer was
+         | never going to work here no matter how MAIL_HOST/MAIL_PORT were
+         | set, because the block is on the port, not the destination. The
+         | API transport sends the exact same mail through the exact same
+         | SendGrid account, just over 443 like any other HTTPS request this
+         | app already makes - see the 'sendgrid_api' mailer in
+         | config/mail.php.
+         |
+         | Laravel wires up Mailgun, Postmark, SES and a few others by
+         | default but not SendGrid, even with the bridge package installed,
+         | so the transport has to be registered by hand here.
+         */
+        Mail::extend('sendgrid_api', function (array $config) {
+            return (new SendgridTransportFactory)->create(
+                new Dsn('sendgrid+api', 'default', $config['key'] ?? null)
+            );
+        });
+
         // Override capability is granted independently of the seat type: a
         // user-level value wins, otherwise the check falls through to the
         // role's permissions.
