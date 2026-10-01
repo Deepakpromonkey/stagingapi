@@ -37,6 +37,35 @@
             </tr>
         </table>
 
+        {{--
+            Only the questions this request actually asked. Rendered from the
+            row rather than hard-coded, so what the agency was asked and what
+            the reply is read against cannot drift apart.
+        --}}
+        @php($asks = $request->asks ?: array_keys(\App\Models\CoiInsuranceRequest::ASKS))
+
+        @if (count($asks))
+            <p style="margin:0 0 8px;">So that we do not have to come back to you, please confirm:</p>
+
+            <ol style="margin:0 0 16px; padding-left:20px;">
+                @foreach ($asks as $ask)
+                    @if (isset(\App\Models\CoiInsuranceRequest::ASKS[$ask]))
+                        <li style="margin-bottom:4px;">
+                            {{ \App\Models\CoiInsuranceRequest::ASKS[$ask] }}
+
+                            @if ($ask === 'holder' && $request->holder_name)
+                                <br><strong>{{ $request->holder_name }}</strong>
+                            @endif
+                        </li>
+                    @endif
+                @endforeach
+            </ol>
+        @endif
+
+        @if ($request->ask_note)
+            <p style="margin:0 0 16px;">{{ $request->ask_note }}</p>
+        @endif
+
         <p style="margin:0 0 16px;">Appreciate your quick response.</p>
 
         <p style="margin:0;">Thanks and Regards<br>DollarTraq Team</p>

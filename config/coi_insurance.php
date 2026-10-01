@@ -81,6 +81,54 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Reply attachments
+    |--------------------------------------------------------------------------
+    |
+    | The certificate itself usually arrives as a PDF hanging off the reply, so
+    | the files are kept alongside the prose and shown on the card.
+    |
+    | Anyone can mail the inbox — the address rides on every request that goes
+    | out — so this is an allow-list, not a block-list: only what a certificate
+    | plausibly arrives as is stored, and everything else is dropped with a log
+    | line. The cap is per file; a reply carrying more than `max_per_reply` is
+    | truncated rather than refused.
+    |
+    */
+
+    'attachments' => [
+        'disk' => env('COI_ATTACHMENT_DISK', 's3'),
+
+        'max_bytes' => (int) env('COI_ATTACHMENT_MAX_BYTES', 15 * 1024 * 1024),
+        'max_per_reply' => (int) env('COI_ATTACHMENT_MAX_PER_REPLY', 10),
+
+        /*
+        | How much of a reply's attachments the extraction may actually read.
+        |
+        | Separate from the storage caps above, and lower: storing a file is
+        | pennies, sending it to the model is paid for per megabyte on a mail
+        | that anyone can send us. Three documents covers a certificate, an
+        | endorsement and a schedule, which is what a real reply carries.
+        */
+        'max_documents_read' => (int) env('COI_ATTACHMENT_MAX_DOCUMENTS_READ', 3),
+        'max_read_bytes' => (int) env('COI_ATTACHMENT_MAX_READ_BYTES', 8 * 1024 * 1024),
+
+        'allowed_types' => [
+            'application/pdf',
+            'image/png',
+            'image/jpeg',
+            'image/gif',
+            'image/tiff',
+            'image/webp',
+        ],
+
+        // Only consulted when the content sniffs as nothing in particular —
+        // a mail client that sends every file as octet-stream leaves the
+        // extension as the one piece of evidence there is.
+        'allowed_extensions' => ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'tif', 'tiff', 'webp'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Expiry extraction
     |--------------------------------------------------------------------------
     |
@@ -94,6 +142,16 @@ return [
     'llm' => [
         'model' => env('COI_LLM_MODEL', 'claude-opus-5'),
         'max_tokens' => (int) env('COI_LLM_MAX_TOKENS', 1024),
+
+        // A certificate yields far more than a sentence of prose does — every
+        // coverage row, its exclusions, its scheduled units — and an answer cut
+        // off mid-JSON is thrown away whole. 4096 was still too tight in
+        // practice: a real reply with a 26-vehicle scheduled-auto policy hit
+        // it and lost the whole reading over one truncated string. The ceiling
+        // costs nothing when unused - Anthropic bills for tokens actually
+        // generated, not the limit - so doubled with real headroom instead of
+        // tuning it fleet by fleet.
+        'max_tokens_with_document' => (int) env('COI_LLM_MAX_TOKENS_WITH_DOCUMENT', 8192),
 
         // The reply body is truncated to this before it is sent, so a mail
         // with a 200-page quoted history cannot turn into a large bill.
@@ -111,6 +169,43 @@ return [
     | delivery — which would call Claude twice for one reply.
     |
     */
+
+    /*
+    |--------------------------------------------------------------------------
+    | Chasing a silent agency
+    |--------------------------------------------------------------------------
+    |
+    | A certificate request that gets no answer is asked again, twice, and then
+    | left alone. Three mails from a stranger is a follow-up; the fourth is the
+    | reason the address stops answering any of them.
+    |
+    | The clock runs from the last send, so a chase does not fire the moment
+    | the previous one lands.
+    |
+    */
+
+    'chase' => [
+        'after_hours' => (int) env('COI_CHASE_AFTER_HOURS', 24),
+        'max' => (int) env('COI_CHASE_MAX', 2),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Re-routing to the address that can actually answer
+    |--------------------------------------------------------------------------
+    |
+    | Some replies exist only to name someone else: an out-of-office pointing at
+    | a service inbox, a producer saying the account moved, a broker-of-record
+    | who cannot issue on a direct policy. Those are re-sent to the address the
+    | reply names, and the request keeps its identity so the thread stays whole.
+    |
+    | Capped so a pair of agencies forwarding to each other cannot loop.
+    |
+    */
+
+    'reroute' => [
+        'max' => (int) env('COI_REROUTE_MAX', 2),
+    ],
 
     'connection' => env('COI_QUEUE_CONNECTION', 'database'),
     'queue' => env('COI_QUEUE', 'default'),

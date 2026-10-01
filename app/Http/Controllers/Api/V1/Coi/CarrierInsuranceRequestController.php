@@ -7,10 +7,13 @@ use App\Http\Requests\Coi\RaiseInsuranceRequest;
 use App\Http\Resources\CoiInsuranceRequestResource;
 use App\Models\CoiInsuranceRequest;
 use App\Models\CoiInsuranceResponse;
+use App\Models\CoiInsuranceResponseAttachment;
 use App\Services\Coi\CarrierInsuranceRequestService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * The broker side of "chase this carrier's agent for a current COI".
@@ -22,6 +25,7 @@ use RuntimeException;
 class CarrierInsuranceRequestController extends Controller
 {
     public function __construct(
+        private readonly \App\Services\Coi\CoiCoverageCheck $coverage,
         private readonly CarrierInsuranceRequestService $requests,
     ) {}
 
@@ -33,7 +37,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $insuranceRequest = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
             ->where('dot_number', $dot)
-            ->with('latestResponse')
+            ->with(['latestResponse', 'user:id,first_name,last_name'])
             ->latest('id')
             ->first();
 
@@ -56,7 +60,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $requests = CoiInsuranceRequest::where('company_id', $request->user()->company_id)
             ->when($request->filled('status'), fn ($query) => $query->where('status', $request->string('status')))
-            ->with('latestResponse')
+            ->with(['latestResponse', 'user:id,first_name,last_name'])
             ->latest('id')
             ->paginate(min((int) $request->integer('per_page', 25), 100));
 
@@ -83,6 +87,11 @@ class CarrierInsuranceRequestController extends Controller
                 $request->integer('dot_number'),
                 $request->input('carrier_name'),
                 $request->input('carrier_mc'),
+                [
+                    'asks' => $request->input('asks'),
+                    'holder_name' => $request->input('holder_name'),
+                    'ask_note' => $request->input('ask_note'),
+                ],
             );
         } catch (RuntimeException $e) {
             /*
@@ -96,7 +105,11 @@ class CarrierInsuranceRequestController extends Controller
             ], 422);
         }
 
-        $insuranceRequest->load('latestResponse');
+        // Not necessarily $request->user() - raise() is idempotent per
+        // company and DOT, so this can be an existing request a teammate
+        // raised earlier, not a new one from this caller. Loaded properly
+        // rather than assumed, same as index()/show().
+        $insuranceRequest->load(['latestResponse', 'user:id,first_name,last_name']);
 
         return response()->json([
             'status' => 'success',
@@ -115,7 +128,7 @@ class CarrierInsuranceRequestController extends Controller
     {
         $response = CoiInsuranceResponse::where('uuid', $uuid)
             ->whereHas('request', fn ($query) => $query->where('company_id', $request->user()->company_id))
-            ->with('request')
+            ->with(['request', 'attachments'])
             ->first();
 
         if ($response === null) {
@@ -147,7 +160,249 @@ class CarrierInsuranceRequestController extends Controller
                 // what, without asking anyone.
                 'llm_response' => $response->llm_response,
 
+                /*
+                | The files that came with the reply — in practice the
+                | certificate itself. The bytes are not inlined here; each entry
+                | carries the path the card fetches them from, so opening a
+                | thread does not drag every PDF along with it.
+                */
+                'attachments' => self::attachmentsPayload($response),
+
                 'request' => new CoiInsuranceRequestResource($response->request),
+            ],
+        ]);
+    }
+
+    /**
+     * Hand back one attachment's bytes.
+     *
+     * Streamed through the API rather than linked straight at the bucket: these
+     * are a carrier's insurance certificates, and a public object URL is a
+     * permanent, unauthenticated copy of one that outlives whoever was allowed
+     * to see it. Going through here keeps the same company scoping the rest of
+     * the feature has, and leaves the bucket private.
+     */
+    public function attachment(Request $request, string $uuid): StreamedResponse|JsonResponse
+    {
+        $attachment = CoiInsuranceResponseAttachment::where('uuid', $uuid)
+            ->whereHas(
+                'response.request',
+                fn ($query) => $query->where('company_id', $request->user()->company_id),
+            )
+            ->first();
+
+        if ($attachment === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Attachment not found.',
+            ], 404);
+        }
+
+        $disk = Storage::disk($attachment->disk);
+
+        if (! $disk->exists($attachment->path)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'The stored file is no longer available.',
+            ], 404);
+        }
+
+        /*
+        | Inline for a PDF or an image so the card can show it in place, and an
+        | attachment for anything else. `X-Content-Type-Options` is what stops a
+        | file a stranger mailed us from being sniffed into something the
+        | browser will execute in our own origin.
+        */
+        return $disk->response($attachment->path, $attachment->filename, [
+            'Content-Type' => $attachment->content_type ?: 'application/octet-stream',
+            'X-Content-Type-Options' => 'nosniff',
+            'Content-Disposition' => sprintf(
+                '%s; filename="%s"',
+                $attachment->isPreviewable() ? 'inline' : 'attachment',
+                addslashes($attachment->filename),
+            ),
+        ]);
+    }
+
+    /**
+     * What the card needs to list and open the files on one reply.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private static function attachmentsPayload(CoiInsuranceResponse $response): array
+    {
+        return $response->attachments
+            ->map(fn (CoiInsuranceResponseAttachment $attachment) => [
+                'uuid' => $attachment->uuid,
+                'filename' => $attachment->filename,
+                'content_type' => $attachment->content_type,
+                'size_bytes' => $attachment->size_bytes,
+                'previewable' => $attachment->isPreviewable(),
+
+                // Relative on purpose: the front end prefixes its own API base,
+                // and the bytes are fetched with the caller's bearer token.
+                'path' => '/carrier-insurance-requests/attachments/'.$attachment->uuid,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * The whole correspondence for one request — what the Track button opens.
+     *
+     * The card polls `show` on a timer, so the reply bodies deliberately do
+     * not travel with it; they are fetched here, once, when a broker actually
+     * opens the thread.
+     *
+     * Scoped through the company like `response`, so the uuid alone is not
+     * enough to read another broker's correspondence.
+     */
+    public function thread(Request $request, string $uuid): JsonResponse
+    {
+        $insuranceRequest = CoiInsuranceRequest::where('uuid', $uuid)
+            ->where('company_id', $request->user()->company_id)
+            ->with(['user', 'responses' => fn ($query) => $query->oldest('received_at')->with('attachments')])
+            ->first();
+
+        if ($insuranceRequest === null) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Insurance request not found.',
+            ], 404);
+        }
+
+        /*
+        | The outbound mail opens the thread. Its body is not stored — it is
+        | built from a template at send time — so the subject and the address
+        | it went to are what there is to show, and they are the two things a
+        | broker checks when an agency says it never received anything.
+        */
+        $messages = [[
+            'direction' => 'outbound',
+            'uuid' => null,
+            'from_name' => trim(
+                ($insuranceRequest->user?->first_name ?? '')
+                .' '.($insuranceRequest->user?->last_name ?? '')
+            ) ?: null,
+            'from_email' => $insuranceRequest->replyToAddress(),
+            'to_email' => $insuranceRequest->recipient_email,
+            'subject' => $insuranceRequest->subject,
+            'at' => $insuranceRequest->sent_at?->toIso8601String(),
+            'body_text' => null,
+            'extracted_expiry_date' => null,
+            'llm_response' => null,
+
+            /*
+            | What this request actually asked for. The mail body is built from
+            | a template at send time and never stored, and since the broker
+            | chooses the questions there is no longer a single "standard
+            | request" to describe — so the questions themselves travel instead.
+            */
+            'asks' => array_values(array_map(
+                fn ($ask) => CoiInsuranceRequest::ASKS[$ask] ?? $ask,
+                $insuranceRequest->asks ?? [],
+            )),
+            'ask_note' => $insuranceRequest->ask_note,
+            'holder_name' => $insuranceRequest->holder_name,
+            'attachments' => [],
+        ]];
+
+        foreach ($insuranceRequest->responses as $reply) {
+            $messages[] = [
+                'direction' => 'inbound',
+                'uuid' => $reply->uuid,
+                'from_name' => $reply->from_name,
+                'from_email' => $reply->from_email,
+                'to_email' => $insuranceRequest->replyToAddress(),
+                'subject' => $reply->subject,
+                'at' => $reply->received_at?->toIso8601String(),
+
+                // The text as it arrived; the card falls back to stripping the
+                // HTML when an agency sends no plain-text part.
+                'body_text' => $reply->body_text
+                    ?: ($reply->body_html ? strip_tags($reply->body_html) : null),
+
+                'extracted_expiry_date' => $reply->extracted_expiry_date?->toDateString(),
+
+                // The rest of what the model read out of this reply: limits,
+                // exclusions, commodity sub-limits, who it was made out to.
+                'extracted' => $reply->extracted,
+
+                // Shown on purpose: a broker acting on an extracted date should
+                // be able to see what was extracted, and from what.
+                'llm_response' => $reply->llm_response,
+
+                'attachments' => self::attachmentsPayload($reply),
+            ];
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Insurance request thread retrieved.',
+            'data' => [
+                'request' => new CoiInsuranceRequestResource($insuranceRequest),
+                'messages' => $messages,
+                'state_path' => $insuranceRequest->statePath(),
+            ],
+        ]);
+    }
+
+    /**
+     * Can this carrier take this load — asked once, about one load.
+     *
+     * Deliberately separate from the carrier's verification status. A seafood
+     * load over a commodity sub-limit is a bad load for this carrier today,
+     * not a bad carrier, and answering it by touching the profile would hold
+     * every other load they are perfectly insured for.
+     */
+    public function coverageCheck(Request $request, int $dot): JsonResponse
+    {
+        $validated = $request->validate([
+            'vin' => ['nullable', 'string', 'max:32'],
+            'commodity' => ['nullable', 'string', 'max:120'],
+            'value' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        if (empty($validated['vin']) && empty($validated['commodity'])) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Give a vin, a commodity, or both.',
+            ], 422);
+        }
+
+        $companyId = $request->user()->company_id;
+        $checks = [];
+
+        if (! empty($validated['vin'])) {
+            $checks['unit'] = $this->coverage->unitScheduled($companyId, $dot, $validated['vin']);
+        }
+
+        if (! empty($validated['commodity'])) {
+            $checks['commodity'] = $this->coverage->commodityCovered(
+                $companyId,
+                $dot,
+                $validated['commodity'],
+                (float) ($validated['value'] ?? 0),
+            );
+        }
+
+        /*
+        | One answer for the dispatcher on top of the detail. A load is held if
+        | any single check says so — the unit not being on the policy and the
+        | commodity being over its sub-limit are both reasons on their own.
+        */
+        $blocking = ['not_scheduled', 'under_insured'];
+        $held = (bool) array_intersect(
+            array_column($checks, 'verdict'),
+            $blocking,
+        );
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $held ? 'This load should be held.' : 'Nothing found against this load.',
+            'data' => [
+                'hold' => $held,
+                'checks' => $checks,
             ],
         ]);
     }
