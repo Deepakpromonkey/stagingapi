@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\ScoringWeightController;
 use App\Http\Controllers\Api\V1\Agreement\AgreementDocumentController;
 use App\Http\Controllers\Api\V1\Auth\AuthController;
+use App\Http\Controllers\Api\V1\Fleetra\FleetraTokenController;
 use App\Http\Controllers\Api\V1\Auth\SignupOtpController;
 use App\Http\Controllers\Api\V1\Auth\PasswordResetController;
 use App\Http\Controllers\Api\V1\CarrierPortal\CarrierAuthController;
@@ -300,6 +301,8 @@ Route::prefix('v1')->group(function () {
 
         // Session
         Route::get('/me', [AuthController::class, 'me']);
+        // Short-lived JWT for ai.dollartraq.com (Fleetra rejects Sanctum tokens)
+        Route::post('/fleetra/token', [FleetraTokenController::class, 'issue']);
         Route::post('/logout', [AuthController::class, 'logout']);
         Route::post('/change-password', [AuthController::class, 'changePassword']);
         Route::post('/update-profile', [AuthController::class, 'updateProfile']);
