@@ -26,17 +26,25 @@ class PasswordResetService
     /**
      * Step 1 — email a reset OTP.
      *
-     * The response is identical whether or not the address belongs to an
-     * account, so this endpoint cannot be used to discover registered emails.
+     * An unknown or deactivated address is rejected outright rather than
+     * answered with a dummy session, so the user isn't sent to an OTP screen
+     * for a code that will never arrive. Signup already reports a taken
+     * email, and the route throttle bounds probing.
      */
     public function sendOtp(string $email, ?string $ipAddress): array
     {
         $user = User::where('email', strtolower($email))->first();
 
-        if (! $user || ! $user->status) {
-            // Same shape as the success path, but nothing is stored, so any
-            // OTP submitted against this session will fail.
-            return ['otp_session' => (string) Str::uuid()];
+        if (! $user) {
+            throw ValidationException::withMessages([
+                'email' => ['No account found with this email address.'],
+            ]);
+        }
+
+        if (! $user->status) {
+            throw ValidationException::withMessages([
+                'email' => ['Your account has been deactivated.'],
+            ]);
         }
 
         // Only one live reset request per user.
