@@ -23,6 +23,7 @@ use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
 use App\Models\EldConnection;
 use App\Models\Carriers\Carrier;
+use App\Models\Carriers\CarrierAuthority;
 use App\Models\EmailTemplate;
 use App\Models\User;
 use App\Jobs\SyncEldConnection;
@@ -94,6 +95,8 @@ class CarrierConnectController extends BaseController
 
         $requests = $query->get();
 
+        $mcNumbers = $this->mcNumbersFor($requests->pluck('carrier_dot_number'));
+
         /*
         | The most recent successful portal sign-in per carrier, so the broker
         | can compare where the carrier onboarded from with where they actually
@@ -124,8 +127,12 @@ class CarrierConnectController extends BaseController
                 ->map(fn ($attempts) => $attempts->first());
         }
 
-        $rows = $requests->map(function (CarrierConnectRequest $connectRequest) use ($lastLogins) {
+        $rows = $requests->map(function (CarrierConnectRequest $connectRequest) use ($lastLogins, $mcNumbers) {
             $payload = (new CarrierConnectRequestResource($connectRequest))->resolve();
+
+            // The new-shipment form fills Carrier MC # from this when a carrier
+            // is picked.
+            $payload['carrier']['mc_number'] = $mcNumbers[$connectRequest->carrier_dot_number] ?? null;
 
             $payload['invited_by'] = $connectRequest->user
                 ? trim($connectRequest->user->first_name.' '.$connectRequest->user->last_name)
@@ -1687,6 +1694,46 @@ class CarrierConnectController extends BaseController
             $message,
             $code
         );
+    }
+
+    /**
+     * Each carrier's MC number, keyed by DOT number, in one query for the list.
+     *
+     * The request row stores no MC, so it comes from the FMCSA authority
+     * record as in findCarrier(). A DOT can hold several dockets and the
+     * newest is sometimes a freight-forwarder (FF) one, so an MC docket wins
+     * when there is one. If the census database cannot be reached the list
+     * still loads; the MC field is just left for the broker to fill in.
+     */
+    private function mcNumbersFor($dotNumbers): array
+    {
+        $dotNumbers = collect($dotNumbers)->filter()->unique()->values();
+
+        if ($dotNumbers->isEmpty()) {
+            return [];
+        }
+
+        try {
+            return CarrierAuthority::query()
+                ->whereIn('dot_number', $dotNumbers)
+                ->orderBy('id')
+                ->get(['id', 'dot_number', 'docket_number'])
+                ->groupBy('dot_number')
+                ->map(function ($dockets) {
+                    $mc = $dockets->last(
+                        fn ($docket) => str_starts_with(strtoupper((string) $docket->docket_number), 'MC')
+                    );
+
+                    return ($mc ?? $dockets->last())->docket_number;
+                })
+                ->all();
+        } catch (\Throwable $e) {
+            Log::warning('MC number lookup for the connect list failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
     }
 
     /**
