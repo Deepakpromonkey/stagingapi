@@ -50,10 +50,12 @@ class PublicShipmentTrackingController extends BaseController
 
     private function payloadFor(Shipment $shipment): array
     {
+        [$origin, $destination] = $this->lane($shipment);
+
         $base = [
             'shipment_no' => $shipment->shipment_no,
-            'origin' => $shipment->origin,
-            'destination' => $shipment->destination,
+            'origin' => $origin,
+            'destination' => $destination,
         ];
 
         if ($shipment->status === 'cancelled') {
@@ -101,6 +103,42 @@ class PublicShipmentTrackingController extends BaseController
 
             'current' => $this->currentPosition($shipment),
         ];
+    }
+
+    /**
+     * Origin and destination as the page shows them.
+     *
+     * Only the ELD form writes shipments.origin/destination. A driver_phone
+     * load keeps its lane on its stops, so the customer was shown "Origin not
+     * entered" for a load whose pickup and delivery were both filled in. Read
+     * the same way as CarrierLoadResource: first pickup, last delivery. Only
+     * the address goes out, never the stop's contact name or phone.
+     */
+    private function lane(Shipment $shipment): array
+    {
+        if ($shipment->origin && $shipment->destination) {
+            return [$shipment->origin, $shipment->destination];
+        }
+
+        $stops = $shipment->stops()->get(['stop_number', 'stop_type', 'address', 'city', 'state']);
+
+        $origin = $stops->where('stop_type', 'Pickup')->first() ?: $stops->first();
+        $destination = $stops->where('stop_type', 'Delivery')->last() ?: $stops->last();
+
+        return [
+            $shipment->origin ?: $this->stopAddress($origin),
+            $shipment->destination ?: $this->stopAddress($destination),
+        ];
+    }
+
+    private function stopAddress($stop): ?string
+    {
+        if (! $stop) {
+            return null;
+        }
+
+        return $stop->address
+            ?: (implode(', ', array_filter([$stop->city, $stop->state])) ?: null);
     }
 
     /**
