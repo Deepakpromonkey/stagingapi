@@ -24,6 +24,16 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         /*
+         | FMCSA filings come from the external carrier database. Bound to an
+         | interface so a test can stand in for it — reading that host from the
+         | suite would be reading production on every run.
+         */
+        $this->app->bind(
+            \App\Services\Coi\CarrierFilingLookup::class,
+            \App\Services\Coi\DatabaseCarrierFilingLookup::class,
+        );
+
+        /*
          | The Anthropic client reads ANTHROPIC_API_KEY off the process
          | environment when constructed bare, which is not the same thing as
          | the application's .env once config is cached — php-fpm does not
