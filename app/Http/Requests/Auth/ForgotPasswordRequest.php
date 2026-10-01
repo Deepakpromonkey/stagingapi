@@ -14,8 +14,8 @@ class ForgotPasswordRequest extends FormRequest
     public function rules(): array
     {
         return [
-            // Deliberately not validated against the users table: the
-            // response must not reveal whether an account exists.
+            // Whether the account exists is checked in
+            // PasswordResetService::sendOtp, alongside its status.
             'email' => [
                 'required',
                 'email',

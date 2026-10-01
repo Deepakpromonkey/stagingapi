@@ -26,7 +26,7 @@ class PasswordResetController extends BaseController
 
         return $this->success([
             'otp_session' => $data['otp_session'],
-        ], 'If an account exists for this email, a reset code has been sent.');
+        ], 'A reset code has been sent to your email.');
     }
 
     /**
