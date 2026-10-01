@@ -30,17 +30,24 @@ class CarrierPasswordResetService
     /**
      * Step 1 — email a reset OTP.
      *
-     * The response is identical whether or not the address belongs to an
-     * account, so this endpoint cannot be used to discover carrier logins.
+     * An unknown or deactivated address is rejected outright, as on the broker
+     * side, so the carrier isn't sent to an OTP screen for a code that will
+     * never arrive.
      */
     public function sendOtp(string $email, ?string $ipAddress): array
     {
         $carrierUser = CarrierUser::where('email', strtolower(trim($email)))->first();
 
-        if (! $carrierUser || ! $carrierUser->status) {
-            // Same shape as the success path, but nothing is stored, so any OTP
-            // submitted against this session will fail.
-            return ['otp_session' => (string) Str::uuid()];
+        if (! $carrierUser) {
+            throw ValidationException::withMessages([
+                'email' => ['No account found with this email address.'],
+            ]);
+        }
+
+        if (! $carrierUser->status) {
+            throw ValidationException::withMessages([
+                'email' => ['Your account has been deactivated.'],
+            ]);
         }
 
         // Only one live reset request per account.
