@@ -46,6 +46,13 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(AnthropicClient::class, function () {
             return new AnthropicClient(apiKey: config('services.anthropic.key'));
         });
+
+        /*
+         | The drayage directory decodes its search index once per request:
+         | scoped, so the list endpoint's search, facets and export share one
+         | copy, and a queue worker or Octane process starts each job clean.
+         */
+        $this->app->scoped(\App\Services\Drayage\DrayageDirectoryService::class);
     }
 
     /**

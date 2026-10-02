@@ -84,6 +84,8 @@ Schedule::command('eld:sync-active')
 |
 | `default` is named first because Laravel drains queues in order, and a broker
 | waiting on a request should not queue behind a VIN batch or a fleet import.
+| `drayage` comes next: an administrator's directory import is waiting on it,
+| and at a few seconds for ~5k carriers it holds nothing up for long.
 | `eld` is last because a first sync after a carrier connects can run for
 | minutes on a large fleet, and nothing is waiting on it. The connection named
 | explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
@@ -106,7 +108,7 @@ Schedule::command('eld:sync-active')
 | supervisor, run a long-lived `queue:work` instead and delete this.
 |
 */
-Schedule::command('queue:work database --queue=default,vin,eld --stop-when-empty --max-time=50')
+Schedule::command('queue:work database --queue=default,drayage,vin,eld --stop-when-empty --max-time=50')
     ->everyMinute()
     ->withoutOverlapping(2)
     ->runInBackground()

@@ -67,6 +67,17 @@ return [
             'override-knockout-gate-dual-control' => 'Override knockout gate (overridable set, dual-control)',
         ],
 
+        // Drayage directory. Reading it is view-carrier-directory, like the
+        // rest of the directory. The two marked "not part of any role" are
+        // granted to individual accounts by artisan command, never through a
+        // seat: drayage:grant for DollarTraq staff, drayage:service-token for
+        // Fleetra.
+        'drayage' => [
+            'export-drayage-directory' => 'Export the drayage directory (includes contact details)',
+            'manage-drayage-directory' => 'Import and roll back drayage directory data (DollarTraq staff; not part of any role)',
+            'read-drayage-directory' => 'Read the drayage directory only (service accounts; not part of any role)',
+        ],
+
         'administration' => [
             'edit-carrier-agreements' => 'Edit carrier agreements / questions / email templates',
             'manage-users-basic' => 'Add & edit users (Viewer / Agent / Senior Agent)',
@@ -179,6 +190,7 @@ return [
                 'override-soft-gate',
                 'edit-carrier-agreements',
                 'manage-users-basic',
+                'export-drayage-directory',
             ],
         ],
 
@@ -212,6 +224,7 @@ return [
                 'edit-scoring-config',
                 'edit-company-profile-billing',
                 'manage-api-keys-integration',
+                'export-drayage-directory',
             ],
         ],
 

@@ -94,6 +94,15 @@ class DtSearchScoringService
     }
 
     /**
+     * The letter grade the profile shows for a score, for callers that only
+     * hold the cached number (the drayage directory).
+     */
+    public function gradeFor(int $score): string
+    {
+        return $this->getGrade($score);
+    }
+
+    /**
      * Compute (and cache) scores for a page of carriers.
      *
      * A fixed number of statements regardless of page size: one to load the
