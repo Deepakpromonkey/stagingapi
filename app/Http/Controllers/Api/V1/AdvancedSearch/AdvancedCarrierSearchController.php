@@ -87,6 +87,15 @@ class AdvancedCarrierSearchController extends Controller
     private const MAX_RADIUS_ZIPS = 40000;
     private const COUNT_CAP = 10000;
     private const COUNT_CACHE_TTL = 300;
+
+    /*
+    | How long the count gets with the per-carrier filters before falling back
+    | to the set-based ones - see boundedCount().
+    */
+    private const COUNT_FAST_MS = 4000;
+
+    // The page query's share of QUERY_TIMEOUT_MS before it falls back.
+    private const PAGE_FAST_MS = 6000;
     private const TMP_ZIP_TABLE = 'tmp_zip_radius';
     private const CENSUS_TABLE = 'company_census_file';
     private const ZIP_INDEX = 'idx_census_phy_zip5';
@@ -125,6 +134,15 @@ class AdvancedCarrierSearchController extends Controller
 
     private array $zipDistances = [];
     private bool $isRadiusSearch = false;
+
+    /**
+     * Per-carrier filter SQL => its set-based equivalent, swapped in by
+     * withSetBasedFilters() when the per-carrier form is the slower one: a
+     * page or count that ran out of its fast budget, and every export.
+     *
+     * @var array<string, string>
+     */
+    private array $setBasedAlternatives = [];
 
     public function filter(Request $request)
     {
@@ -165,8 +183,10 @@ class AdvancedCarrierSearchController extends Controller
                 : response()->json($this->emptyPayload($request));
         }
 
+        // An export reads every match, so there is no early stop for the
+        // per-carrier filters to win on; the set-based forms suit it better.
         return $isExport
-            ? $this->streamCsv($request, $query)
+            ? $this->streamCsv($request, $this->withSetBasedFilters($query) ?? $query)
             : $this->respondPaginated($request, $query);
     }
 
@@ -594,44 +614,43 @@ class AdvancedCarrierSearchController extends Controller
             $columns = ['common_stat', 'contract_stat', 'broker_stat'];
         }
 
-        // Converted from a correlated whereExists() to an independent
-        // whereIn(subquery). This question - "which DOT numbers have this
-        // authority active" - doesn't actually depend on each candidate
-        // carrier row, so it can be answered ONCE. MySQL can materialize
-        // that answer into a small indexed list and reuse it for every
-        // candidate, instead of running a separate check per candidate row
-        // (which is what a correlated EXISTS does, and what caused the
-        // authority-filter timeouts even after removing the stray LIMIT 1).
         /*
         | The Motus load left duplicate rows in carrier_authorities, so
         | "newest row per DOT" is not optional - without it the OR below
         | matches a superseded row and lets a revoked carrier through, which
         | is the same bug reading the history table caused.
         |
-        | Collapsed with a grouped MAX(id) joined back on the primary key
-        | rather than a correlated `id = (SELECT MAX(id) ... WHERE dot_number
-        | = outer.dot_number)`. The correlated form re-runs once per row of a
-        | multi-million-row table; the grouped form is a single loose index
-        | scan over the (dot_number, id) index, computed once and reused.
+        | Checked per candidate carrier: its newest row comes straight off
+        | the dot_number index (ORDER BY id DESC LIMIT 1), so each check is
+        | a couple of index reads. The page query walks candidates nearest
+        | first and stops at the tenth match, so a page costs milliseconds.
         |
-        | DISTINCT is gone on purpose: the join already guarantees one row per
-        | DOT, so keeping it would only buy a redundant temp-table dedupe.
+        | The previous form computed the newest row for every DOT up front
+        | (GROUP BY dot_number over ~1.9M rows) and joined that back - about
+        | 5-16 seconds on every search whatever the filters, twice, since the
+        | count paid it again. That form is kept as the set-based fallback
+        | for a count over a huge pool with few matches, where checking
+        | carrier by carrier would scan millions of them; see boundedCount().
+        |
+        | A scalar subquery rather than EXISTS on purpose: MySQL rewrites
+        | EXISTS into a semijoin and can pick the same full materialisation.
+        | $columns only ever holds the three whitelisted names above.
         */
-        $latestAuthority = $this->conn()
-            ->table('carrier_authorities')
-            ->selectRaw('MAX(id) AS id')
-            ->groupBy('dot_number');
+        $activeIn = fn (string $alias) => implode(' OR ', array_map(
+            fn ($col) => "{$alias}.{$col} = 'A'",
+            $columns
+        ));
 
-        $query->whereIn('carriers.dot_number', function ($sub) use ($columns, $latestAuthority) {
-            $sub->select('auth_now.dot_number')
-                ->from('carrier_authorities as auth_now')
-                ->joinSub($latestAuthority, 'latest', 'latest.id', '=', 'auth_now.id')
-                ->where(function ($s) use ($columns) {
-                    foreach ($columns as $col) {
-                        $s->orWhere("auth_now.{$col}", 'A');
-                    }
-                });
-        });
+        $perCarrier = '(SELECT (' . $activeIn('a') . ') FROM carrier_authorities AS a'
+            . ' WHERE a.dot_number = carriers.dot_number ORDER BY a.id DESC LIMIT 1) = 1';
+
+        $setBased = 'carriers.dot_number IN (SELECT auth_now.dot_number FROM carrier_authorities AS auth_now'
+            . ' INNER JOIN (SELECT MAX(id) AS id FROM carrier_authorities GROUP BY dot_number) AS latest'
+            . ' ON latest.id = auth_now.id WHERE (' . $activeIn('auth_now') . '))';
+
+        $this->setBasedAlternatives[$perCarrier] = $setBased;
+
+        $query->whereRaw($perCarrier);
     }
 
     private function applyAuthorityAge(Builder $query, Request $request): void
@@ -699,21 +718,27 @@ class AdvancedCarrierSearchController extends Controller
             return;
         }
 
-        $minBipd = (float) $request->input('min_bipd');
+        /*
+        | max_cov_amount is stored in thousands of dollars (750 = $750,000;
+        | the carrier profile multiplies by 1000 to show it), while the
+        | filter box takes dollars. Compared as-is, any real amount (750000)
+        | matched nothing and the search came back empty.
+        */
+        $minCoverage = (float) $request->input('min_bipd') / 1000;
 
-        // Same reasoning as applyAuthority() above: "which DOT numbers have
-        // qualifying insurance" doesn't depend on each candidate row, so it
-        // can be answered once instead of per-row.
-        $query->whereIn('carriers.dot_number', function ($sub) use ($minBipd) {
-            $sub->select('ins.dot_int')
-                ->distinct()
-                ->from('actpendinsur_all_with_history as ins')
-                ->where('ins.max_cov_amount', '>=', $minBipd)
-                ->where(function ($s) {
-                    $s->where('ins.mod_col_1', 'LIKE', '%BIPD%')
-                      ->orWhere('ins.ins_form_code', 'LIKE', '91%');
-                });
-        });
+        // Per carrier for the same reason as applyAuthority(), with the
+        // set-based form kept for boundedCount()'s fallback.
+        $bipd = "ins.max_cov_amount >= ? AND (ins.mod_col_1 LIKE '%BIPD%' OR ins.ins_form_code LIKE '91%')";
+
+        $perCarrier = '(SELECT 1 FROM actpendinsur_all_with_history AS ins'
+            . ' WHERE ins.dot_int = carriers.dot_number AND ' . $bipd . ' LIMIT 1) = 1';
+
+        $setBased = 'carriers.dot_number IN (SELECT ins.dot_int FROM actpendinsur_all_with_history AS ins'
+            . ' WHERE ' . $bipd . ')';
+
+        $this->setBasedAlternatives[$perCarrier] = $setBased;
+
+        $query->whereRaw($perCarrier, [$minCoverage]);
     }
 
     /**
@@ -801,10 +826,29 @@ class AdvancedCarrierSearchController extends Controller
             $rowQuery->orderBy('carriers.dot_number', 'asc');
         }
 
+        /*
+        | Same two-step as boundedCount(): the per-carrier filters find a page
+        | in milliseconds unless matches are extremely rare, and then the
+        | set-based forms get the rest of the budget.
+        */
         try {
+            $this->setStatementTimeout(self::PAGE_FAST_MS);
             $rows = $this->timed('main paginated fetch', fn () => $rowQuery->forPage($page, $perPage)->get());
         } catch (\Throwable $e) {
-            return $this->timeoutResponse($e);
+            $fallback = $this->isTimeout($e) ? $this->withSetBasedFilters($rowQuery) : null;
+
+            if (! $fallback) {
+                return $this->timeoutResponse($e);
+            }
+
+            try {
+                $this->setStatementTimeout(self::QUERY_TIMEOUT_MS - self::PAGE_FAST_MS);
+                $rows = $this->timed('main paginated fetch (set-based)', fn () => $fallback->forPage($page, $perPage)->get());
+            } catch (\Throwable $e) {
+                return $this->timeoutResponse($e);
+            }
+        } finally {
+            $this->setStatementTimeout(self::QUERY_TIMEOUT_MS);
         }
 
         $items = $this->hydrateRows($rows->all());
@@ -859,18 +903,30 @@ class AdvancedCarrierSearchController extends Controller
         $cacheKey = 'carrier_search:count:' . md5(json_encode($filters));
 
         $total = Cache::remember($cacheKey, self::COUNT_CACHE_TTL, function () use ($query) {
-            try {
-                $inner = (clone $query)
-                    ->reorder()
-                    ->select(DB::raw('1'))
-                    ->limit(self::COUNT_CAP + 1);
+            /*
+            | Per-carrier filters first, on a short budget: they win by a wide
+            | margin whenever matches are common or the pool is a radius. Over
+            | a huge pool with few matches (no location, broker authority only)
+            | they would check millions of carriers one by one, so past the
+            | budget the set-based forms take over - the old cost, not worse.
+            */
+            $this->setStatementTimeout(self::COUNT_FAST_MS);
 
-                return $this->timed('bounded count query', function () use ($inner) {
-                    return (int) $this->conn()
-                        ->table(DB::raw('(' . $inner->toSql() . ') as bounded'))
-                        ->mergeBindings($inner)
-                        ->count();
-                });
+            try {
+                return $this->countUpToCap($query, 'bounded count query');
+            } catch (\Throwable $e) {
+                $fallback = $this->isTimeout($e) ? $this->withSetBasedFilters($query) : null;
+
+                if (! $fallback) {
+                    Log::warning('[CarrierSearch] bounded count failed: ' . $e->getMessage());
+                    return self::COUNT_CAP + 1;
+                }
+            } finally {
+                $this->setStatementTimeout(self::QUERY_TIMEOUT_MS);
+            }
+
+            try {
+                return $this->countUpToCap($fallback, 'bounded count query (set-based)');
             } catch (\Throwable $e) {
                 Log::warning('[CarrierSearch] bounded count failed: ' . $e->getMessage());
                 return self::COUNT_CAP + 1;
@@ -878,6 +934,46 @@ class AdvancedCarrierSearchController extends Controller
         });
 
         return [min($total, self::COUNT_CAP), $total > self::COUNT_CAP];
+    }
+
+    private function countUpToCap(Builder $query, string $label): int
+    {
+        $inner = (clone $query)
+            ->reorder()
+            ->select(DB::raw('1'))
+            ->limit(self::COUNT_CAP + 1);
+
+        return $this->timed($label, function () use ($inner) {
+            return (int) $this->conn()
+                ->table(DB::raw('(' . $inner->toSql() . ') as bounded'))
+                ->mergeBindings($inner)
+                ->count();
+        });
+    }
+
+    /**
+     * The query with each per-carrier filter swapped for its set-based form
+     * (see $setBasedAlternatives), or null if it has none. Each pair takes
+     * the same bindings in the same order, so only the SQL changes.
+     */
+    private function withSetBasedFilters(Builder $query): ?Builder
+    {
+        $swapped = clone $query;
+        $changed = false;
+
+        foreach ($swapped->wheres as $i => $where) {
+            if (($where['type'] ?? null) === 'raw' && isset($this->setBasedAlternatives[$where['sql']])) {
+                $swapped->wheres[$i]['sql'] = $this->setBasedAlternatives[$where['sql']];
+                $changed = true;
+            }
+        }
+
+        return $changed ? $swapped : null;
+    }
+
+    private function isTimeout(\Throwable $e): bool
+    {
+        return str_contains($e->getMessage(), 'maximum statement execution time');
     }
 
     private function hydrateRows(array $rows): array
