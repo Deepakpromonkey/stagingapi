@@ -420,7 +420,12 @@ Route::prefix('v1')->group(function () {
         // Carrier search (reads the EC2 carrier database)
         Route::get('/carrier/search', [CarrierController::class, 'search']);
  
-        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter']);
+        Route::post('/carrier/advanced-filter', [AdvancedCarrierSearchController::class, 'filter'])
+            ->middleware('throttle:10,1');
+
+        // Polled by the search page for carriers a search returned with
+        // dt_score: null - see AdvancedCarrierSearchController::scores().
+        Route::get('/carrier/scores', [AdvancedCarrierSearchController::class, 'scores']);
 
         Route::middleware(PermissionMiddleware::using('view-carrier-directory'))->group(function () {
 
