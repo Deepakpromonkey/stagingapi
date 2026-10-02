@@ -49,15 +49,18 @@ class DrayageStorage
     /*
     | Two users share this store: PHP-FPM (www-data) takes uploads and serves
     | reads, the scheduler's queue worker (the deploy user) runs imports. The
-    | storage tree is group www-data with setgid, so every folder and file is
+    | storage tree is group www-data with setgid, so folders and files are
     | made group-writable explicitly rather than left to each process's umask
     | - www-data's 022 would otherwise lock the worker out of whatever the API
-    | created. The root itself is closed to everyone else; inside it, files
-    | stay readable to the owner's peer whichever of the two wrote them.
+    | created. The root itself is closed to everyone else.
+    |
+    | Folders are only chmod'ed when they need it, keeping the setgid bit they
+    | inherit: Linux drops setgid when someone outside the folder's group
+    | changes its mode, and the deploy user is not in www-data.
     */
-    private const ROOT_MODE = 02770;
+    private const ROOT_MODE = 0770;
 
-    private const DIR_MODE = 02775;
+    private const DIR_MODE = 0775;
 
     private const FILE_MODE = 0664;
 
@@ -570,7 +573,11 @@ class DrayageStorage
             throw new RuntimeException("Could not create {$path}.");
         }
 
-        @chmod($path, $path === $this->root() ? self::ROOT_MODE : self::DIR_MODE);
+        $perms = fileperms($path);
+
+        if ($perms !== false && ($perms & 0070) !== 0070) {
+            @chmod($path, ($perms & 02000) | ($path === $this->root() ? self::ROOT_MODE : self::DIR_MODE));
+        }
     }
 
     private function deleteTree(string $path): void
