@@ -65,7 +65,7 @@ class LiveUpdatesTest extends TestCase
 
             return $event->uuid === $shipment->uuid
                 && in_array('private-shipment.'.$shipment->uuid, $channels, true)
-                && in_array('private-company.'.$shipment->company_id, $channels, true);
+                && in_array('private-company.'.$shipment->company->uuid, $channels, true);
         });
     }
 
@@ -107,7 +107,7 @@ class LiveUpdatesTest extends TestCase
 
     public function test_the_payload_is_a_signal_not_the_shipment(): void
     {
-        $event = new ShipmentUpdated('uuid-1', 'active', 7, true);
+        $event = new ShipmentUpdated('uuid-1', 'active', 'company-uuid', true);
 
         $this->assertSame(['uuid' => 'uuid-1', 'status' => 'active'], $event->broadcastWith());
         $this->assertSame('shipment.updated', $event->broadcastAs());
@@ -131,7 +131,7 @@ class LiveUpdatesTest extends TestCase
             'sent_on' => now(),
         ]);
 
-        Event::assertDispatched(NotificationsChanged::class, fn (NotificationsChanged $event) => $event->companyId === $company->id
-            && $event->broadcastOn()[0]->name === 'private-company.'.$company->id);
+        Event::assertDispatched(NotificationsChanged::class, fn (NotificationsChanged $event) => $event->companyUuid === (string) $company->uuid
+            && $event->broadcastOn()[0]->name === 'private-company.'.$company->uuid);
     }
 }

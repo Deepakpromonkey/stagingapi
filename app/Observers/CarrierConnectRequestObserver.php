@@ -14,8 +14,10 @@ class CarrierConnectRequestObserver
 {
     public function saved(CarrierConnectRequest $request): void
     {
-        if ($request->company_id) {
-            LiveUpdates::send(new NotificationsChanged((int) $request->company_id));
+        $companyUuid = $request->company?->uuid;
+
+        if ($companyUuid) {
+            LiveUpdates::send(new NotificationsChanged((string) $companyUuid));
         }
     }
 }

@@ -27,10 +27,13 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
 /*
 | A broker company's live updates: shipments added or moving on, and the
 | header bell's feed. Staff of that company only — not drivers or carrier
-| portal accounts.
+| portal accounts. Keyed on the uuid for the same reason as the shipment
+| channel below: a sequential id is trivial to enumerate.
 */
-Broadcast::channel('company.{companyId}', function ($user, $companyId) {
-    return $user instanceof User && (int) $user->company_id === (int) $companyId;
+Broadcast::channel('company.{companyUuid}', function ($user, $companyUuid) {
+    return $user instanceof User
+        && $user->company !== null
+        && hash_equals((string) $user->company->uuid, (string) $companyUuid);
 });
 
 Broadcast::channel('shipment.{shipmentUuid}', function ($user, $shipmentUuid) {

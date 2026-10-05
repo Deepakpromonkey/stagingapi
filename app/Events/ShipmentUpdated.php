@@ -25,7 +25,7 @@ class ShipmentUpdated implements ShouldBroadcastNow
     public function __construct(
         public readonly string $uuid,
         public readonly ?string $status,
-        public readonly int $companyId,
+        public readonly ?string $companyUuid,
         public readonly bool $companyWide,
     ) {}
 
@@ -33,8 +33,8 @@ class ShipmentUpdated implements ShouldBroadcastNow
     {
         $channels = [new PrivateChannel('shipment.'.$this->uuid)];
 
-        if ($this->companyWide) {
-            $channels[] = new PrivateChannel('company.'.$this->companyId);
+        if ($this->companyWide && $this->companyUuid) {
+            $channels[] = new PrivateChannel('company.'.$this->companyUuid);
         }
 
         return $channels;

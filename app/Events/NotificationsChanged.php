@@ -17,11 +17,11 @@ class NotificationsChanged implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets;
 
-    public function __construct(public readonly int $companyId) {}
+    public function __construct(public readonly string $companyUuid) {}
 
     public function broadcastOn(): array
     {
-        return [new PrivateChannel('company.'.$this->companyId)];
+        return [new PrivateChannel('company.'.$this->companyUuid)];
     }
 
     public function broadcastAs(): string

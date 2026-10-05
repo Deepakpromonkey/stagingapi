@@ -45,10 +45,14 @@ class ShipmentObserver
             return;
         }
 
+        // Only looked up when it is needed: a position update, which is most
+        // of them, goes to the shipment's channel alone.
+        $companyUuid = $companyWide ? $shipment->company?->uuid : null;
+
         LiveUpdates::send(new ShipmentUpdated(
             (string) $shipment->uuid,
             $shipment->status,
-            (int) $shipment->company_id,
+            $companyUuid ? (string) $companyUuid : null,
             $companyWide,
         ));
     }
