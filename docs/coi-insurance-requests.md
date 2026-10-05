@@ -102,13 +102,17 @@ address rather than reading a fixed path, preferring one found under a path
 mentioning producer / agent / agency / broker. Order:
 
 1. Producer address on the newest COI extraction for that DOT (`recipient_source: ocr`)
-2. Any other address on a recent extraction (`ocr`)
-3. `carriers.email_address` from the census (`recipient_source: fmcsa`)
-4. Nothing — the endpoint answers 422 and the card shows why
+2. The PRODUCER / CONTACT e-mail read straight off the newest PDF in
+   `coi_documents` (external_db, S3) by `CoiProducerEmailReader`, a
+   small Claude call (`COI_CONTACT_MODEL`, default claude-haiku-4-5)
+   (`recipient_source: coi_document`). The OCR keeps the producer's name and
+   street address but drops its E-MAIL line, so in practice this is where
+   most addresses come from.
+3. Nothing — the endpoint answers 422 and the card shows why
 
-Which one was used is stored on the request, because chasing an agency and
-chasing the carrier's own dispatch line are not the same act and the reply rate
-is not the same either.
+The carrier's own FMCSA census address is never used: it reaches the carrier,
+not the agency that issued the certificate. Which source was used is stored on
+the request.
 
 ---
 
@@ -216,9 +220,9 @@ php artisan tinker
 => ["email" => "certs@someagency.com", "source" => "ocr"]
 ```
 
-`source: fmcsa` means it fell back to the carrier's own census address and no
-agency address was found in the OCR. `null` means the Raise button will answer
-422 for that carrier.
+`source: coi_document` means the address was read off the certificate PDF.
+`null` means no producer address was found (or the read failed — see the log)
+and the Raise button will answer 422 for that carrier.
 
 ### End to end, locally, with no mailbox at all
 
