@@ -18,6 +18,13 @@ return [
     |
     */
 
+    /*
+    | Where the images in the email designs (the logo) are served from. Its own
+    | setting rather than APP_URL, which also signs the Fleetra token and so
+    | cannot simply be repointed on a server that hosts a copy of the API.
+    */
+    'asset_url' => env('EMAIL_ASSET_URL', env('APP_URL')),
+
     'types' => [
 
         'invitation' => [

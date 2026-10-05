@@ -160,7 +160,7 @@ class EmailTemplateService
      */
     public function logoUrl(): string
     {
-        return rtrim((string) config('app.url'), '/').'/images/email/dollartraq-logo.png';
+        return rtrim((string) config('email_templates.asset_url'), '/').'/images/email/dollartraq-logo.png';
     }
 
     /**
