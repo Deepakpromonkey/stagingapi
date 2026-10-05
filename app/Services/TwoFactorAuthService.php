@@ -63,7 +63,7 @@ class TwoFactorAuthService
             'ip_address' => $ipAddress,
         ]);
 try {
-    Mail::to($user->email)->send(new LoginOtpMail($otp));
+    Mail::to($user->email)->send(new LoginOtpMail($otp, $user->company_id, $user->first_name, 10));
 } catch (\Exception $e) {
     Log::error('OTP email failed', [
         'email' => $user->email,

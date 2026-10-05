@@ -19,7 +19,8 @@ class AuthService
 {
     public function __construct(
         protected TwoFactorAuthService $twoFactorAuthService,
-        protected SignupOtpService $signupOtpService
+        protected SignupOtpService $signupOtpService,
+        protected EmailTemplateService $emailTemplateService
     ) {}
 
     /*
@@ -92,6 +93,9 @@ class AuthService
             $company->update([
                 'created_by' => $user->id,
             ]);
+
+            // Start the company with the stock email designs, ready to edit.
+            $this->emailTemplateService->installDefaults($company);
 
             // The signup user owns the company: top seat, full risk authority.
             $user->assignRole(

@@ -23,7 +23,6 @@ use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
-use App\Models\EmailTemplate;
 use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
 use App\Services\Eld\EldConnectionService;
@@ -2000,9 +1999,9 @@ class CarrierConnectController extends BaseController
     }
 
     /**
-     * Uses the company's own carrier_connect email template when it has one,
-     * and falls back to the packaged mailable otherwise. A delivery failure
-     * must not lose the request that was just created, so it only logs.
+     * The mailable uses the company's own carrier_connect email template when
+     * it has one, and the stock design otherwise. A delivery failure must not
+     * lose the request that was just created, so it only logs.
      */
     private function sendInvitationMail(CarrierConnectRequest $connectRequest, ?User $user): void
     {
@@ -2018,33 +2017,8 @@ class CarrierConnectController extends BaseController
             ?: $connectRequest->company->company_name;
 
         try {
-            $template = EmailTemplate::forCompany($connectRequest->company_id)
-                ->active()
-                ->where('type', 'carrier_connect')
-                ->orderByDesc('is_default')
-                ->first();
-
-            if ($template) {
-                $rendered = $template->render([
-                    'carrier_name' => $connectRequest->carrier_legal_name,
-                    'dot_number' => $connectRequest->carrier_dot_number,
-                    'company_name' => $connectRequest->company->company_name,
-                    'sender_name' => $brokerName,
-                    'connect_url' => $connectUrl,
-                    'expires_at' => $connectRequest->sent_on
-                        ->copy()
-                        ->addHours((int) config('carrier_connect.request_lifetime_hours', 72))
-                        ->format('m/d/y h:i A'),
-                ]);
-
-                Mail::html($rendered['body_html'], function ($message) use ($connectRequest, $rendered) {
-                    $message->to($connectRequest->carrier_email)
-                        ->subject($rendered['subject']);
-                });
-            } else {
-                Mail::to($connectRequest->carrier_email)
-                    ->send(new CarrierConnectInvitationMail($connectRequest, $connectUrl, $brokerName));
-            }
+            Mail::to($connectRequest->carrier_email)
+                ->send(new CarrierConnectInvitationMail($connectRequest, $connectUrl, $brokerName));
         } catch (\Throwable $e) {
             Log::error('Carrier connect invitation email failed', [
                 'connect_request' => $connectRequest->uuid,

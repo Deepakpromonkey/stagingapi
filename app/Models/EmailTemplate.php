@@ -54,22 +54,26 @@ class EmailTemplate extends Model
 
     /**
      * Substitute {{ placeholder }} values in the subject and body.
+     *
+     * Values are escaped in the body: carrier and company names are typed in
+     * by other people, and must not be able to add markup to the mail.
      */
     public function render(array $data): array
     {
         return [
             'subject' => $this->replace($this->subject, $data),
-            'body_html' => $this->replace($this->body_html, $data),
+            'body_html' => $this->replace($this->body_html, array_map(fn ($value) => e((string) $value), $data)),
         ];
     }
 
     protected function replace(string $content, array $data): string
     {
         foreach ($data as $key => $value) {
-            // Tolerates {{name}} and {{ name }} alike.
-            $content = preg_replace(
+            // Tolerates {{name}} and {{ name }} alike. A callback, so a "$1" in
+            // the value is not read as a backreference.
+            $content = preg_replace_callback(
                 '/\{\{\s*'.preg_quote($key, '/').'\s*\}\}/',
-                (string) $value,
+                fn () => (string) $value,
                 $content
             );
         }

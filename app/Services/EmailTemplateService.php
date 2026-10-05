@@ -2,9 +2,11 @@
 
 namespace App\Services;
 
+use App\Models\Company;
 use App\Models\EmailTemplate;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
 
 class EmailTemplateService
@@ -79,7 +81,86 @@ class EmailTemplateService
             ->mapWithKeys(fn ($label, $key) => [$key => $this->sampleValue($key, $user)])
             ->all();
 
-        return $template->render(array_merge($samples, $overrides));
+        return $template->render(array_merge(['logo_url' => $this->logoUrl()], $samples, $overrides));
+    }
+
+    /**
+     * The subject and body to send for a type of mail: the company's own
+     * template when it has an active one, the stock design otherwise.
+     * `logo_url` is always supplied, so a template can use the hosted logo.
+     */
+    public function resolve(?int $companyId, string $type, array $data): array
+    {
+        $template = $companyId === null ? null : EmailTemplate::forCompany($companyId)
+            ->active()
+            ->where('type', $type)
+            ->orderByDesc('is_default')
+            ->latest('updated_at')
+            ->first();
+
+        $template ??= $this->stock($type);
+
+        return $template->render(array_merge(['logo_url' => $this->logoUrl()], $data));
+    }
+
+    /**
+     * The packaged design for a type, unsaved.
+     */
+    public function stock(string $type): EmailTemplate
+    {
+        return new EmailTemplate([
+            'name' => config("email_templates.types.{$type}.label"),
+            'type' => $type,
+            'subject' => config("email_templates.types.{$type}.default_subject"),
+            'body_html' => File::get(resource_path("views/emails/templates/{$type}.html")),
+            'is_active' => true,
+            'is_default' => true,
+        ]);
+    }
+
+    /**
+     * Copy every stock design into the company as an editable template. A type
+     * the company already has a template for is left alone, so running this
+     * again never overwrites anyone's edits.
+     */
+    public function installDefaults(Company $company): void
+    {
+        $types = collect(config('email_templates.types'))
+            ->filter(fn ($definition) => ! empty($definition['default_subject']))
+            ->keys();
+
+        $existing = EmailTemplate::forCompany($company->id)
+            ->whereIn('type', $types)
+            ->pluck('type')
+            ->all();
+
+        foreach ($types->diff($existing) as $type) {
+            $stock = $this->stock($type);
+
+            EmailTemplate::create([
+                'uuid' => Str::uuid(),
+                'company_id' => $company->id,
+                'user_id' => null,
+                'name' => $stock->name,
+                'type' => $type,
+                'subject' => $stock->subject,
+
+                // The logo is written in as an absolute URL so the editor can
+                // show it; every other placeholder stays for send time.
+                'body_html' => $stock->render(['logo_url' => $this->logoUrl()])['body_html'],
+
+                'is_active' => true,
+                'is_default' => true,
+            ]);
+        }
+    }
+
+    /**
+     * Hosted, not embedded: Gmail and Outlook drop base64 images.
+     */
+    public function logoUrl(): string
+    {
+        return rtrim((string) config('app.url'), '/').'/images/email/dollartraq-logo.png';
     }
 
     /**
@@ -133,6 +214,11 @@ class EmailTemplateService
             'mc_number' => 'MC189048',
             'agreement_url' => rtrim(config('app.frontend_url'), '/').'/agreements/sample',
             'connect_url' => rtrim(config('app.url'), '/').'/carrier/connect/sample-token',
+            'accept_url' => rtrim(config('app.frontend_url'), '/').'/accept-invitation?token=sample-token',
+            'sent_at' => now()->format('m/d/y'),
+            'report_id' => 'RPT-'.strtoupper(Str::random(8)),
+            'report_url' => rtrim(config('app.frontend_url'), '/').'/carriers/sample',
+            'logo_url' => $this->logoUrl(),
             default => Str::headline($key),
         };
     }
