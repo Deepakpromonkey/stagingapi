@@ -3429,15 +3429,11 @@ class CarrierController extends Controller
         // bumps the timestamp instead of adding a duplicate row.
         $this->logCarrierView($carrier);
 
-        $url = "https://mobile.fmcsa.dot.gov/qc/services/carriers/{$carrier->dot_number}?webKey=34c9e0e573a1af35b71d28176c73382a4a8bb313";
-        $fmcsaResponse = Http::timeout(60)
-            ->acceptJson()
-            ->get($url);
-
-        $fmcsaData = null;
-        if ($fmcsaResponse->successful()) {
-            $fmcsaData = $fmcsaResponse->json();
-        }
+        // Cached for a day, and given eight seconds rather than sixty: this was
+        // an uncached call on every profile view, so a slow FMCSA held the
+        // whole page. The key comes from FMCSA_WEB_KEY instead of the source.
+        $fmcsaCarrier = app(\App\Services\CarrierProfileService::class)
+            ->fmcsaSnapshot((string) $carrier->dot_number);
         $sms = $carrier->smsMeasures;
         $detail = $carrier->carrierDetail;
         $auth = $carrier->authority;
@@ -3862,7 +3858,7 @@ class CarrierController extends Controller
 
                 // ── Core identity ─────────────────────────────────────
                 'id' => $carrier->id,
-                'fmcsa_data' => $fmcsaData['content']['carrier'] ?? null,
+                'fmcsa_data' => $fmcsaCarrier,
                 'row_id' => $carrier->row_id,
                 'dot_number' => $carrier->dot_number,
                 'company_name' => $carrier->legal_name,
