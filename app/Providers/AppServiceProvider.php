@@ -3,7 +3,11 @@
 namespace App\Providers;
 
 use Anthropic\Client as AnthropicClient;
+use App\Models\CarrierConnectRequest;
+use App\Models\Shipment;
 use App\Models\User;
+use App\Observers\CarrierConnectRequestObserver;
+use App\Observers\ShipmentObserver;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
@@ -60,6 +64,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Live updates over Reverb, in place of the pages polling for them.
+        Shipment::observe(ShipmentObserver::class);
+        CarrierConnectRequest::observe(CarrierConnectRequestObserver::class);
+
         /*
          | SendGrid over its HTTP API instead of SMTP.
          |

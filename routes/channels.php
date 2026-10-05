@@ -24,6 +24,15 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
 | Anything else — a carrier portal token, a driver who has been deactivated —
 | falls through to false and is refused.
 */
+/*
+| A broker company's live updates: shipments added or moving on, and the
+| header bell's feed. Staff of that company only — not drivers or carrier
+| portal accounts.
+*/
+Broadcast::channel('company.{companyId}', function ($user, $companyId) {
+    return $user instanceof User && (int) $user->company_id === (int) $companyId;
+});
+
 Broadcast::channel('shipment.{shipmentUuid}', function ($user, $shipmentUuid) {
     $shipment = Shipment::where('uuid', $shipmentUuid)->first();
 
