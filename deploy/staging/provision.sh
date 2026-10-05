@@ -13,7 +13,7 @@ set -euo pipefail
 APP_DIR=/var/www/dollartraq-api
 APP_USER=ubuntu
 PHP_VERSION=8.5
-QUEUES=default,drayage,vin,eld   # the same list routes/console.php drains
+QUEUES=default,audit,drayage,vin,eld   # the same list routes/console.php drains
 
 log() { echo "==> $*"; }
 
