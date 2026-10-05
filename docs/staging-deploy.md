@@ -39,8 +39,16 @@ Edits made by hand on the server are not lost: the release saves them to
 - **Deploy:** merge to `main`.
 - **Deploy something else / roll back:** Actions → Deploy staging → Run
   workflow, and give the branch, tag or commit.
-- **Changed `.env` by hand:** config is cached, so run
-  `php artisan config:cache` afterwards, or the change does nothing.
+- **Changed `.env` by hand:** run both, in this order:
+
+  ```bash
+  php artisan config:cache && sudo systemctl reload php8.5-fpm
+  ```
+
+  `config:cache` alone is not enough. It rewrites
+  `bootstrap/cache/config.php`, but OPcache does not re-check files, so the
+  web server keeps the old copy until php-fpm reloads. The command line sees
+  the new value straight away, which makes it look as if the change worked.
 - **Changed a PHP file by hand:** `sudo systemctl reload php8.5-fpm`, or the
   old code keeps running. Better: commit it.
 - **Worker:** `sudo supervisorctl status`, `sudo supervisorctl restart dollartraq-queue`.
