@@ -49,6 +49,16 @@ class CarrierController extends Controller
     private const ASSOCIATION_MAX_MATCHES = 200;
 
     /**
+     * The inspection columns detail()'s own figures and the trust score read,
+     * for ?lean=1. The relation key (dot_number) has to be among them.
+     */
+    private const DETAIL_INSPECTION_COLUMNS = [
+        'id', 'dot_number', 'insp_date', 'county_code_state',
+        'vin', 'vin2', 'unit_type_desc', 'unit_type_desc2',
+        'total_hazmat_sent', 'hazmat_oos_total',
+    ];
+
+    /**
      * Carrier-and-VIN pairs the equipment lookup may return. A carrier running
      * a large fleet through a busy scale house shares vehicles with a lot of
      * people, and the profile pages them five at a time.
@@ -3374,6 +3384,26 @@ class CarrierController extends Controller
      *
      * @param  \Illuminate\Support\Collection  $decoded  keyed by normalised VIN
      */
+    /**
+     * The inspection, violation and crash-detail lists the profile fetches
+     * beside detail(?lean=1). Gzipped and cached by CarrierSafetyHistory;
+     * sent as-is to any client that accepts gzip, which every browser does.
+     */
+    public function safetyHistory(Request $request, string $dot)
+    {
+        $gzipped = app(\App\Services\Carrier\CarrierSafetyHistory::class)->gzippedJson($dot);
+
+        if (str_contains(strtolower((string) $request->header('Accept-Encoding')), 'gzip')) {
+            return response($gzipped, 200, [
+                'Content-Type' => 'application/json',
+                'Content-Encoding' => 'gzip',
+                'Vary' => 'Accept-Encoding',
+            ]);
+        }
+
+        return response(gzdecode($gzipped), 200, ['Content-Type' => 'application/json']);
+    }
+
     protected function decodedVinFields(Collection $decoded, ?string $vin): array
     {
         $hit = $decoded->get(Vin::normalize($vin));
@@ -3390,30 +3420,47 @@ class CarrierController extends Controller
 
     public function detail($rowid)
     {
+        /*
+        | ?lean=1 leaves out the inspection, violation and crash-detail lists,
+        | which the profile now fetches from safetyHistory(). On a large fleet
+        | those lists are tens of thousands of rows - 45-67 MB of JSON, more
+        | memory and time than a request is allowed - and every figure this
+        | method works out from them needs a handful of columns, not all 43.
+        | Without the flag the response is what it always was.
+        */
+        $lean = request()->boolean('lean');
+
+        $relations = [
+            'authority',
+            'smsMeasures',
+            'contacts',
+            'oosOrders',
+            'authorityOrders',
+            'authorityHistory',
+            'crashes.detail',
+            'insuranceFilings',
+            'insuranceFilingsPending',
+            'insuranceFilingsHistory',
+            'carrierDetail',          // ← required for computed fields
+            'census',                 // ← MCS-150 operation flags
+        ];
+
+        if ($lean) {
+            // Only what the figures below and the trust score read.
+            $relations['inspections'] = fn ($query) => $query->select(self::DETAIL_INSPECTION_COLUMNS);
+            $relations['violationDetails'] = fn ($query) => $query->select(['id', 'dot_number', 'unique_id', 'viol_code', 'insp_date']);
+        } else {
+            $relations[] = 'inspections.violationDetails';
+            $relations[] = 'crashDetails';
+            $relations[] = 'violationDetails';
+        }
+
         // row_id is the DOT number rendered as a string, so filter on
         // dot_number itself — matching on row_id would be a CAST per row and
         // could not use the unique key.
         $carrier = Carrier::query()
             ->where('dot_number', $rowid)
-            ->with([
-                'authority',
-                'smsMeasures',
-                'contacts',
-                'oosOrders',
-                'authorityOrders',
-                'authorityHistory',
-                'inspections.units',
-                'inspections.citations',
-                'inspections.violationDetails',
-                'crashes.detail',
-                'crashDetails',
-                'insuranceFilings',
-                'insuranceFilingsPending',
-                'insuranceFilingsHistory',
-                'violationDetails',
-                'carrierDetail',          // ← required for computed fields
-                'census',                 // ← MCS-150 operation flags
-            ])
+            ->with($relations)
             ->first();
 
         if (! $carrier) {
@@ -3810,9 +3857,8 @@ class CarrierController extends Controller
         | returns. One indexed lookup against the local pattern cache — a miss
         | is simply a null the frontend renders as a dash.
         */
-        $vinDecoder = app(VinDecoderService::class);
-
-        $decodedVins = $vinDecoder->lookup(
+        // Only the full response returns inspection rows to decode for.
+        $decodedVins = $lean ? collect() : app(VinDecoderService::class)->lookup(
             $carrier->inspections->flatMap(fn ($inspection) => [$inspection->vin, $inspection->vin2])
         );
 
@@ -3950,7 +3996,8 @@ class CarrierController extends Controller
                 // through it without a null check — a 500 on those profiles.
                 'risk_level' => Fmcsa::safetyRating($detail?->safety_rating),
                 // ── Inspections ───────────────────────────────────────
-                'inspections' => $carrier->inspections->map(function ($inspection) use ($decodedVins) {
+                // Lean: safetyHistory() serves these three lists.
+                'inspections' => $lean ? [] : $carrier->inspections->map(function ($inspection) use ($decodedVins) {
                     $data = $inspection->toArray();
 
                     $data['insp_date'] = $inspection->insp_date
@@ -3965,11 +4012,11 @@ class CarrierController extends Controller
 
                     return $data;
                 }),
-                'violation_details' => $carrier->violationDetails,
+                'violation_details' => $lean ? [] : $carrier->violationDetails,
 
                 // ── Crashes ───────────────────────────────────────────
                 'crashes' => $carrier->crashes,
-                'crash_details' => $carrier->crashDetails,
+                'crash_details' => $lean ? [] : $carrier->crashDetails,
 
                 // ── Insurance ─────────────────────────────────────────
                 'insurance_filings' => $carrier->insuranceFilings

@@ -441,6 +441,8 @@ Route::prefix('v1')->group(function () {
                 ->where('dot', '[0-9]+');
             Route::get('/carrier/{dot}/vin-association', [CarrierController::class, 'vinAssociation']);
             Route::post('/carrier/detail/{rowid}', [CarrierController::class, 'detail']);
+            Route::get('/carrier/{dot}/safety-history', [CarrierController::class, 'safetyHistory'])
+                ->where('dot', '[0-9]+');
 
              // Check DOT compliance (PHMSA, CARB, SmartWay)
             Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
