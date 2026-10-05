@@ -4441,11 +4441,28 @@ class CarrierController extends Controller
         $sharedVins = $inspections->pluck('vin')->filter(fn ($v) => strlen((string) $v) === 17)->unique();
         $highSharedPowerUnits = false;
         if ($sharedVins->isNotEmpty()) {
-            $sharingDots = Inspection::query()
-                ->whereIn('vin', $sharedVins)
-                ->where('dot_number', '<>', $dot)
-                ->distinct()
-                ->count('dot_number');
+            /*
+            | COUNT(DISTINCT dot_number) with `dot_number <> ?` made MySQL pick
+            | idx_dot_vin_type and scan it for the group-by - 6.9M rows, 26-57
+            | seconds on a carrier with 19 VINs, past the gateway timeout. Read
+            | the owners through idx_vin instead (a few rows a VIN) and count
+            | them here: same answer, milliseconds. The same fix the trust
+            | score's VIN check carries.
+            */
+            $sharingDots = collect();
+
+            foreach ($sharedVins->chunk(1000) as $chunk) {
+                $sharingDots = $sharingDots->merge(
+                    Inspection::query()->whereIn('vin', $chunk->values())->pluck('dot_number')
+                );
+            }
+
+            $sharingDots = $sharingDots
+                ->map(fn ($owner) => (string) $owner)
+                ->reject(fn ($owner) => $owner === (string) $dot)
+                ->unique()
+                ->count();
+
             $highSharedPowerUnits = $sharingDots >= 3;
         }
 
