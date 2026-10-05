@@ -67,6 +67,8 @@ release() {
     php artisan optimize >/dev/null || return 1
     sudo systemctl reload "$PHP_FPM" || return 1
     php artisan queue:restart >/dev/null || return 1
+    # Reverb exits after its current tick and Supervisor starts it on the new code.
+    php artisan reverb:restart >/dev/null || return 1
 }
 
 healthy() {

@@ -183,6 +183,36 @@ fi
 
 systemctl is-active --quiet supervisor || systemctl start supervisor
 
+# ── WebSockets ───────────────────────────────────────────────────────────────
+#
+# Reverb, on localhost only. Browsers reach it through nginx at
+# wss://staggingapi.dollartraq.com/app/{key} (snippet below), so port 8080 is
+# never exposed. The API publishes to it directly on 127.0.0.1:8080
+# (REVERB_HOST/REVERB_PORT in .env), which is why /apps/* is not proxied.
+
+if changed /etc/supervisor/conf.d/dollartraq-reverb.conf "; Managed by deploy/staging/provision.sh
+[program:dollartraq-reverb]
+command=/usr/bin/php $APP_DIR/artisan reverb:start --host=127.0.0.1 --port=8080 --no-interaction
+directory=$APP_DIR
+user=$APP_USER
+umask=002
+numprocs=1
+autostart=true
+autorestart=true
+startsecs=3
+stopasgroup=true
+killasgroup=true
+stopwaitsecs=10
+minfds=10240
+redirect_stderr=true
+stdout_logfile=$APP_DIR/storage/logs/reverb.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=3"; then
+    log "Reverb configured"
+    supervisorctl reread >/dev/null
+    supervisorctl update
+fi
+
 # ── nginx ────────────────────────────────────────────────────────────────────
 #
 # Ubuntu's nginx.conf turns gzip on for text/html only, so the frontend's
@@ -228,12 +258,43 @@ map \$request_uri \$dollartraq_path {
 }
 log_format dollartraq_timing '\$time_iso8601 \$request_method \$dollartraq_path \$status \$request_time \$upstream_response_time \$body_bytes_sent';" && nginx_changed=1
 
+REVERB_SNIPPET=/etc/nginx/snippets/dollartraq-reverb.conf
+
+changed "$REVERB_SNIPPET" "# Managed by deploy/staging/provision.sh
+# The WebSocket handshake only. Reverb's /apps/* HTTP API is for the backend
+# and stays on localhost.
+location ~ ^/app/[A-Za-z0-9_-]+\$ {
+    proxy_http_version 1.1;
+    proxy_set_header Host \$http_host;
+    proxy_set_header Scheme \$scheme;
+    proxy_set_header SERVER_PORT \$server_port;
+    proxy_set_header REMOTE_ADDR \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \"Upgrade\";
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+    proxy_pass http://127.0.0.1:8080;
+}" && nginx_changed=1
+
 api_backup=""
 
-if [[ -f "$API_SITE" ]] && ! grep -qF "$API_TIMING_LINE" "$API_SITE"; then
+backup_api_site() {
+    [[ -n "$api_backup" ]] && return 0
     api_backup="/root/$(basename "$API_SITE").bak-$(date +%Y%m%d-%H%M%S)"
     cp -p "$API_SITE" "$api_backup"
+}
+
+if [[ -f "$API_SITE" ]] && ! grep -qF "$API_TIMING_LINE" "$API_SITE"; then
+    backup_api_site
     sed -i "0,/^\s*access_log .*staggingapi.access.log;/s||&\n    $API_TIMING_LINE|" "$API_SITE"
+    nginx_changed=1
+fi
+
+if [[ -f "$API_SITE" ]] && ! grep -qF "include $REVERB_SNIPPET;" "$API_SITE"; then
+    backup_api_site
+    # Into the HTTPS server block, right after its index line.
+    sed -i "0,/^\s*index index.php index.html;/s||&\n\n    include $REVERB_SNIPPET;|" "$API_SITE"
     nginx_changed=1
 fi
 
@@ -256,7 +317,7 @@ if (( nginx_changed )); then
         # Put the box back as it was, so the next reload by anyone still works.
         [[ -n "$site_backup" ]] && cp -p "$site_backup" "$FRONTEND_SITE"
         [[ -n "$api_backup" ]] && cp -p "$api_backup" "$API_SITE"
-        rm -f /etc/nginx/conf.d/dollartraq-gzip.conf /etc/nginx/conf.d/dollartraq-timing.conf "$FRONTEND_SNIPPET"
+        rm -f /etc/nginx/conf.d/dollartraq-gzip.conf /etc/nginx/conf.d/dollartraq-timing.conf "$FRONTEND_SNIPPET" "$REVERB_SNIPPET"
         echo "nginx config test failed; changes reverted, nginx not reloaded" >&2
         exit 1
     fi
