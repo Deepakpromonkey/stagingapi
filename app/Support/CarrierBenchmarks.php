@@ -50,13 +50,13 @@ final class CarrierBenchmarks
 
     public static function smsCuts(): array
     {
-        $cached = Cache::get(self::SMS_CACHE_KEY);
+        $cached = Cache::store(config('cache.durable_store'))->get(self::SMS_CACHE_KEY);
 
         return is_array($cached) && $cached !== [] ? $cached : self::SMS_DEFAULTS;
     }
 
     public static function all(): array
     {
-        return Cache::get(self::CACHE_KEY, []) + self::DEFAULTS;
+        return Cache::store(config('cache.durable_store'))->get(self::CACHE_KEY, []) + self::DEFAULTS;
     }
 }

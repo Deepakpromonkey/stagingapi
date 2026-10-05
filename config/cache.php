@@ -97,15 +97,32 @@ return [
             'driver' => 'octane',
         ],
 
+        /*
+        | CACHE_STORE=failover is what production runs: Redis first, and the
+        | database store only while Redis is unreachable. A Redis outage then
+        | costs speed rather than taking every cached endpoint down with it.
+        */
         'failover' => [
             'driver' => 'failover',
-            'stores' => [
-                'database',
-                'array',
-            ],
+            'stores' => array_filter(explode(',', (string) env('CACHE_FAILOVER_STORES', 'redis,database'))),
         ],
 
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Durable Store
+    |--------------------------------------------------------------------------
+    |
+    | For the few values that are kept in the cache but are not a cache: the
+    | VIN backfill cursor and the carrier benchmarks. Nothing recomputes either
+    | on a miss — a lost cursor means the next nightly pass rescans every
+    | inspection, lost benchmarks mean scores quietly fall back to defaults —
+    | so they stay in the database, where they survive a Redis restart.
+    |
+    */
+
+    'durable_store' => env('CACHE_DURABLE_STORE', 'database'),
 
     /*
     |--------------------------------------------------------------------------

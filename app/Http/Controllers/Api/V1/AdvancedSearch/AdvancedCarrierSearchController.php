@@ -902,7 +902,8 @@ class AdvancedCarrierSearchController extends Controller
         ksort($filters);
         $cacheKey = 'carrier_search:count:' . md5(json_encode($filters));
 
-        $total = Cache::remember($cacheKey, self::COUNT_CACHE_TTL, function () use ($query) {
+        // Cast on the way out: Redis hands a cached integer back as a string.
+        $total = (int) Cache::remember($cacheKey, self::COUNT_CACHE_TTL, function () use ($query) {
             /*
             | Per-carrier filters first, on a short budget: they win by a wide
             | margin whenever matches are common or the pool is a radius. Over

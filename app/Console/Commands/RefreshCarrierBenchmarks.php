@@ -54,7 +54,7 @@ class RefreshCarrierBenchmarks extends Command
             return self::FAILURE;
         }
 
-        Cache::forever(CarrierBenchmarks::CACHE_KEY, $values + CarrierBenchmarks::DEFAULTS);
+        Cache::store(config('cache.durable_store'))->forever(CarrierBenchmarks::CACHE_KEY, $values + CarrierBenchmarks::DEFAULTS);
 
         $this->components->task('sms percentile cut-points', function () {
             $cuts = $this->smsCuts();
@@ -63,7 +63,7 @@ class RefreshCarrierBenchmarks extends Command
                 return false;
             }
 
-            Cache::forever(CarrierBenchmarks::SMS_CACHE_KEY, $cuts);
+            Cache::store(config('cache.durable_store'))->forever(CarrierBenchmarks::SMS_CACHE_KEY, $cuts);
 
             return true;
         });
