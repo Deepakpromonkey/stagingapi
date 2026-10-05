@@ -125,6 +125,24 @@ class ShipmentController extends BaseController
         );
     }
 
+    /**
+     * Shipment counts for the dashboard tiles.
+     *
+     * The dashboard used to page through the list for these, which returns
+     * fifteen rows at most: both tiles stopped at 15. One grouped count over
+     * the company's shipments, with the client deciding which statuses it
+     * calls active.
+     */
+    public function summary()
+    {
+        $byStatus = $this->shipmentService->countByStatusForUser(auth()->user());
+
+        return $this->success([
+            'total' => array_sum($byStatus),
+            'by_status' => (object) $byStatus,
+        ], 'Shipment summary retrieved successfully.');
+    }
+
     public function detail($uuid)
     {
         $shipment = DB::table('shipments')

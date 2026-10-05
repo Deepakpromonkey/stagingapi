@@ -433,6 +433,7 @@ Route::prefix('v1')->group(function () {
         // Shipments
         Route::middleware(PermissionMiddleware::using('view-loads-tracking'))->group(function () {
             Route::get('/shipments', [ShipmentController::class, 'index']);
+            Route::get('/shipments/summary', [ShipmentController::class, 'summary']);
             Route::get('/shipments/{uuid}', [ShipmentController::class, 'detail']);
             Route::get('/shipment-templates', [ShipmentTemplateController::class, 'index']);
             Route::get('/shipment-templates/{tracking_number}', [ShipmentTemplateController::class, 'show']);

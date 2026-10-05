@@ -214,6 +214,24 @@ location = /index.html {
     add_header Cache-Control \"no-cache\";
 }" && nginx_changed=1
 
+# Response times for the API, in their own log beside the usual access log:
+# path, status, total seconds, seconds PHP took. Rotated by Ubuntu's nginx
+# logrotate (/var/log/nginx/*.log).
+API_SITE=/etc/nginx/sites-available/staggingapi.dollartraq.com
+API_TIMING_LINE="access_log /var/log/nginx/staggingapi.timing.log dollartraq_timing;"
+
+changed /etc/nginx/conf.d/dollartraq-timing.conf "# Managed by deploy/staging/provision.sh
+log_format dollartraq_timing '\$time_iso8601 \$request_method \$uri \$status \$request_time \$upstream_response_time \$body_bytes_sent';" && nginx_changed=1
+
+api_backup=""
+
+if [[ -f "$API_SITE" ]] && ! grep -qF "$API_TIMING_LINE" "$API_SITE"; then
+    api_backup="/root/$(basename "$API_SITE").bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$API_SITE" "$api_backup"
+    sed -i "0,/^\s*access_log .*staggingapi.access.log;/s||&\n    $API_TIMING_LINE|" "$API_SITE"
+    nginx_changed=1
+fi
+
 site_backup=""
 
 if [[ -f "$FRONTEND_SITE" ]] && ! grep -qF "include $FRONTEND_SNIPPET;" "$FRONTEND_SITE"; then
@@ -232,7 +250,8 @@ if (( nginx_changed )); then
         nginx -t || true
         # Put the box back as it was, so the next reload by anyone still works.
         [[ -n "$site_backup" ]] && cp -p "$site_backup" "$FRONTEND_SITE"
-        rm -f /etc/nginx/conf.d/dollartraq-gzip.conf "$FRONTEND_SNIPPET"
+        [[ -n "$api_backup" ]] && cp -p "$api_backup" "$API_SITE"
+        rm -f /etc/nginx/conf.d/dollartraq-gzip.conf /etc/nginx/conf.d/dollartraq-timing.conf "$FRONTEND_SNIPPET"
         echo "nginx config test failed; changes reverted, nginx not reloaded" >&2
         exit 1
     fi

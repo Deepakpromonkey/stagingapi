@@ -505,6 +505,19 @@ class ShipmentService
     /**
      * Get all shipments for the authenticated user's company
      */
+    /**
+     * @return array<string, int> lower-cased status => shipments
+     */
+    public function countByStatusForUser($user): array
+    {
+        return Shipment::where('company_id', $user->company_id)
+            ->selectRaw('LOWER(status) as status_key, COUNT(*) as aggregate')
+            ->groupBy('status_key')
+            ->pluck('aggregate', 'status_key')
+            ->map(fn ($count) => (int) $count)
+            ->all();
+    }
+
     public function getAllForUser($user)
     {
         return Shipment::where('company_id', $user->company_id)
