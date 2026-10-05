@@ -377,12 +377,16 @@ class ShipmentService
             ->all();
     }
 
-    public function getAllForUser($user)
+    public function getAllForUser($user, ?int $perPage = null)
     {
+        // The list asks for its page size; it was fixed at 15 whatever it
+        // asked for, so a page of 10 got 15 rows and a page of 25 got 15.
+        $perPage = max(1, min(100, $perPage ?? 15));
+
         return Shipment::where('company_id', $user->company_id)
             ->with(['stops', 'trackingUpdates'])
-            ->latest('id') 
-            ->paginate(15); 
+            ->latest('id')
+            ->paginate($perPage);
     }
 
 
