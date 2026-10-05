@@ -114,9 +114,12 @@ class ShipmentController extends BaseController
         );
     }
 
-    public function index()
+    public function index(Request $request)
     {
-        $shipments = $this->shipmentService->getAllForUser(auth()->user());
+        $shipments = $this->shipmentService->getAllForUser(
+            auth()->user(),
+            $request->filled('per_page') ? (int) $request->query('per_page') : null,
+        );
 
         return $this->success(
             ShipmentResource::collection($shipments),

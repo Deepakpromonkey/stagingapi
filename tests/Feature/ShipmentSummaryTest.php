@@ -89,6 +89,24 @@ class ShipmentSummaryTest extends TestCase
             ->assertJsonPath('data.by_status.draft', 2);
     }
 
+    public function test_the_list_returns_the_page_size_it_is_asked_for(): void
+    {
+        $user = $this->user($this->company());
+        $this->shipments($user, 'active', 30);
+
+        Sanctum::actingAs($user);
+
+        $this->getJson('/api/v1/shipments?per_page=10')->assertOk()->assertJsonCount(10, 'data');
+        $this->getJson('/api/v1/shipments?per_page=25&page=1')->assertOk()->assertJsonCount(25, 'data');
+        $this->getJson('/api/v1/shipments?per_page=25&page=2')->assertOk()->assertJsonCount(5, 'data');
+
+        // Unchanged for a caller that does not ask.
+        $this->getJson('/api/v1/shipments')->assertOk()->assertJsonCount(15, 'data');
+
+        // And bounded for one that asks for everything.
+        $this->getJson('/api/v1/shipments?per_page=1000')->assertOk()->assertJsonCount(30, 'data');
+    }
+
     public function test_another_companys_shipments_are_not_counted(): void
     {
         $mine = $this->user($this->company());
