@@ -221,7 +221,12 @@ API_SITE=/etc/nginx/sites-available/staggingapi.dollartraq.com
 API_TIMING_LINE="access_log /var/log/nginx/staggingapi.timing.log dollartraq_timing;"
 
 changed /etc/nginx/conf.d/dollartraq-timing.conf "# Managed by deploy/staging/provision.sh
-log_format dollartraq_timing '\$time_iso8601 \$request_method \$uri \$status \$request_time \$upstream_response_time \$body_bytes_sent';" && nginx_changed=1
+# The path as requested: \$uri has become /index.php by the time it is logged.
+# Query string dropped, so no token in one can reach the log.
+map \$request_uri \$dollartraq_path {
+    ~^(?<path>[^?]*) \$path;
+}
+log_format dollartraq_timing '\$time_iso8601 \$request_method \$dollartraq_path \$status \$request_time \$upstream_response_time \$body_bytes_sent';" && nginx_changed=1
 
 api_backup=""
 
