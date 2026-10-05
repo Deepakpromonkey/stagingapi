@@ -183,6 +183,61 @@ fi
 
 systemctl is-active --quiet supervisor || systemctl start supervisor
 
+# ── nginx ────────────────────────────────────────────────────────────────────
+#
+# Ubuntu's nginx.conf turns gzip on for text/html only, so the frontend's
+# 3.6 MB bundle and every JSON response from the API went out uncompressed.
+# This applies to every site on the box.
+#
+# The frontend's hashed /assets/ files never change under the same name, so
+# browsers may keep them for a year; index.html is revalidated every time so
+# a deploy shows at once.
+
+FRONTEND_SITE=/etc/nginx/sites-available/staging.dollartraq.com
+FRONTEND_SNIPPET=/etc/nginx/snippets/dollartraq-frontend-cache.conf
+nginx_changed=0
+
+changed /etc/nginx/conf.d/dollartraq-gzip.conf "# Managed by deploy/staging/provision.sh
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types text/plain text/css text/javascript application/javascript application/json application/xml image/svg+xml application/wasm;" && nginx_changed=1
+
+changed "$FRONTEND_SNIPPET" "# Managed by deploy/staging/provision.sh
+location /assets/ {
+    add_header Cache-Control \"public, max-age=31536000, immutable\";
+    try_files \$uri =404;
+}
+
+location = /index.html {
+    add_header Cache-Control \"no-cache\";
+}" && nginx_changed=1
+
+site_backup=""
+
+if [[ -f "$FRONTEND_SITE" ]] && ! grep -qF "include $FRONTEND_SNIPPET;" "$FRONTEND_SITE"; then
+    site_backup="/root/$(basename "$FRONTEND_SITE").bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$FRONTEND_SITE" "$site_backup"
+    # Into the HTTPS server block, right after its index line.
+    sed -i "0,/^\s*index index.html;/s||    index index.html;\n\n    include $FRONTEND_SNIPPET;|" "$FRONTEND_SITE"
+    nginx_changed=1
+fi
+
+if (( nginx_changed )); then
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx
+        log "nginx: compression and asset caching"
+    else
+        nginx -t || true
+        # Put the box back as it was, so the next reload by anyone still works.
+        [[ -n "$site_backup" ]] && cp -p "$site_backup" "$FRONTEND_SITE"
+        rm -f /etc/nginx/conf.d/dollartraq-gzip.conf "$FRONTEND_SNIPPET"
+        echo "nginx config test failed; changes reverted, nginx not reloaded" >&2
+        exit 1
+    fi
+fi
+
 # ── Logs and disk ────────────────────────────────────────────────────────────
 #
 # laravel.log only ever grew. The dated channel logs (drayage-*.log) are
