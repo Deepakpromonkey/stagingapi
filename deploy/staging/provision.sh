@@ -119,7 +119,10 @@ opcache.interned_strings_buffer=16
 opcache.max_accelerated_files=20000
 opcache.validate_timestamps=0
 realpath_cache_size=4096K
-realpath_cache_ttl=600"; then
+realpath_cache_ttl=600
+; A large fleet's carrier profile peaks around 140 MB (22k inspections); a
+; typical request uses about 34 MB.
+memory_limit=256M"; then
     php_changed=1
 fi
 
