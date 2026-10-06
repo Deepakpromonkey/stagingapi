@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\AdvancedSearch;
 
 use App\Http\Controllers\Controller;
+use App\Services\DtScore\DtScore;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
@@ -53,15 +54,12 @@ use Illuminate\Support\Facades\Schema;
  *    fraud-network queries, then the v3 engine itself - was measured taking
  *    30-90 seconds on its own, and that was the dominant share of a search
  *    that timed out or simply felt broken. This controller now only ever
- *    reads carrier_dt_score:{dot} from cache (scoreCurrentPage(), below);
+ *    reads cached scores (DtScore::cached(), in scoreCurrentPage() below);
  *    a miss dispatches App\Jobs\ScoreCarrierSearchPage and returns
  *    immediately with dt_score: null for that row, falling back to the last
- *    score this company saw if there is one. The actual scoring - the same
- *    engine, the same cache key, the same numbers - now lives in
- *    App\Services\Carrier\DtSearchScoringService, verified byte-for-byte
- *    identical to what this controller used to compute inline before the
- *    move (see that class's own docblock for why it is shared, not
- *    duplicated, unlike CarrierShortlistController's copy).
+ *    score this company saw if there is one. The job calculates through
+ *    App\Services\DtScore\DtScore - the one calculator the profile, the
+ *    shortlist and the blocklist use - so every screen shows the same number.
  *
  * 8. That dispatch runs ->afterResponse(), not through a queued worker.
  *    ScoreCarrierSearchPage still implements ShouldQueue (so it CAN be
@@ -1109,18 +1107,18 @@ class AdvancedCarrierSearchController extends Controller
      | 100 rows, 10 by default - never the matched set, which can run to
      | hundreds of thousands.
      |
-     | CSV export deliberately gets none of this. streamCsv() below is left
-     | alone and its dt_score stays null: an export can be tens of thousands
-     | of rows, and scoring each one would reintroduce exactly the per-row
-     | cost this file spent so long removing.
+     | CSV export never scores live: an export can be tens of thousands of
+     | rows, and scoring each one would reintroduce exactly the per-row cost
+     | this file spent so long removing. streamCsv() writes the score
+     | DtScore already has cached for a carrier, and leaves the rest blank.
      ====================================================================== */
 
     /**
      * DT scores for one page of carriers, keyed by DOT number.
      *
-     * Same cache key as the carrier profile (`carrier_dt_score:{dot}`), so a
-     * score computed here and one computed by opening that carrier's profile
-     * are one stored value, not two that can disagree.
+     * Reads DtScore's cache - the same cached value the carrier profile and
+     * the shortlist use, so they can never show different numbers for one
+     * carrier.
      *
      * Never throws. A search that returns results without scores is a far
      * better outcome than a search that hangs for 30-90s computing them, so
@@ -1145,10 +1143,10 @@ class AdvancedCarrierSearchController extends Controller
         $pending = [];
 
         foreach ($dots as $dot) {
-            $cached = Cache::get('carrier_dt_score:'.$dot);
+            $cached = DtScore::cached($dot);
 
             if ($cached !== null) {
-                $scores[$dot] = (int) $cached;
+                $scores[$dot] = $cached;
                 continue;
             }
 
@@ -1300,7 +1298,15 @@ class AdvancedCarrierSearchController extends Controller
 
                 $lastId = (int) $rows->last()->dot_number;
 
-                foreach ($this->hydrateRows($rows->all()) as $item) {
+                $items = $this->hydrateRows($rows->all());
+
+                // Scores already calculated for these carriers - one cache
+                // read per chunk, nothing scored live (see the DT Score note).
+                $scores = DtScore::cachedMany(array_column($items, 'dot_number'));
+
+                foreach ($items as $item) {
+                    $item['dt_score'] = $scores[(string) ($item['dot_number'] ?? '')] ?? $item['dt_score'];
+
                     fputcsv($file, [
                         $item['company_name'],
                         $item['dot_number'] ?? 'N/A',

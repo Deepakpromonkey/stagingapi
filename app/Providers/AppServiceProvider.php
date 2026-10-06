@@ -57,6 +57,13 @@ class AppServiceProvider extends ServiceProvider
          | copy, and a queue worker or Octane process starts each job clean.
          */
         $this->app->scoped(\App\Services\Drayage\DrayageDirectoryService::class);
+
+        /*
+         | One DT score calculator per request or queued job, so the national
+         | benchmarks it reads are fetched once per request rather than once
+         | per carrier, and never outlive the request that read them.
+         */
+        $this->app->scoped(\App\Services\DtScore\DtScore::class);
     }
 
     /**

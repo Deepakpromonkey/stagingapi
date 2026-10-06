@@ -37,7 +37,32 @@ class DtDate
 
 function now(): DtDate { return new DtDate(new DateTimeImmutable('now')); }
 
-function config(string $key, $default = null) { return $GLOBALS['dt_config'][$key] ?? $default; }
+function env(string $key, $default = null) { return $default; }
+
+/*
+ * The real config/dtscore.php, so the scenarios below exercise the numbers
+ * production scores with. A scenario overrides single keys through
+ * $GLOBALS['dt_config'] (dot notation, e.g. 'dtscore.rules.network.enabled').
+ */
+$GLOBALS['dt_config_file'] = ['dtscore' => require dirname(__DIR__, 2).'/config/dtscore.php'];
+
+function config(string $key, $default = null)
+{
+    if (array_key_exists($key, $GLOBALS['dt_config'] ?? [])) {
+        return $GLOBALS['dt_config'][$key];
+    }
+
+    $value = $GLOBALS['dt_config_file'];
+
+    foreach (explode('.', $key) as $segment) {
+        if (! is_array($value) || ! array_key_exists($segment, $value)) {
+            return $default;
+        }
+        $value = $value[$segment];
+    }
+
+    return $value;
+}
 
 /* ------------------------------------------------------------ collection */
 
@@ -303,7 +328,7 @@ function sms(array $over = []): Rec
 
 function run(FakeController $c, array $o = []): array
 {
-    $GLOBALS['dt_config'] = $o['config'] ?? ['trustscore.network_checks' => false];
+    $GLOBALS['dt_config'] = $o['config'] ?? ['dtscore.rules.network.enabled' => false];
     $GLOBALS['dt_netcounts'] = $o['net'] ?? [];
 
     return $c->run(
@@ -444,7 +469,7 @@ check('fatal crash: 54 inside 24mo, 100 outside window',
 
 /* 17. Network graph: phone+email each shared with 4 DOTs -> two Review rules */
 $r = run($c, [
-    'config' => ['trustscore.network_checks' => true],
+    'config' => ['dtscore.rules.network.enabled' => true],
     'net' => ['phone' => 4, 'email' => 4, 'address' => 0, 'vin' => 0],
 ]);
 check('shared phone+email x4 -> 2000 pts, Review',
@@ -547,11 +572,11 @@ check('no inspection in 12 months -> INSP-03 Low, 94',
 
 /* 29. NET-04 tiers */
 $vinCarrier = fn () => carrier(['inspections' => \collect([new Rec(['vin' => '1FUJGLDR0CLBP8834', 'insp_date' => d(100)])])]);
-$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['trustscore.network_checks' => true], 'net' => ['vin' => 2]]);
+$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['dtscore.rules.network.enabled' => true], 'net' => ['vin' => 2]]);
 check('VIN shared with 2 others -> Low, 94', $r['overall_score'] === 94, json_encode([$r['overall_score'], $r['v3']['rules_fired']]));
-$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['trustscore.network_checks' => true], 'net' => ['vin' => 4]]);
+$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['dtscore.rules.network.enabled' => true], 'net' => ['vin' => 4]]);
 check('VIN shared with 4 others -> Medium, 89', $r['overall_score'] === 89, json_encode([$r['overall_score'], $r['v3']['rules_fired']]));
-$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['trustscore.network_checks' => true], 'net' => ['vin' => 6]]);
+$r = run($c, ['carrier' => $vinCarrier(), 'config' => ['dtscore.rules.network.enabled' => true], 'net' => ['vin' => 6]]);
 check('VIN shared with 6 others -> Review, 54', $r['overall_score'] === 54 && $r['status'] === 'Review', json_encode([$r['overall_score'], $r['status']]));
 
 /* 25. Warrior composite: the full staging fact pattern */
@@ -567,7 +592,7 @@ $r = run($c, [
     'carrier' => $warrior,
     'auth' => auth(['broker_stat' => 'A']),
     'sms' => sms(['hos_driv_measure' => 6.2, 'insp_total' => 5, 'vehicle_insp_total' => 1, 'driver_insp_total' => 3, 'unsafe_driv_insp_w_viol' => 0, 'hos_driv_insp_w_viol' => 3, 'veh_maint_insp_w_viol' => 0]),
-    'config' => ['trustscore.network_checks' => true],
+    'config' => ['dtscore.rules.network.enabled' => true],
     'net' => ['phone' => 0, 'email' => 0, 'address' => 0, 'vin' => 2],
     'observedUnits' => 1,
     'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0,
@@ -616,14 +641,14 @@ check('name stems: KAPLAN / KREILKAMP / short names null',
     json_encode([$c->stem('THE KAPLAN TRUCKING COMPANY'), $c->stem('KTR FREIGHT PVT LTD')]));
 
 /* 37. Small young carrier: NET tiers unchanged (chameleon shape keeps Review) */
-$r = run($c, ['config' => ['trustscore.network_checks' => true], 'net' => ['phone' => 4, 'email' => 4, 'address' => 0, 'vin' => 0]]);
+$r = run($c, ['config' => ['dtscore.rules.network.enabled' => true], 'net' => ['phone' => 4, 'email' => 4, 'address' => 0, 'vin' => 0]]);
 check('small fleet, phone+email x4 -> still 2x Review, 2000 pts',
     $r['v3']['risk_points'] === 2000 && $r['status'] === 'Review',
     json_encode([$r['v3']['risk_points'], $r['v3']['rules_fired']]));
 
 /* 38. Large established fleet: same sharing demotes to Medium */
 $big = carrier(['legal_name' => 'MEGAFLEET CARRIERS INC', 'nbr_power_unit' => 300]);
-$r = run($c, ['carrier' => $big, 'config' => ['trustscore.network_checks' => true], 'net' => ['phone' => 4, 'email' => 4, 'address' => 0, 'vin' => 0]]);
+$r = run($c, ['carrier' => $big, 'config' => ['dtscore.rules.network.enabled' => true], 'net' => ['phone' => 4, 'email' => 4, 'address' => 0, 'vin' => 0]]);
 check('large established fleet, phone+email x4 -> 2x Medium, 89',
     $r['v3']['risk_points'] === 500 && $r['overall_score'] === 78
     && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'NET-01' && $x['tier'] === 'medium'),
@@ -668,7 +693,7 @@ $kaplan = carrier([
 $r = run($c, [
     'carrier' => $kaplan,
     'auth' => auth(['broker_stat' => 'A', 'contract_stat' => 'A', 'bipd_file' => '05000', 'min_cov_amount' => '00750']),
-    'config' => ['trustscore.network_checks' => true],
+    'config' => ['dtscore.rules.network.enabled' => true],
     'net' => ['phone' => 3, 'email' => 0, 'address' => 9, 'vin' => 24],
     'observedUnits' => 546, 'observedTrailers' => 534,
     'vehicleOosPct' => 15.0, 'driverOosPct' => 1.2,
