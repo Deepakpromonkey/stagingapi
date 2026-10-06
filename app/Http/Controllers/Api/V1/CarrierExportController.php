@@ -48,7 +48,7 @@ class CarrierExportController extends Controller
         // 5. Stream the response
         $callback = function() use($records, $columns) {
             $file = fopen('php://output', 'w');
-            fputcsv($file, $columns); // Write the headers first
+            fputcsv($file, $columns, escape: '\\'); // Write the headers first
 
             foreach ($records as $record) {
                 // Failsafe in case a carrier was completely deleted from the DB
@@ -59,17 +59,21 @@ class CarrierExportController extends Controller
                     ? trim($record->user->first_name . ' ' . $record->user->last_name) 
                     : 'Unknown';
 
-                // Map the data to the columns (adjust carrier fields if your DB uses different names)
+                // Carrier is the census view, whose real columns are
+                // legal_name / email_address / telephone - not name / email /
+                // phone, which this used to read and which don't exist on
+                // that model, so every row exported "N/A" for all three
+                // regardless of what was actually on file.
                 $row = [
-                    $record->carrier->name ?? 'N/A', 
+                    $record->carrier->legal_name ?? $record->carrier->dba_name ?? 'N/A',
                     $record->carrier->dot_number ?? '',
-                    $record->carrier->email ?? 'N/A',
-                    $record->carrier->phone ?? 'N/A',
+                    $record->carrier->email_address ?? 'N/A',
+                    $record->carrier->telephone ?? 'N/A',
                     $addedBy,
                     $record->created_at ? $record->created_at->format('Y-m-d H:i:s') : ''
                 ];
 
-                fputcsv($file, $row); 
+                fputcsv($file, $row, escape: '\\');
             }
 
             fclose($file);

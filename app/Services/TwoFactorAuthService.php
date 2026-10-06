@@ -63,7 +63,7 @@ class TwoFactorAuthService
             'ip_address' => $ipAddress,
         ]);
 try {
-    Mail::to($user->email)->send(new LoginOtpMail($otp));
+    Mail::to($user->email)->send(new LoginOtpMail($otp, $user->company_id, $user->first_name, 10));
 } catch (\Exception $e) {
     Log::error('OTP email failed', [
         'email' => $user->email,
@@ -109,6 +109,13 @@ try {
             ->first();
 
         if (! $loginOtp) {
+            // The session string is the only identifier here, and handing it
+            // to the trail would be handing over a live credential.
+            AuditLog::record(AuditLog::OTP_FAILED, null, null, [
+                'reason' => 'unknown_session',
+                'portal' => 'broker',
+            ]);
+
             throw ValidationException::withMessages([
                 'otp' => ['Invalid OTP session.'],
             ]);
@@ -116,6 +123,11 @@ try {
 
         if ($loginOtp->expires_at->isPast()) {
             $loginOtp->delete();
+
+            AuditLog::record(AuditLog::OTP_FAILED, $loginOtp->user, null, [
+                'reason' => 'expired',
+                'portal' => 'broker',
+            ]);
 
             throw ValidationException::withMessages([
                 'otp' => ['OTP has expired.'],
@@ -126,6 +138,11 @@ try {
 
             $loginOtp->delete();
 
+            AuditLog::record(AuditLog::OTP_FAILED, $loginOtp->user, null, [
+                'reason' => 'too_many_attempts',
+                'portal' => 'broker',
+            ]);
+
             throw ValidationException::withMessages([
                 'otp' => ['Maximum OTP attempts exceeded.'],
             ]);
@@ -134,6 +151,12 @@ try {
         if (! Hash::check($data['otp'], $loginOtp->otp)) {
 
             $loginOtp->increment('attempts');
+
+            AuditLog::record(AuditLog::OTP_FAILED, $loginOtp->user, null, [
+                'reason' => AuditLog::REASON_BAD_OTP,
+                'attempt' => $loginOtp->attempts,
+                'portal' => 'broker',
+            ]);
 
             throw ValidationException::withMessages([
                 'otp' => ['Invalid OTP.'],
@@ -145,6 +168,11 @@ try {
             $user = $loginOtp->user;
 
             if (! $user->status) {
+
+                AuditLog::record(AuditLog::LOGIN_FAILED, $user, null, [
+                    'reason' => AuditLog::REASON_DISABLED,
+                    'portal' => 'broker',
+                ]);
 
                 throw ValidationException::withMessages([
                     'email' => ['Your account has been deactivated.'],

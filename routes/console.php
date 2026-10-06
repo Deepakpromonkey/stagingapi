@@ -73,7 +73,7 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 | supervisor, run a long-lived `queue:work` instead and delete this.
 |
 */
-Schedule::command('queue:work database --queue=default,vin,eld --stop-when-empty --max-time=50')
+Schedule::command('queue:work database --queue=default,audit,drayage,vin,eld --stop-when-empty --max-time=50')
     ->everyMinute()
     ->withoutOverlapping(2)
     ->runInBackground()
@@ -128,4 +128,20 @@ Schedule::command('coi:chase-requests')
 Schedule::command('eld:sync --stale')
     ->hourly()
     ->withoutOverlapping()
+    ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
+| Audit trail retention
+|--------------------------------------------------------------------------
+|
+| Drop audit trail entries once they pass the one year retention in
+| config/activitylog.php. The `audit` queue above carries the Teams posts and
+| `drayage` the directory imports.
+|
+| --force is required because the command asks for confirmation when
+| APP_ENV=production, and the scheduler has no one to answer it.
+*/
+Schedule::command('activitylog:clean --force')
+    ->dailyAt('02:00')
     ->onOneServer();

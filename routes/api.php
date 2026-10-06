@@ -19,6 +19,12 @@ use App\Http\Controllers\Api\V1\AdvancedSearch\AdvancedCarrierSearchController;
 use App\Http\Controllers\Api\V1\Company\CompanyController;
 use App\Http\Controllers\Api\V1\Coi\CarrierInsuranceRequestController;
 use App\Http\Controllers\Api\V1\Coi\InboundEmailWebhookController;
+use App\Http\Controllers\Api\V1\Drayage\DrayageCarrierController;
+use App\Http\Controllers\Api\V1\Drayage\DrayageDatasetController;
+use App\Http\Controllers\Api\V1\Drayage\DrayageDirectoryController;
+use App\Http\Controllers\Api\V1\Drayage\DrayageExportController;
+use App\Http\Controllers\Api\V1\Drayage\DrayageImportController;
+use App\Http\Controllers\Api\V1\ContactController;
 use App\Http\Controllers\Api\V1\Connect\CarrierConnectController;
 use App\Http\Controllers\Api\V1\EmailTemplate\EmailTemplateController;
 use App\Http\Controllers\Api\V1\Invitation\InvitationController;
@@ -70,6 +76,9 @@ Route::prefix('v1')->group(function () {
     Route::post('/signup', [AuthController::class, 'signup']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/invitations/accept', [InvitationController::class, 'accept']);
+
+    // Public contact form; the lead is emailed to info@.
+    Route::post('/contact-us', [ContactController::class, 'store']);
 
     /*
     | Terminal (ELD) webhooks. Public because Terminal has no session here —
@@ -447,6 +456,60 @@ Route::prefix('v1')->group(function () {
              // Check DOT compliance (PHMSA, CARB, SmartWay)
             Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
 
+        });
+
+        /*
+        | Drayage directory: carriers imported from the LoadMatch / Drayage.com
+        | directory export, served from JSON files rather than MySQL - see
+        | docs/drayage-directory.md.
+        |
+        | Reads follow the carrier directory permission, or read-drayage-directory
+        | alone for a service account (Fleetra's token reaches these read routes
+        | and nothing else - see EnsureBrokerUser). Exports carry contact details
+        | and have their own permission; imports and rollback are DollarTraq
+        | staff only. Each group throttles under its own prefix, so these limits
+        | never share a counter with another route's.
+        */
+        Route::prefix('drayage')->name('drayage.')->group(function () {
+
+            Route::middleware([
+                PermissionMiddleware::using(['view-carrier-directory', 'read-drayage-directory']),
+                'throttle:'.config('drayage.rate_limits.read').',1,drayage-read',
+            ])->name('read.')->group(function () {
+                Route::get('/carriers', [DrayageCarrierController::class, 'index'])->name('carriers.index');
+                Route::get('/carriers/lookup', [DrayageCarrierController::class, 'lookup'])->name('carriers.lookup');
+                Route::get('/carriers/{carrierKey}', [DrayageCarrierController::class, 'show'])
+                    ->where('carrierKey', '(lm|ls)-[A-Za-z0-9]{1,32}')
+                    ->name('carriers.show');
+                Route::get('/facets', [DrayageDirectoryController::class, 'facets'])->name('facets');
+                Route::get('/fields', [DrayageDirectoryController::class, 'fields'])->name('fields');
+                Route::get('/stats', [DrayageDirectoryController::class, 'stats'])->name('stats');
+            });
+
+            Route::get('/export', [DrayageExportController::class, 'export'])
+                ->middleware([
+                    PermissionMiddleware::using('export-drayage-directory'),
+                    'throttle:'.config('drayage.rate_limits.export').',1,drayage-export',
+                ])
+                ->name('export');
+
+            Route::middleware([
+                PermissionMiddleware::using('manage-drayage-directory'),
+                'throttle:'.config('drayage.rate_limits.admin').',1,drayage-admin',
+            ])->name('admin.')->group(function () {
+                Route::post('/imports', [DrayageImportController::class, 'store'])->name('imports.store');
+                Route::get('/imports', [DrayageImportController::class, 'index'])->name('imports.index');
+                Route::get('/imports/{importId}', [DrayageImportController::class, 'show'])
+                    ->where('importId', 'imp-[0-9A-Za-z-]{1,40}')
+                    ->name('imports.show');
+                Route::get('/datasets', [DrayageDatasetController::class, 'index'])->name('datasets.index');
+                Route::post('/datasets/{datasetId}/activate', [DrayageDatasetController::class, 'activate'])
+                    ->where('datasetId', 'ds-[0-9A-Za-z-]{1,40}')
+                    ->name('datasets.activate');
+                Route::delete('/datasets/{datasetId}', [DrayageDatasetController::class, 'destroy'])
+                    ->where('datasetId', 'ds-[0-9A-Za-z-]{1,40}')
+                    ->name('datasets.destroy');
+            });
         });
 
         // OCR

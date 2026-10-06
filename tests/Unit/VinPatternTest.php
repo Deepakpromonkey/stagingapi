@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Support\Vin;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -47,9 +48,7 @@ class VinPatternTest extends TestCase
         $this->assertSame('1FUJGLDR9CLBP8834', Vin::normalize(' 1fujgldr9-clbp8834 '));
     }
 
-    /**
-     * @dataProvider invalidVins
-     */
+    #[DataProvider('invalidVins')]
     public function test_invalid_vins_have_no_pattern(?string $vin): void
     {
         $this->assertNull(Vin::pattern($vin));

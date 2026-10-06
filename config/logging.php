@@ -73,6 +73,29 @@ return [
             'replace_placeholders' => true,
         ],
 
+        // Drayage directory imports, activations, exports and their audit
+        // entries. Kept longer than the app log: the audit trail it carries
+        // is also in the drayage store's audit.jsonl, but this is the copy
+        // that ships with the rest of the logs.
+        //
+        // A stack so a file it cannot open never fails the work being logged:
+        // the API (www-data) and the queue worker (the deploy user) both write
+        // here, and whichever creates a day's file first owns it.
+        'drayage' => [
+            'driver' => 'stack',
+            'channels' => ['drayage_file'],
+            'ignore_exceptions' => true,
+        ],
+
+        'drayage_file' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/drayage.log'),
+            'level' => 'info',
+            'days' => env('DRAYAGE_LOG_DAYS', 400),
+            'permission' => 0664,
+            'replace_placeholders' => true,
+        ],
+
         'slack' => [
             'driver' => 'slack',
             'url' => env('LOG_SLACK_WEBHOOK_URL'),

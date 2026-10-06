@@ -12,7 +12,9 @@ return [
 
     'allowed_headers' => ['*'],
 
-    'exposed_headers' => [],
+    // Readable from the browser on a cross-origin response: the download's
+    // filename (drayage export, CSV exports) and how long a 429 lasts.
+    'exposed_headers' => ['Content-Disposition', 'Retry-After'],
 
     'max_age' => 0,
 

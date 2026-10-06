@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\Agreement;
 
 use App\Http\Controllers\Api\V1\BaseController;
+use App\Services\AuditLog;
 use App\Http\Requests\Agreement\StoreAgreementDocumentRequest;
 use App\Http\Requests\Agreement\UpdateAgreementDocumentRequest;
 use App\Http\Resources\AgreementDocumentResource;
@@ -124,6 +125,10 @@ class AgreementDocumentController extends BaseController
         if (! $document) {
             return $this->error('Agreement document not found.', null, 404);
         }
+
+        AuditLog::recordByCurrentUser(AuditLog::RECORD_DELETED, $document, [
+            'record' => 'agreement_document',
+        ]);
 
         $this->agreementDocumentService->delete($document);
 
