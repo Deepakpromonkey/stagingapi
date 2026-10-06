@@ -232,7 +232,9 @@ class EldTerminalIntegrationTest extends TestCase
 
     public function test_it_rejects_a_redirect_whose_state_does_not_match(): void
     {
-        Bus::fake();
+        // Saving the request below also tells the company's notification bell
+        // (CarrierConnectRequestObserver), which is not what this test is about.
+        Bus::fake()->except([\Illuminate\Broadcasting\BroadcastEvent::class]);
         Http::fake();
 
         $connectRequest = $this->connectRequest();

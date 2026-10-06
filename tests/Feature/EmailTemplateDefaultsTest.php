@@ -45,7 +45,9 @@ class EmailTemplateDefaultsTest extends TestCase
 
         $types = EmailTemplate::forCompany($company->id)->pluck('type')->sort()->values()->all();
 
-        $this->assertSame(['carrier_connect', 'carrier_report', 'invitation', 'login_otp'], $types);
+        // carrier_connect has no stock design on production: the onboarding
+        // invitation keeps its own mail there.
+        $this->assertSame(['carrier_report', 'invitation', 'login_otp'], $types);
 
         $template = EmailTemplate::forCompany($company->id)->where('type', 'login_otp')->first();
 
@@ -97,15 +99,15 @@ class EmailTemplateDefaultsTest extends TestCase
 
         EmailTemplate::forCompany($company->id)->update(['is_active' => false]);
 
-        $rendered = $this->service()->resolve($company->id, 'carrier_connect', [
+        $rendered = $this->service()->resolve($company->id, 'invitation', [
             'company_name' => 'Northwind Logistics',
-            'carrier_name' => 'Powell Distributing',
-            'connect_url' => 'https://example.test/connect/abc',
+            'first_name' => 'Dana',
+            'accept_url' => 'https://example.test/accept-invitation?token=abc',
         ]);
 
-        $this->assertSame('Northwind Logistics would like to connect with you on DollarTraq', $rendered['subject']);
-        $this->assertStringContainsString('href="https://example.test/connect/abc"', $rendered['body_html']);
-        $this->assertStringContainsString('Complete Onboarding', $rendered['body_html']);
+        $this->assertSame('Northwind Logistics added you to their team', $rendered['subject']);
+        $this->assertStringContainsString('href="https://example.test/accept-invitation?token=abc"', $rendered['body_html']);
+        $this->assertStringContainsString('Accept Invitation', $rendered['body_html']);
     }
 
     public function test_values_cannot_add_markup_to_the_body(): void
