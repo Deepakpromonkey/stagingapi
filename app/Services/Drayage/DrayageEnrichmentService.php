@@ -7,7 +7,7 @@ use App\Jobs\ScoreCarrierSearchPage;
 use App\Models\CarrierConnectRequest;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\Inspection;
-use App\Services\Carrier\DtSearchScoringService;
+use App\Services\DtScore\DtScore;
 use App\Support\Fmcsa;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -35,7 +35,6 @@ class DrayageEnrichmentService
     /** Per-statement budget on the carrier host, well under a page's patience. */
     private const STATEMENT_TIMEOUT_MS = 5000;
 
-    public function __construct(private DtSearchScoringService $scoring) {}
 
     /**
      * USDOT => whether the carrier exists in DollarTraq's carrier views.
@@ -140,11 +139,13 @@ class DrayageEnrichmentService
         $out = [];
         $pending = [];
 
+        $scores = DtScore::cachedMany($dots);
+
         foreach ($dots as $dot) {
-            $cached = Cache::get('carrier_dt_score:'.$dot);
+            $cached = $scores[(string) $dot] ?? null;
 
             if ($cached !== null) {
-                $out[$dot] = ['score' => (int) $cached, 'grade' => $this->scoring->gradeFor((int) $cached), 'status' => 'ready'];
+                $out[$dot] = ['score' => $cached, 'grade' => DtScore::grade($cached), 'status' => 'ready'];
             } else {
                 $out[$dot] = ['score' => null, 'grade' => null, 'status' => 'pending'];
                 $pending[] = $dot;

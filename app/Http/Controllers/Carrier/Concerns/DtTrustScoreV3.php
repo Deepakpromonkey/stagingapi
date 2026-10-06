@@ -11,13 +11,9 @@ use Illuminate\Support\Facades\Cache;
  * DT Trust Score v3 — rule-catalog engine, adapted to the post-Motus schema.
  *
  * Model: every finding is a rule with a tier of risk points
- * (Low 125 / Medium 250 / Review 1,000 / Fail 10,000), MyCarrierPortal-
- * compatible. Points map deterministically onto the 0-100 gauge, so the
- * gauge can never contradict the status:
- *
- *   points <  1,000  -> 100 .. 55   status Acceptable
- *   points <  10,000 ->  54 .. 19   status Unacceptable-Review
- *   points >= 10,000 ->  18 ..  0   status Unacceptable-Fail
+ * (dtscore.tier_points), MyCarrierPortal-compatible. Points map
+ * deterministically onto the 0-100 gauge (dtscore.gauge), so the gauge
+ * can never contradict the status.
  *
  * v3.5 adds OPS-12 (false or misleading federal-filing citations,
  * 390.19/390.35 — non-BASIC codes the SMS aggregates never show) and
@@ -37,20 +33,14 @@ use Illuminate\Support\Facades\Cache;
  * Missing data abstains — it never fires a rule and never counts as clean.
  * Unknown inputs lower data confidence, which caps the score instead.
  *
- * INSTALL (two lines, one call):
+ * Every number this engine scores with — tier points, thresholds, caps,
+ * bands, grades — lives in config/dtscore.php. This file holds only the
+ * rule logic. Do not call it directly: DtScore::for(dot:, mc:) in
+ * App\Services\DtScore\DtScore assembles the inputs and caches the result.
  *
- *   1. use App\Http\Controllers\Carrier\Concerns\DtTrustScoreV3;   // imports
- *   2. use DtTrustScoreV3;                                          // in class body
- *   3. at the call site (~L3358):
- *        $trustScore = $this->dtCalculateTrustScore(   // was calculateCarrierTrustScore(
- *      Same 17 arguments, same order. Rollback = change that one call back.
- *
- * The old calculateCarrierTrustScore() / checkKnockout() stay untouched.
- *
- * This trait leans on members that already exist on CarrierController and
- * will fail loudly at boot if they are removed: SMS_BASICS,
- * MAIL_DROP_PATTERNS, hasInsuranceFiling(), insuranceFilingMatches(),
- * smsPercentiles(), benchmarks(), getGrade(), parseFmcsaDate().
+ * The engine leans on helpers DtTrustScoreSupport provides: SMS_BASICS,
+ * hasInsuranceFiling(), insuranceFilingMatches(), smsPercentiles(),
+ * benchmarks(), getGrade(), parseFmcsaDate().
  *
  * Return shape is a superset of the old one — overall_score / grade /
  * status / knockout / pillars keep their old keys, values and types, and
@@ -166,7 +156,7 @@ trait DtTrustScoreV3
 
         $status = $fail
             ? 'Unacceptable-Fail'
-            : ($riskPoints >= 1000 ? 'Unacceptable-Review' : 'Acceptable');
+            : ($riskPoints >= $this->dtConfig('review_at_points') ? 'Unacceptable-Review' : 'Acceptable');
 
         $score = $this->dtPointsToScore((float) $riskPoints);
 
@@ -210,7 +200,7 @@ trait DtTrustScoreV3
         $band = $this->dtBandFor($status, $score);
 
         $needsReview = $status !== 'Acceptable'
-            || $confidence < 0.65
+            || $confidence < $this->dtConfig('manual_review_below_confidence')
             || count($unknown) > 0
             || count($flags) > 0;
 
@@ -219,9 +209,11 @@ trait DtTrustScoreV3
         | Legacy Shape
         |--------------------------------------------------------------------------
         | Everything the front end reads today keeps its old key, type and
-        | vocabulary. On a Fail the score pins to the historical 18 and
+        | vocabulary. On a Fail the score pins to dtscore.fail_score and
         | pillars come back empty, exactly as checkKnockout() did.
         */
+
+        $failScore = (int) $this->dtConfig('fail_score');
 
         $failReasons = collect($fired)
             ->where('tier', 'fail')
@@ -232,15 +224,26 @@ trait DtTrustScoreV3
             ->values()
             ->all();
 
-        $overall = $fail ? 18 : (int) round($score);
+        $overall = $fail ? $failScore : (int) round($score);
 
         $legacyStatus = match (true) {
             $status === 'Unacceptable-Fail' => 'Rejected',
             $status === 'Unacceptable-Review' => 'Review',
-            $overall >= 80 => 'Approved',
-            $overall >= 60 => 'Review',
             default => 'High Risk',
         };
+
+        if ($status === 'Acceptable') {
+
+            foreach ($this->dtConfig('legacy_status') as $label => $min) {
+
+                if ($overall >= $min) {
+                    $legacyStatus = $label;
+                    break;
+                }
+
+            }
+
+        }
 
         $ctx = [
             'risk_points' => $riskPoints,
@@ -278,7 +281,7 @@ trait DtTrustScoreV3
 
                 'triggered' => $fail,
 
-                'cap_score' => $fail ? 18 : null,
+                'cap_score' => $fail ? $failScore : null,
 
                 'reasons' => $failReasons,
 
@@ -286,7 +289,7 @@ trait DtTrustScoreV3
 
             'pillars' => $fail ? [] : $this->dtLegacyPillars($groups),
 
-            'model_version' => 'dt-trust-v3.5-motus',
+            'model_version' => $this->dtConfig('model_version'),
 
             // The short answer, ready to render: a verdict line plus the
             // checks that triggered, passed and could not be run.
@@ -299,7 +302,7 @@ trait DtTrustScoreV3
 
             'v3' => [
 
-                'model_version' => 'dt-trust-v3.5-motus',
+                'model_version' => $this->dtConfig('model_version'),
 
                 'risk_points' => $riskPoints,
 
@@ -357,7 +360,7 @@ trait DtTrustScoreV3
 
             $g['unknown'][] = 'authority_status';
 
-            $g['caps'][] = ['cap' => 84, 'reason' => 'No usable authority record — capped, not cleared.'];
+            $g['caps'][] = ['cap' => $this->dtConfig('rules.authority_unknown_cap'), 'reason' => 'No usable authority record — capped, not cleared.'];
 
             $g['flags'][] = 'authority_record_missing';
 
@@ -365,7 +368,7 @@ trait DtTrustScoreV3
 
             if ($common === false && $contract === false) {
 
-                $this->dtFire($g, 'AUTH-01', 'fail', 'Common and Contract Authority are both inactive.', [
+                $this->dtFire($g, 'AUTH-01', $this->dtRuleTier('AUTH-01'), 'Common and Contract Authority are both inactive.', [
                     'code' => 'AUTHORITY_INACTIVE',
                     'message' => 'Common and Contract Authority are both inactive.',
                 ]);
@@ -375,7 +378,7 @@ trait DtTrustScoreV3
                 // One inactive, one unreadable — abstain but cap.
                 $g['unknown'][] = 'authority_status_partial';
 
-                $g['caps'][] = ['cap' => 84, 'reason' => 'Authority status partially unreadable.'];
+                $g['caps'][] = ['cap' => $this->dtConfig('rules.authority_unknown_cap'), 'reason' => 'Authority status partially unreadable.'];
 
             }
 
@@ -389,7 +392,7 @@ trait DtTrustScoreV3
 
         if (empty($carrier?->dot_number)) {
 
-            $this->dtFire($g, 'AUTH-02', 'fail', 'DOT Number is missing.', [
+            $this->dtFire($g, 'AUTH-02', $this->dtRuleTier('AUTH-02'), 'DOT Number is missing.', [
                 'code' => 'DOT_INACTIVE',
                 'message' => 'DOT Number is inactive.',
             ]);
@@ -400,7 +403,7 @@ trait DtTrustScoreV3
 
         } elseif (strtoupper((string) ($detail->status_code ?? '')) === 'I') {
 
-            $this->dtFire($g, 'AUTH-02', 'fail', 'DOT Number is inactive.', [
+            $this->dtFire($g, 'AUTH-02', $this->dtRuleTier('AUTH-02'), 'DOT Number is inactive.', [
                 'code' => 'DOT_INACTIVE',
                 'message' => 'DOT Number is inactive.',
             ]);
@@ -422,7 +425,7 @@ trait DtTrustScoreV3
 
         if ($activeOos > 0) {
 
-            $this->dtFire($g, 'AUTH-03', 'fail', 'Active Out Of Service Order.', [
+            $this->dtFire($g, 'AUTH-03', $this->dtRuleTier('AUTH-03'), 'Active Out Of Service Order.', [
                 'code' => 'OUT_OF_SERVICE',
                 'message' => 'Carrier currently has an active Out Of Service Order.',
             ]);
@@ -440,7 +443,7 @@ trait DtTrustScoreV3
             || $this->dtFlagValue($auth?->broker_rev_pend) === true;
 
         if ($revPending) {
-            $this->dtFire($g, 'AUTH-06', 'review', 'Authority revocation pending.');
+            $this->dtFire($g, 'AUTH-06', $this->dtRuleTier('AUTH-06'), 'Authority revocation pending.');
         }
 
         $appPending = $this->dtFlagValue($auth?->common_app_pend) === true
@@ -448,7 +451,7 @@ trait DtTrustScoreV3
             || $this->dtFlagValue($auth?->broker_app_pend) === true;
 
         if ($appPending) {
-            $this->dtFire($g, 'AUTH-07', 'low', 'Authority application pending.');
+            $this->dtFire($g, 'AUTH-07', $this->dtRuleTier('AUTH-07'), 'Authority application pending.');
         }
 
         /*
@@ -464,7 +467,7 @@ trait DtTrustScoreV3
             ($common === true || $contract === true)
         ) {
 
-            $this->dtFire($g, 'AUTH-08', 'review', 'Authority reinstated after a prior revocation.');
+            $this->dtFire($g, 'AUTH-08', $this->dtRuleTier('AUTH-08'), 'Authority reinstated after a prior revocation.');
 
             $g['flags'][] = 'reinstated_after_revocation';
 
@@ -480,18 +483,20 @@ trait DtTrustScoreV3
             ->filter(fn ($item) => stripos((string) $item->disp_action_desc, 'REVOK') !== false)
             ->count();
 
-        if ($revocations >= 3) {
-            $this->dtFire($g, 'AUTH-09', 'review', 'Three or more authority revocations on record.');
-        } elseif ($revocations >= 1) {
-            $this->dtFire($g, 'AUTH-09', 'medium', 'Authority revocation on record.');
+        if ($tier = $this->dtTierAt('AUTH-09', $revocations)) {
+            $this->dtFire($g, 'AUTH-09', $tier, $revocations === 1
+                ? 'Authority revocation on record.'
+                : $revocations.' authority revocations on record.');
         }
 
         $suspensions = $carrier->authorityOrders
             ->filter(fn ($item) => stripos((string) $item->order2_type_desc, 'SUSPEND') !== false)
             ->count();
 
-        if ($suspensions >= 1) {
-            $this->dtFire($g, 'AUTH-10', 'medium', 'Authority suspension order on record.');
+        if ($tier = $this->dtTierAt('AUTH-10', $suspensions)) {
+            $this->dtFire($g, 'AUTH-10', $tier, $suspensions === 1
+                ? 'Authority suspension order on record.'
+                : $suspensions.' authority suspension orders on record.');
         }
 
         /*
@@ -506,7 +511,9 @@ trait DtTrustScoreV3
         | REVOK pattern — REVOC != REVOK — so these scored zero before.)
         */
 
-        $cutoff36 = now()->subMonths(36);
+        $proceedingMonths = (int) $this->dtConfig('rules.AUTH-11.window_months');
+
+        $cutoff36 = now()->subMonths($proceedingMonths);
 
         $proceedings = $carrier->authorityHistory
             ->filter(function ($h) use ($cutoff36) {
@@ -527,12 +534,10 @@ trait DtTrustScoreV3
             })
             ->count();
 
-        if ($proceedings >= 4) {
-            $this->dtFire($g, 'AUTH-11', 'review', $proceedings.' involuntary revocation proceedings initiated in the last 36 months.');
-        } elseif ($proceedings >= 2) {
-            $this->dtFire($g, 'AUTH-11', 'medium', $proceedings.' involuntary revocation proceedings initiated in the last 36 months.');
-        } elseif ($proceedings >= 1) {
-            $this->dtFire($g, 'AUTH-11', 'low', 'Involuntary revocation proceeding initiated in the last 36 months.');
+        if ($tier = $this->dtTierAt('AUTH-11', $proceedings)) {
+            $this->dtFire($g, 'AUTH-11', $tier, $proceedings === 1
+                ? "Involuntary revocation proceeding initiated in the last {$proceedingMonths} months."
+                : "{$proceedings} involuntary revocation proceedings initiated in the last {$proceedingMonths} months.");
         }
 
         /*
@@ -551,13 +556,13 @@ trait DtTrustScoreV3
             $reportedPu = (int) ($carrier->nbr_power_unit ?? 0);
 
             $escalate = ((int) $observedUnits === 0)
-                || ($ageDays !== null && $ageDays < 180)
-                || ($reportedPu > 0 && $reportedPu <= 2);
+                || ($ageDays !== null && $ageDays < $this->dtConfig('rules.AUTH-12.escalate_if_authority_days_under'))
+                || ($reportedPu > 0 && $reportedPu <= $this->dtConfig('rules.AUTH-12.escalate_if_power_units_at_most'));
 
             if ($escalate) {
-                $this->dtFire($g, 'AUTH-12', 'review', 'Dual carrier + broker authority with re-brokering risk markers.');
+                $this->dtFire($g, 'AUTH-12', $this->dtConfig('rules.AUTH-12.escalated_tier'), 'Dual carrier + broker authority with re-brokering risk markers.');
             } else {
-                $this->dtFire($g, 'AUTH-12', 'medium', 'Active broker authority alongside carrier authority.');
+                $this->dtFire($g, 'AUTH-12', $this->dtRuleTier('AUTH-12'), 'Active broker authority alongside carrier authority.');
             }
 
             $g['flags'][] = 'dual_authority';
@@ -571,57 +576,59 @@ trait DtTrustScoreV3
         | The call site still passes whole years, which collapses 10 days and
         | 23 months into the same bucket, so the trait re-derives the age of
         | the newest GRANTED carrier authority itself from authorityHistory.
-        | < 30 days: review + senior approval, capped 45.
-        | 30-89 days: documented review, capped 65.
+        | Each rung of dtscore.rules.authority_age is a ceiling while the
+        | authority is younger than it; the youngest rungs also fire a rule.
+        | Past the last rung the age neither scores nor caps.
         */
 
         $g['params']['carrier_authority_age_days'] = $ageDays;
 
         if ($ageDays !== null) {
 
-            if ($ageDays < 30) {
+            foreach ($this->dtConfig('rules.authority_age') as $rung) {
 
-                $this->dtFire($g, 'OPS-01', 'review', 'Carrier authority granted fewer than 30 days ago.');
+                if ($ageDays >= $rung['under_days']) {
+                    continue;
+                }
 
-                $g['caps'][] = ['cap' => 45, 'reason' => 'Authority younger than 30 days.'];
+                if ($rung['rule'] !== null) {
 
-                $g['flags'][] = 'senior_approval_required';
+                    $this->dtFire($g, $rung['rule'], $rung['tier'], 'Carrier authority granted fewer than '.$rung['under_days'].' days ago.');
 
-            } elseif ($ageDays < 90) {
+                    $g['caps'][] = ['cap' => $rung['cap'], 'reason' => 'Authority younger than '.$rung['under_days'].' days.'];
 
-                $this->dtFire($g, 'OPS-04', 'medium', 'Carrier authority granted fewer than 90 days ago.');
+                } else {
 
-                $g['caps'][] = ['cap' => 65, 'reason' => 'Authority younger than 90 days.'];
+                    /*
+                    | v3.4 tenure ladder: no points, just a ceiling. CAVRA only
+                    | mandates the 30/90-day lines, but a five-month carrier
+                    | walking straight to 100 "Preferred" is commercially wrong
+                    | and exactly the fraud demographic.
+                    */
+                    $g['caps'][] = ['cap' => $rung['cap'], 'reason' => 'Authority younger than '.$rung['under_days'].' days — Preferred requires more tenure.'];
 
-                $g['flags'][] = 'documented_review_required';
+                }
 
-            } elseif ($ageDays < 180) {
+                if (! empty($rung['flag'])) {
+                    $g['flags'][] = $rung['flag'];
+                }
 
-                /*
-                | v3.4 tenure ladder: no points, just a ceiling. CAVRA only
-                | mandates the 30/90-day lines, but a five-month carrier
-                | walking straight to 100 "Preferred" is commercially wrong
-                | and exactly the fraud demographic. Acceptable from day 90;
-                | Preferred (>=85) takes a year.
-                */
-
-                $g['caps'][] = ['cap' => 75, 'reason' => 'Authority 90-179 days old — Preferred requires more tenure.'];
-
-            } elseif ($ageDays < 365) {
-
-                $g['caps'][] = ['cap' => 84, 'reason' => 'Authority younger than 12 months — Preferred requires a year of history.'];
-
+                break;
             }
 
         } elseif ($dotAge !== null && (int) $dotAge < 1 && $carrier->authorityHistory->count() === 0) {
 
             // No grant history at all and the DOT itself is under a year old:
-            // can't tell 20 days from 300, so take the 90-day treatment.
-            $this->dtFire($g, 'OPS-04', 'medium', 'Authority age unknown; DOT registered under a year ago.');
+            // can't tell 20 days from 300, so take the configured treatment.
+            $unknownAge = $this->dtConfig('rules.authority_age_unknown_new_dot');
 
-            $g['caps'][] = ['cap' => 65, 'reason' => 'Authority age unknown on a first-year DOT.'];
+            $this->dtFire($g, $unknownAge['rule'], $unknownAge['tier'], 'Authority age unknown; DOT registered under a year ago.');
 
-            $g['flags'][] = 'documented_review_required';
+            $g['caps'][] = ['cap' => $unknownAge['cap'], 'reason' => 'Authority age unknown on a first-year DOT.'];
+
+            if (! empty($unknownAge['flag'])) {
+                $g['flags'][] = $unknownAge['flag'];
+            }
 
         } elseif ($ageDays === null) {
 
@@ -674,7 +681,7 @@ trait DtTrustScoreV3
 
         } elseif (! $hasBipd) {
 
-            $this->dtFire($g, 'INS-01', 'fail', 'No active BIPD insurance filing.', [
+            $this->dtFire($g, 'INS-01', $this->dtRuleTier('INS-01'), 'No active BIPD insurance filing.', [
                 'code' => 'NO_BIPD',
                 'message' => 'No active BIPD insurance filing.',
             ]);
@@ -684,14 +691,16 @@ trait DtTrustScoreV3
             /*
             | Sufficiency — CAVRA App A: on file AND enough. Required comes
             | off the authority row, which stores THOUSANDS (the display
-            | path multiplies by 1000 at ~L3540); default 750,000 when the
-            | row doesn't say. Fire only when the on-file amount is
+            | path multiplies by 1000 at ~L3540); the configured default
+            | (INS-02.default_required_dollars) when the row doesn't say. Fire only when the on-file amount is
             | positively known and short.
             */
 
             $required = $this->dtOnFileAmount($auth?->min_cov_amount);
 
-            $requiredDollars = ($required !== null && $required > 0) ? $required * 1000 : 750000.0;
+            $requiredDollars = ($required !== null && $required > 0)
+                ? $required * 1000
+                : (float) $this->dtConfig('rules.INS-02.default_required_dollars');
 
             $onFileDollars = $bipdFilingAmount
                 ?? (($bipdFlagAmount !== null && $bipdFlagAmount > 0) ? $bipdFlagAmount * 1000 : null);
@@ -702,7 +711,7 @@ trait DtTrustScoreV3
 
             if ($onFileDollars !== null && $onFileDollars > 0 && $onFileDollars < $requiredDollars) {
 
-                $this->dtFire($g, 'INS-02', 'fail', 'BIPD coverage on file is below the required minimum.', [
+                $this->dtFire($g, 'INS-02', $this->dtRuleTier('INS-02'), 'BIPD coverage on file is below the required minimum.', [
                     'code' => 'BIPD_INSUFFICIENT',
                     'message' => 'BIPD on file ($'.number_format($onFileDollars).') is below the required $'.number_format($requiredDollars).'.',
                 ]);
@@ -747,7 +756,7 @@ trait DtTrustScoreV3
             ! $this->hasInsuranceFiling($carrier, 'cargo')
         ) {
 
-            $this->dtFire($g, 'INS-03', 'fail', 'Cargo insurance required but not on file.', [
+            $this->dtFire($g, 'INS-03', $this->dtRuleTier('INS-03'), 'Cargo insurance required but not on file.', [
                 'code' => 'NO_CARGO_INSURANCE',
                 'message' => 'Cargo Insurance required but not on file.',
             ]);
@@ -773,7 +782,7 @@ trait DtTrustScoreV3
             ! $this->hasInsuranceFiling($carrier, 'bond')
         ) {
 
-            $this->dtFire($g, 'INS-04', 'low', 'Bond or trust fund required but not on file.');
+            $this->dtFire($g, 'INS-04', $this->dtRuleTier('INS-04'), 'Bond or trust fund required but not on file.');
 
         }
 
@@ -795,7 +804,7 @@ trait DtTrustScoreV3
         });
 
         if ($pendingCancellation) {
-            $this->dtFire($g, 'INS-10', 'review', 'Insurance cancellation pending (future effective date).');
+            $this->dtFire($g, 'INS-10', $this->dtRuleTier('INS-10'), 'Insurance cancellation pending (future effective date).');
         }
 
         /*
@@ -808,8 +817,10 @@ trait DtTrustScoreV3
             ->filter(fn ($x) => ! empty($x->rej_date))
             ->count();
 
-        if ($rejected >= 1) {
-            $this->dtFire($g, 'INS-11', 'medium', 'Rejected insurance filing on record.');
+        if ($tier = $this->dtTierAt('INS-11', $rejected)) {
+            $this->dtFire($g, 'INS-11', $tier, $rejected === 1
+                ? 'Rejected insurance filing on record.'
+                : $rejected.' rejected insurance filings on record.');
         }
 
         $companyChanges = $carrier->insuranceFilingsHistory
@@ -818,10 +829,8 @@ trait DtTrustScoreV3
             ->unique()
             ->count();
 
-        if ($companyChanges >= 8) {
-            $this->dtFire($g, 'INS-12', 'medium', 'Eight or more insurance companies in the filing history.');
-        } elseif ($companyChanges >= 5) {
-            $this->dtFire($g, 'INS-12', 'low', 'Five or more insurance companies in the filing history.');
+        if ($tier = $this->dtTierAt('INS-12', $companyChanges)) {
+            $this->dtFire($g, 'INS-12', $tier, $companyChanges.' insurance companies in the filing history.');
         }
 
         $g['params'] += [
@@ -859,14 +868,14 @@ trait DtTrustScoreV3
 
         if ($rating === 'U' || $rating === 'UNSATISFACTORY') {
 
-            $this->dtFire($g, 'SAF-01', 'fail', 'Unsatisfactory Safety Rating.', [
+            $this->dtFire($g, 'SAF-01', $this->dtRuleTier('SAF-01'), 'Unsatisfactory Safety Rating.', [
                 'code' => 'UNSATISFACTORY_RATING',
                 'message' => 'Carrier has an Unsatisfactory Safety Rating.',
             ]);
 
         } elseif ($rating === 'C' || $rating === 'CONDITIONAL') {
 
-            $this->dtFire($g, 'SAF-02', 'fail', 'Conditional Safety Rating.', [
+            $this->dtFire($g, 'SAF-02', $this->dtRuleTier('SAF-02'), 'Conditional Safety Rating.', [
                 'code' => 'CONDITIONAL_RATING',
                 'message' => 'Carrier has a Conditional Safety Rating.',
             ]);
@@ -882,14 +891,14 @@ trait DtTrustScoreV3
         | Property-carrier percentiles left the public feed with the FAST
         | Act, so the bands are reconstructed from raw measures against the
         | national cut-points (smsPercentiles). The intervention thresholds
-        | are 65 (Unsafe Driving, HOS, Controlled Substances — CAVRA §7
-        | pins CS at 65, stricter than FMCSA's 80) and 80 (Vehicle
-        | Maintenance, Driver Fitness). Until carrier:refresh-benchmarks
-        | emits 65/80 cut-points, the nearest cut ABOVE the threshold is
-        | used (75 / 90) — deliberately under-inclusive, never over.
+        | live in dtscore.rules.sms.basics: 65 (Unsafe Driving, HOS,
+        | Controlled Substances — CAVRA §7 pins CS at 65, stricter than
+        | FMCSA's 80) and 80 (Vehicle Maintenance, Driver Fitness). Until
+        | carrier:refresh-benchmarks emits 65/80 cut-points, the nearest cut
+        | ABOVE the threshold is used (fallback_cut, 75 / 90) — deliberately
+        | under-inclusive, never over.
         |
-        | One BASIC over: Medium. Two or more over: Fail — CAVRA §7 says a
-        | carrier over two thresholds is not used, full stop.
+        | One BASIC over: Medium. Two or more over: SMS-MULTI.
         */
 
         $inspTotal = (int) ($sms?->insp_total ?? 0);
@@ -898,7 +907,7 @@ trait DtTrustScoreV3
 
             $g['unknown'][] = 'sms_measures';
 
-        } elseif ($inspTotal < 5) {
+        } elseif ($inspTotal < $this->dtConfig('rules.sms.min_inspections')) {
 
             $g['unknown'][] = 'basic_percentiles_insufficient_inspections';
 
@@ -906,13 +915,7 @@ trait DtTrustScoreV3
 
             $cuts = $this->smsPercentiles();
 
-            $thresholds = [
-                'unsafe_driv' => 65,
-                'hos_driv' => 65,
-                'contr_subst' => 65,
-                'veh_maint' => 80,
-                'driv_fit' => 80,
-            ];
+            $basics = $this->dtConfig('rules.sms.basics');
 
             $labels = [
                 'unsafe_driv' => 'Unsafe Driving',
@@ -924,11 +927,11 @@ trait DtTrustScoreV3
 
             $over = [];
 
-            foreach (self::SMS_BASICS as $basic) {
+            foreach ($basics as $basic => $setting) {
 
-                $threshold = $thresholds[$basic];
+                $threshold = $setting['threshold'];
 
-                $fallback = $threshold <= 65 ? 75 : 90;
+                $fallback = $setting['fallback_cut'];
 
                 $cut = $cuts[$basic][$threshold] ?? $cuts[$basic][$fallback] ?? null;
 
@@ -954,7 +957,7 @@ trait DtTrustScoreV3
                     $this->dtFire(
                         $g,
                         'SMS-'.strtoupper($basic),
-                        'medium',
+                        $this->dtConfig('rules.sms.tier'),
                         $labels[$basic].' BASIC at or above the intervention threshold.'
                     );
 
@@ -964,7 +967,7 @@ trait DtTrustScoreV3
 
             $g['params']['basics_over_threshold'] = count($over);
 
-            if (count($over) >= 2) {
+            if (count($over) >= $this->dtConfig('rules.SMS-MULTI.min_basics')) {
 
                 /*
                 | TEMPORARY DEMOTION (v3.2.1): Review, not Fail. Our cuts are
@@ -977,7 +980,7 @@ trait DtTrustScoreV3
                 | RESTORE to 'fail' the day carrier:refresh-benchmarks emits
                 | peer-grouped 65/80 cuts — that word is the whole change.
                 */
-                $this->dtFire($g, 'SMS-MULTI', 'review', 'Two or more BASICs at or above the intervention threshold.', [
+                $this->dtFire($g, 'SMS-MULTI', $this->dtRuleTier('SMS-MULTI'), count($over).' BASICs at or above the intervention threshold.', [
                     'code' => 'MULTIPLE_BASIC_THRESHOLDS',
                     'message' => count($over).' BASICs at or above the intervention threshold.',
                 ]);
@@ -990,14 +993,14 @@ trait DtTrustScoreV3
             | so these start counting the moment it does.
             */
 
-            foreach (self::SMS_BASICS as $basic) {
+            foreach (array_keys($basics) as $basic) {
 
                 if ($this->dtFlagValue($sms->{"{$basic}_ac"}) === true) {
 
                     $this->dtFire(
                         $g,
                         'SAF-AC-'.strtoupper($basic),
-                        'medium',
+                        $this->dtRuleTier('SAF-AC'),
                         $labels[$basic].' acute/critical violation indicator.'
                     );
 
@@ -1012,9 +1015,10 @@ trait DtTrustScoreV3
         | Out Of Service Rates
         |--------------------------------------------------------------------------
         | Measured against the benchmark table's national averages (fraction
-        | of inspections), falling back to 20% vehicle / 5% driver if the
-        | benchmark rows are absent. Only scored with 5+ relevant
-        | inspections — below that the rate is noise.
+        | of inspections), falling back to SAF-10/SAF-11.national_fallback_pct
+        | if the benchmark rows are absent. Only scored with min_inspections
+        | relevant inspections — below that the rate is noise. Tiers are
+        | multiples of the national average.
         */
 
         $bm = $this->benchmarks();
@@ -1024,32 +1028,16 @@ trait DtTrustScoreV3
         $natlDriver = ((float) ($bm['natl_driver_oos'] ?? 0)) * 100;
 
         if ($natlVehicle <= 0) {
-            $natlVehicle = 20.0;
+            $natlVehicle = (float) $this->dtConfig('rules.SAF-10.national_fallback_pct');
         }
 
         if ($natlDriver <= 0) {
-            $natlDriver = 5.0;
+            $natlDriver = (float) $this->dtConfig('rules.SAF-11.national_fallback_pct');
         }
 
-        if ($vehicleOosPct !== null && (int) ($sms?->vehicle_insp_total ?? 0) >= 5) {
+        $this->dtFireOosRate($g, 'SAF-10', 'Vehicle', $vehicleOosPct, (int) ($sms?->vehicle_insp_total ?? 0), $natlVehicle);
 
-            if ($vehicleOosPct >= 2 * $natlVehicle) {
-                $this->dtFire($g, 'SAF-10', 'medium', 'Vehicle OOS rate at least twice the national average.');
-            } elseif ($vehicleOosPct >= $natlVehicle) {
-                $this->dtFire($g, 'SAF-10', 'low', 'Vehicle OOS rate above the national average.');
-            }
-
-        }
-
-        if ($driverOosPct !== null && (int) ($sms?->driver_insp_total ?? 0) >= 5) {
-
-            if ($driverOosPct >= 2 * $natlDriver) {
-                $this->dtFire($g, 'SAF-11', 'medium', 'Driver OOS rate at least twice the national average.');
-            } elseif ($driverOosPct >= $natlDriver) {
-                $this->dtFire($g, 'SAF-11', 'low', 'Driver OOS rate above the national average.');
-            }
-
-        }
+        $this->dtFireOosRate($g, 'SAF-11', 'Driver', $driverOosPct, (int) ($sms?->driver_insp_total ?? 0), $natlDriver);
 
         $g['params'] += [
             'insp_total' => $inspTotal,
@@ -1060,6 +1048,36 @@ trait DtTrustScoreV3
         ];
 
         return $g;
+    }
+
+    /**
+     * SAF-10 / SAF-11: an out-of-service rate against the national
+     * average. Each configured tier is a multiple of that average.
+     */
+    private function dtFireOosRate(array &$g, string $rule, string $kind, $pct, int $inspections, float $national): void
+    {
+        if ($pct === null || $inspections < $this->dtConfig("rules.{$rule}.min_inspections")) {
+            return;
+        }
+
+        $tiers = $this->dtConfig("rules.{$rule}.tiers", []);
+
+        arsort($tiers);
+
+        foreach ($tiers as $tier => $multiple) {
+
+            if ($pct >= $multiple * $national) {
+
+                $label = $multiple == 1
+                    ? "{$kind} OOS rate above the national average."
+                    : "{$kind} OOS rate at least {$multiple}x the national average.";
+
+                $this->dtFire($g, $rule, $tier, $label);
+
+                return;
+            }
+
+        }
     }
 
     /*
@@ -1075,7 +1093,9 @@ trait DtTrustScoreV3
     {
         $g = $this->dtGroup();
 
-        $cutoff = now()->subMonths(24);
+        $windowMonths = (int) $this->dtConfig('rules.crash_window_months');
+
+        $cutoff = now()->subMonths($windowMonths);
 
         $recent = $carrier->crashes->filter(function ($crash) use ($cutoff) {
 
@@ -1107,39 +1127,36 @@ trait DtTrustScoreV3
 
             $g['flags'][] = 'fatal_crash_24mo';
 
-            $fatalRateHigh = $powerUnits > 0 && ($fatal24 / $powerUnits) >= 0.005;   // 1+ per 200 units per 24mo
+            $fatalRateHigh = $powerUnits > 0
+                && ($fatal24 / $powerUnits) >= $this->dtConfig('rules.CR-01.high_fatal_rate_per_unit');
 
-            if ($powerUnits < 100 || $fatalRateHigh) {
-                $this->dtFire($g, 'CR-01', 'review', 'Fatal crash within the last 24 months.');
+            if ($powerUnits < $this->dtConfig('rules.CR-01.large_fleet_min_units') || $fatalRateHigh) {
+                $this->dtFire($g, 'CR-01', $this->dtRuleTier('CR-01'), "Fatal crash within the last {$windowMonths} months.");
             } else {
-                $this->dtFire($g, 'CR-01', 'medium', 'Fatal crash within the last 24 months (large fleet, baseline rate).');
+                $this->dtFire($g, 'CR-01', $this->dtConfig('rules.CR-01.large_fleet_tier'), "Fatal crash within the last {$windowMonths} months (large fleet, baseline rate).");
             }
 
         }
 
-        $ratePerUnitYear = ($powerUnits > 0) ? round(($count24 / $powerUnits) / 2, 3) : null;
+        $ratePerUnitYear = ($powerUnits > 0) ? round(($count24 / $powerUnits) / ($windowMonths / 12), 3) : null;
 
-        if ($ratePerUnitYear !== null && $count24 >= 2) {
+        if ($ratePerUnitYear !== null && $count24 >= $this->dtConfig('rules.CR-02.min_crashes')) {
 
-            if ($ratePerUnitYear >= 0.5) {
-                $this->dtFire($g, 'CR-02', 'medium', 'Crash rate of 0.5+ per power unit per year.');
-            } elseif ($ratePerUnitYear >= 0.25) {
-                $this->dtFire($g, 'CR-02', 'low', 'Crash rate of 0.25+ per power unit per year.');
+            if ($tier = $this->dtTierAt('CR-02', $ratePerUnitYear)) {
+                $this->dtFire($g, 'CR-02', $tier, 'Crash rate of '.$this->dtConfig("rules.CR-02.tiers.{$tier}").'+ per power unit per year.');
             }
 
         } elseif ($ratePerUnitYear === null) {
 
             // Fleet size unreported — fall back to windowed volume only.
-            if ($count24 >= 10) {
-                $this->dtFire($g, 'CR-03', 'medium', 'Ten or more crashes in the last 24 months (fleet size unreported).');
-            } elseif ($count24 >= 5) {
-                $this->dtFire($g, 'CR-03', 'low', 'Five or more crashes in the last 24 months (fleet size unreported).');
+            if ($tier = $this->dtTierAt('CR-03', $count24)) {
+                $this->dtFire($g, 'CR-03', $tier, "{$count24} crashes in the last {$windowMonths} months (fleet size unreported).");
             }
 
         }
 
-        if ($tow24 >= 5) {
-            $this->dtFire($g, 'CR-04', 'low', 'Five or more tow-away crashes in the last 24 months.');
+        if ($tier = $this->dtTierAt('CR-04', $tow24)) {
+            $this->dtFire($g, 'CR-04', $tier, "{$tow24} tow-away crashes in the last {$windowMonths} months.");
         }
 
         $g['params'] = [
@@ -1183,7 +1200,7 @@ trait DtTrustScoreV3
 
         $withViolations = 0;
 
-        foreach (self::SMS_BASICS as $basic) {
+        foreach (array_keys($this->dtConfig('rules.sms.basics')) as $basic) {
             $withViolations += (int) ($sms?->{"{$basic}_insp_w_viol"} ?? 0);
         }
 
@@ -1191,12 +1208,10 @@ trait DtTrustScoreV3
 
         $violationRate = $inspTotal > 0 ? round($withViolations / $inspTotal, 3) : null;
 
-        if ($inspTotal >= 5 && $violationRate !== null) {
+        if ($inspTotal >= $this->dtConfig('rules.INSP-01.min_inspections') && $violationRate !== null) {
 
-            if ($violationRate >= 0.75) {
-                $this->dtFire($g, 'INSP-01', 'medium', 'Violations on 75%+ of inspections.');
-            } elseif ($violationRate >= 0.50) {
-                $this->dtFire($g, 'INSP-01', 'low', 'Violations on half or more of inspections.');
+            if ($tier = $this->dtTierAt('INSP-01', $violationRate)) {
+                $this->dtFire($g, 'INSP-01', $tier, 'Violations on '.round($this->dtConfig("rules.INSP-01.tiers.{$tier}") * 100).'%+ of inspections.');
             }
 
         }
@@ -1213,10 +1228,10 @@ trait DtTrustScoreV3
         | old — operating with no recent roadside contact.
         */
 
-        $established = $ageDays !== null && $ageDays > 365;
+        $established = $ageDays !== null && $ageDays > $this->dtConfig('rules.INSP-02.established_after_days');
 
-        if ($established && $inspTotal < 5) {
-            $this->dtFire($g, 'INSP-02', 'low', 'Fewer than five roadside inspections despite 12+ months of authority.');
+        if ($established && $inspTotal < $this->dtConfig('rules.INSP-02.min_inspections')) {
+            $this->dtFire($g, 'INSP-02', $this->dtRuleTier('INSP-02'), 'Fewer than '.$this->dtConfig('rules.INSP-02.min_inspections').' roadside inspections on an established authority.');
         }
 
         $lastInspDays = null;
@@ -1243,8 +1258,8 @@ trait DtTrustScoreV3
 
                 if ($latest === null) {
                     $g['unknown'][] = 'last_inspection_date';
-                } elseif ($lastInspDays > 365) {
-                    $this->dtFire($g, 'INSP-03', 'low', 'No roadside inspection in the last 12 months.');
+                } elseif ($lastInspDays > $this->dtConfig('rules.INSP-03.stale_after_days')) {
+                    $this->dtFire($g, 'INSP-03', $this->dtRuleTier('INSP-03'), 'No roadside inspection in the last '.$this->dtConfig('rules.INSP-03.stale_after_days').' days.');
                 }
 
             }
@@ -1280,9 +1295,13 @@ trait DtTrustScoreV3
         | everyone else keeps the full tiers.
         */
 
-        $largeEstablished = ((int) ($carrier->nbr_power_unit ?? 0)) >= 50
+        $largeEstablished = ((int) ($carrier->nbr_power_unit ?? 0)) >= $this->dtConfig('rules.network.large_fleet_min_units')
             && $ageDays !== null
-            && $ageDays >= 1825;
+            && $ageDays >= $this->dtConfig('rules.network.large_fleet_min_days');
+
+        $largeFleetTier = $this->dtConfig('rules.network.large_fleet_tier');
+
+        $largeFleetNote = 'Demoted from Review: established fleet of '.$this->dtConfig('rules.network.large_fleet_min_units').'+ units.';
 
         /*
         | Internal block / fraud reports — the columns don't exist yet, and
@@ -1297,7 +1316,7 @@ trait DtTrustScoreV3
         if ($blocked === null) {
             $g['pending'][] = 'PRT-21 blocked_internally (column not in schema yet)';
         } elseif ($this->dtFlagValue($blocked) === true) {
-            $this->dtFire($g, 'PRT-21', 'fail', 'Carrier is internally blocked.', [
+            $this->dtFire($g, 'PRT-21', $this->dtRuleTier('PRT-21'), 'Carrier is internally blocked.', [
                 'code' => 'BLOCKED',
                 'message' => 'Carrier is internally blocked.',
             ]);
@@ -1307,8 +1326,8 @@ trait DtTrustScoreV3
 
         if ($fraudReports === null) {
             $g['pending'][] = 'PRT-20 incident_reports_fraud (column not in schema yet)';
-        } elseif ((int) $fraudReports >= 2) {
-            $this->dtFire($g, 'PRT-20', 'fail', 'Multiple fraud reports found.', [
+        } elseif ((int) $fraudReports >= $this->dtConfig('rules.PRT-20.min_reports')) {
+            $this->dtFire($g, 'PRT-20', $this->dtRuleTier('PRT-20'), 'Multiple fraud reports found.', [
                 'code' => 'FRAUD_REPORTS',
                 'message' => 'Multiple fraud reports found.',
             ]);
@@ -1322,7 +1341,7 @@ trait DtTrustScoreV3
         | cached for six hours per DOT so the profile page pays for them
         | once, not per view. Needs the indexes riskFactors() already calls
         | out (telephone, email_address, phy_state+phy_city+phy_street,
-        | inspections.vin). Kill switch: trustscore.network_checks = false.
+        | inspections.vin). Kill switch: dtscore.rules.network.enabled = false.
         | Any query failure abstains — it never breaks the endpoint.
         */
 
@@ -1350,19 +1369,7 @@ trait DtTrustScoreV3
                     continue;
                 }
 
-                if ($count >= 3) {
-
-                    if ($largeEstablished) {
-                        $this->dtFire($g, $id, 'medium', sprintf($label, $count), [
-                            'note' => 'Demoted from Review: established fleet of 50+ units.',
-                        ]);
-                    } else {
-                        $this->dtFire($g, $id, 'review', sprintf($label, $count));
-                    }
-
-                } elseif ($count === 2) {
-                    $this->dtFire($g, $id, 'low', sprintf($label, $count));
-                }
+                $this->dtFireNetwork($g, $id, $count, sprintf($label, $count), $largeEstablished, $largeFleetTier, $largeFleetNote);
 
             }
 
@@ -1370,21 +1377,7 @@ trait DtTrustScoreV3
 
             if ($vinShared !== null) {
 
-                if ($vinShared >= 5) {
-
-                    if ($largeEstablished) {
-                        $this->dtFire($g, 'NET-04', 'medium', 'Roadside VINs shared with '.$vinShared.' other carriers.', [
-                            'note' => 'Demoted from Review: established fleet of 50+ units.',
-                        ]);
-                    } else {
-                        $this->dtFire($g, 'NET-04', 'review', 'Roadside VINs shared with '.$vinShared.' other carriers.');
-                    }
-
-                } elseif ($vinShared >= 3) {
-                    $this->dtFire($g, 'NET-04', 'medium', 'Roadside VINs shared with '.$vinShared.' other carriers.');
-                } elseif ($vinShared === 2) {
-                    $this->dtFire($g, 'NET-04', 'low', 'Roadside VINs shared with two other carriers.');
-                }
+                $this->dtFireNetwork($g, 'NET-04', $vinShared, 'Roadside VINs shared with '.$vinShared.' other carriers.', $largeEstablished, $largeFleetTier, $largeFleetNote);
 
             }
 
@@ -1398,24 +1391,19 @@ trait DtTrustScoreV3
 
         $street = strtoupper(($carrier->phy_street ?? '').' | '.($carrier->mailing_street ?? ''));
 
-        $virtual = collect(self::MAIL_DROP_PATTERNS)
+        $virtual = collect($this->dtConfig('rules.ID-01.patterns'))
             ->contains(fn ($pattern) => str_contains($street, $pattern));
 
         if ($virtual) {
-            $this->dtFire($g, 'ID-01', 'low', 'Physical or mailing address matches a known mail-drop pattern.');
+            $this->dtFire($g, 'ID-01', $this->dtRuleTier('ID-01'), 'Physical or mailing address matches a known mail-drop pattern.');
         }
 
         if (! empty($carrier->email_address)) {
 
             $domain = strtolower((string) substr((string) strrchr($carrier->email_address, '@'), 1));
 
-            $freeDomains = [
-                'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
-                'aol.com', 'live.com', 'msn.com', 'protonmail.com',
-            ];
-
-            if (in_array($domain, $freeDomains, true)) {
-                $this->dtFire($g, 'ID-03', 'low', 'Contact email is a free provider address.');
+            if (in_array($domain, $this->dtConfig('rules.ID-03.domains'), true)) {
+                $this->dtFire($g, 'ID-03', $this->dtRuleTier('ID-03'), 'Contact email is a free provider address.');
             }
 
         }
@@ -1428,6 +1416,26 @@ trait DtTrustScoreV3
         ];
 
         return $g;
+    }
+
+    /**
+     * NET-01..04: other DOTs sharing an identifier. A large, established
+     * fleet that would land on Review takes the configured lower tier
+     * instead — a corporate family, not a chameleon.
+     */
+    private function dtFireNetwork(array &$g, string $rule, ?int $count, string $label, bool $largeEstablished, string $largeFleetTier, string $note): void
+    {
+        if ($count === null || ! ($tier = $this->dtTierAt($rule, $count))) {
+            return;
+        }
+
+        if ($tier === 'review' && $largeEstablished) {
+            $this->dtFire($g, $rule, $largeFleetTier, $label, ['note' => $note]);
+
+            return;
+        }
+
+        $this->dtFire($g, $rule, $tier, $label);
     }
 
     /*
@@ -1450,9 +1458,9 @@ trait DtTrustScoreV3
 
             $g['unknown'][] = 'mcs150_year';
 
-        } elseif (((int) now()->year - (int) $mcs150Year) > 2) {
+        } elseif (((int) now()->year - (int) $mcs150Year) > $this->dtConfig('rules.OPS-10.max_age_years')) {
 
-            $this->dtFire($g, 'OPS-10', 'low', 'MCS-150 filing more than two years old.');
+            $this->dtFire($g, 'OPS-10', $this->dtRuleTier('OPS-10'), 'MCS-150 filing more than '.$this->dtConfig('rules.OPS-10.max_age_years').' years old.');
 
         }
 
@@ -1469,9 +1477,9 @@ trait DtTrustScoreV3
 
         $inspectionCount = $carrier->inspections->count();
 
-        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionCount >= 5) {
+        if ($reportedUnits > 0 && (int) $observedUnits === 0 && $inspectionCount >= $this->dtConfig('rules.OPS-11.min_inspections')) {
 
-            $this->dtFire($g, 'OPS-11', 'low', 'Reported power units, none observed at roadside.');
+            $this->dtFire($g, 'OPS-11', $this->dtRuleTier('OPS-11'), 'Reported power units, none observed at roadside.');
 
         }
 
@@ -1489,12 +1497,20 @@ trait DtTrustScoreV3
         | in-window.
         */
 
+        $falseFilingCodes = $this->dtConfig('rules.OPS-12.codes');
+
         $falseFilings = ($carrier->violationDetails ?? collect([]))
-            ->filter(function ($v) {
+            ->filter(function ($v) use ($falseFilingCodes) {
 
                 $code = strtoupper(trim((string) ($v->viol_code ?? '')));
 
-                return str_starts_with($code, '390.19') || str_starts_with($code, '390.35');
+                foreach ($falseFilingCodes as $prefix) {
+                    if (str_starts_with($code, $prefix)) {
+                        return true;
+                    }
+                }
+
+                return false;
             });
 
         $falseFilingCount = $falseFilings->count();
@@ -1504,7 +1520,7 @@ trait DtTrustScoreV3
             $this->dtFire(
                 $g,
                 'OPS-12',
-                'medium',
+                $this->dtRuleTier('OPS-12'),
                 $falseFilingCount === 1
                     ? 'Cited for a false or misleading federal filing (390.19/390.35).'
                     : $falseFilingCount.' citations for false or misleading federal filings (390.19/390.35).'
@@ -1520,9 +1536,9 @@ trait DtTrustScoreV3
         | than the carrier reports on its MCS-150.
         */
 
-        if ($reportedUnits >= 1 && (int) $observedUnits >= 2 && (int) $observedUnits > $reportedUnits) {
+        if ($reportedUnits >= 1 && (int) $observedUnits >= $this->dtConfig('rules.OPS-13.min_observed_units') && (int) $observedUnits > $reportedUnits) {
 
-            $this->dtFire($g, 'OPS-13', 'low', 'More power units observed at roadside than reported to FMCSA.');
+            $this->dtFire($g, 'OPS-13', $this->dtRuleTier('OPS-13'), 'More power units observed at roadside than reported to FMCSA.');
 
         }
 
@@ -1699,11 +1715,11 @@ trait DtTrustScoreV3
     /**
      * Cross-carrier identifier counts, cached six hours per DOT. Any
      * failure returns null — the identity rules abstain rather than take
-     * the endpoint down. Disable with trustscore.network_checks = false.
+     * the endpoint down. Disable with dtscore.rules.network.enabled = false.
      */
     private function dtNetworkCounts($carrier): ?array
     {
-        if (! config('trustscore.network_checks', true)) {
+        if (! $this->dtConfig('rules.network.enabled', true)) {
             return null;
         }
 
@@ -1727,7 +1743,7 @@ trait DtTrustScoreV3
 
         try {
 
-            return Cache::remember('dt:trust:net:v2:'.$dot, 21600, function () use ($carrier, $dot, $stemLike) {
+            return Cache::remember('dt:trust:net:v2:'.$dot, (int) $this->dtConfig('rules.network.cache_seconds'), function () use ($carrier, $dot, $stemLike) {
 
                 $phone = null;
 
@@ -1868,8 +1884,45 @@ trait DtTrustScoreV3
         ];
     }
 
+    /** One value from config/dtscore.php — the only place scoring numbers live. */
+    private function dtConfig(string $key, $default = null)
+    {
+        return config('dtscore.'.$key, $default);
+    }
+
+    /** The tier a single-outcome rule fires at. */
+    private function dtRuleTier(string $rule): string
+    {
+        return $this->dtConfig("rules.{$rule}.tier");
+    }
+
+    /**
+     * The tier an escalating rule lands on for this value: the highest
+     * configured threshold the value reaches, or null when it reaches none.
+     */
+    private function dtTierAt(string $rule, $value): ?string
+    {
+        $tiers = $this->dtConfig("rules.{$rule}.tiers", []);
+
+        arsort($tiers);
+
+        foreach ($tiers as $tier => $min) {
+
+            if ($value >= $min) {
+                return $tier;
+            }
+
+        }
+
+        return null;
+    }
+
     private function dtFire(array &$group, string $id, string $tier, string $label, array $extra = []): void
     {
+        if ($this->dtConfig("rules.{$id}.enabled", true) === false) {
+            return;
+        }
+
         $points = $this->dtTierPoints($tier);
 
         $group['points'] += $points;
@@ -1886,41 +1939,41 @@ trait DtTrustScoreV3
         ], $extra);
     }
 
-    /** Low 125 / Medium 250 / Review 1,000 / Fail 10,000 — MCP-compatible. */
-    private const DT_TIER_POINTS_LOW = 125;
-
-    private const DT_TIER_POINTS_MEDIUM = 250;
-
-    private const DT_TIER_POINTS_REVIEW = 1000;
-
-    private const DT_TIER_POINTS_FAIL = 10000;
-
+    /** Tier -> risk points, from dtscore.tier_points. */
     private function dtTierPoints(string $tier): int
     {
-        return match ($tier) {
-            'low' => self::DT_TIER_POINTS_LOW,
-            'medium' => self::DT_TIER_POINTS_MEDIUM,
-            'review' => self::DT_TIER_POINTS_REVIEW,
-            'fail' => self::DT_TIER_POINTS_FAIL,
-        };
+        $points = $this->dtConfig("tier_points.{$tier}");
+
+        if ($points === null) {
+            throw new \InvalidArgumentException("Unknown DT score tier [{$tier}].");
+        }
+
+        return (int) $points;
     }
 
     /**
-     * Points -> 0-100, monotonic decreasing so the gauge can never
-     * contradict the status. 0 pts = 100; 999 = 55; 1,000 = 54;
-     * 10,000 = 18; 30,000+ = 0.
+     * Points -> 0-100 along the dtscore.gauge segments, monotonic
+     * decreasing so the gauge can never contradict the status.
      */
     private function dtPointsToScore(float $points): float
     {
-        if ($points >= 10000) {
-            return round(max(0.0, 18.0 - (($points - 10000) / 20000) * 18.0), 1);
+        $segments = $this->dtConfig('gauge');
+
+        $segment = $segments[0];
+
+        foreach ($segments as $candidate) {
+
+            if ($points >= $candidate[0]) {
+                $segment = $candidate;
+            }
+
         }
 
-        if ($points >= 1000) {
-            return round(54.0 - (($points - 1000) / 9000) * 35.0, 1);
-        }
+        [$fromPoints, $toPoints, $fromScore, $toScore] = $segment;
 
-        return round(100.0 - ($points / 1000) * 45.0, 1);
+        $score = $fromScore - (($points - $fromPoints) / ($toPoints - $fromPoints)) * ($fromScore - $toScore);
+
+        return round(max((float) $toScore, (float) $score), 1);
     }
 
     private function dtBandFor(string $status, float $score): array
@@ -1943,7 +1996,7 @@ trait DtTrustScoreV3
             ];
         }
 
-        if ($score >= 85) {
+        if ($score >= $this->dtConfig('bands.preferred')) {
             return [
                 'key' => 'preferred',
                 'label' => 'Preferred',
@@ -1952,7 +2005,7 @@ trait DtTrustScoreV3
             ];
         }
 
-        if ($score >= 70) {
+        if ($score >= $this->dtConfig('bands.acceptable')) {
             return [
                 'key' => 'acceptable',
                 'label' => 'Acceptable',
@@ -1971,8 +2024,9 @@ trait DtTrustScoreV3
 
     /**
      * Data confidence: the share of the eight core inputs that are
-     * actually populated. The caps are the v1.1 starting shape and are
-     * UNCALIBRATED — run 20-30 known carriers before trusting them.
+     * actually populated. The caps (dtscore.confidence.caps) are the v1.1
+     * starting shape and are UNCALIBRATED — run 20-30 known carriers
+     * before trusting them.
      */
     private function dtDataConfidence($carrier, $detail, $sms, $auth, $dotAge, $mcs150Year): array
     {
@@ -1986,7 +2040,7 @@ trait DtTrustScoreV3
             'authority_row' => $auth !== null,
             'detail_row' => $detail !== null,
             'sms_row' => $sms !== null,
-            'inspection_history' => $inspTotal >= 5,
+            'inspection_history' => $inspTotal >= $this->dtConfig('confidence.min_inspections'),
             'insurance_data' => $carrier->insuranceFilings->count() > 0
                 || (($this->dtOnFileAmount($auth?->bipd_file) ?? 0) > 0),
             'dot_age' => $dotAge !== null,
@@ -1998,12 +2052,16 @@ trait DtTrustScoreV3
 
         $confidence = round($known / count($inputs), 2);
 
-        $cap = match (true) {
-            $confidence < 0.40 => 55.0,
-            $confidence < 0.65 => 70.0,
-            $confidence < 0.85 => 85.0,
-            default => null,
-        };
+        $cap = null;
+
+        foreach ($this->dtConfig('confidence.caps') as [$below, $ceiling]) {
+
+            if ($confidence < $below) {
+                $cap = (float) $ceiling;
+                break;
+            }
+
+        }
 
         return [$confidence, $cap, $inputs];
     }
@@ -2018,25 +2076,28 @@ trait DtTrustScoreV3
     {
         $pillars = [];
 
-        foreach (self::DT_PILLAR_WEIGHTS as $key => $weight) {
+        foreach ($this->dtConfig('pillars.weights') as $key => $weight) {
 
             $group = $groups[$key];
 
             $factor = $group['fail']
                 ? 0.0
-                : max(0.0, 1.0 - $group['points'] / 1000);
+                : max(0.0, 1.0 - $group['points'] / $this->dtConfig('pillars.zero_at_points'));
 
             $score = (int) round($weight * $factor);
 
             $ratio = $weight > 0 ? $score / $weight : 0;
 
-            $status = match (true) {
-                $ratio >= 0.90 => 'Excellent',
-                $ratio >= 0.72 => 'Good',
-                $ratio >= 0.50 => 'Average',
-                $ratio >= 0.25 => 'Poor',
-                default => 'Critical',
-            };
+            $status = 'Critical';
+
+            foreach ($this->dtConfig('pillars.status') as $label => $min) {
+
+                if ($ratio >= $min) {
+                    $status = $label;
+                    break;
+                }
+
+            }
 
             $pillars[$key] = [
 
@@ -2071,21 +2132,6 @@ trait DtTrustScoreV3
     | Nothing here participates in scoring. It reports what already happened.
     */
 
-    /**
-     * Presentation weights for the seven pillar cards. Shared with
-     * dtLegacyPillars() so the explanation can never quote a weight the
-     * profile page does not render.
-     */
-    private const DT_PILLAR_WEIGHTS = [
-        'safety_roadside' => 24,
-        'identity_fraud' => 20,
-        'insurance_financial' => 18,
-        'authority_compliance' => 12,
-        'crash_history' => 10,
-        'inspection_quality' => 8,
-        'operations_experience' => 8,
-    ];
-
     private const DT_GROUP_LABELS = [
         'authority_compliance' => 'Authority & Compliance',
         'insurance_financial' => 'Insurance & Financial',
@@ -2098,8 +2144,9 @@ trait DtTrustScoreV3
 
     /**
      * Every rule the engine can fire, so the response can list the ones
-     * that stayed quiet as well as the ones that did not. 'tiers' is the
-     * set of severities a rule can land on, in escalation order.
+     * that stayed quiet as well as the ones that did not. The tiers a
+     * rule can land on come from config/dtscore.php (dtPossibleTiers()),
+     * and {key} in a description is filled from dtscore.rules.
      *
      * Keep in step with the dtEvaluate*() methods: a rule missing here is
      * still scored, it just reports as an unnamed finding.
@@ -2107,71 +2154,71 @@ trait DtTrustScoreV3
     private const DT_RULE_CATALOG = [
 
         // ── Authority & Compliance ──────────────────────────────────────
-        'AUTH-01' => ['authority_compliance', 'Operating authority inactive', 'Common and Contract authority status on the FMCSA authority record.', ['fail'], 'Operating authority status'],
-        'AUTH-02' => ['authority_compliance', 'DOT number inactive', 'Presence of a DOT number and the census status code.', ['fail'], 'DOT number status'],
-        'AUTH-03' => ['authority_compliance', 'Active out-of-service order', 'Out-of-service orders with no rescind date.', ['fail'], 'Out-of-service orders'],
-        'AUTH-06' => ['authority_compliance', 'Revocation pending', 'Common / contract / broker revocation-pending flags.', ['review'], 'Revocation pending'],
-        'AUTH-07' => ['authority_compliance', 'Application pending', 'Common / contract / broker application-pending flags.', ['low'], 'Application pending'],
-        'AUTH-08' => ['authority_compliance', 'Reinstated after revocation', 'Prior-revoke flag against a currently active authority.', ['review'], 'Reinstatement after revocation'],
-        'AUTH-09' => ['authority_compliance', 'Revocation history', 'Completed revocations in the authority history.', ['medium', 'review'], 'Revocation history'],
-        'AUTH-10' => ['authority_compliance', 'Suspension orders', 'Suspension orders in the authority order history.', ['medium'], 'Suspension orders'],
-        'AUTH-11' => ['authority_compliance', 'Revocation proceedings', 'Involuntary revocation proceedings opened in the last 36 months that did not complete.', ['low', 'medium', 'review'], 'Revocation proceedings'],
-        'AUTH-12' => ['authority_compliance', 'Dual carrier + broker authority', 'Active broker authority alongside carrier authority, escalated on re-brokering markers.', ['medium', 'review'], 'Carrier + broker authority'],
-        'OPS-01' => ['authority_compliance', 'Authority under 30 days old', 'Days since the newest granted carrier authority.', ['review'], 'Authority age (30 days)'],
-        'OPS-04' => ['authority_compliance', 'Authority under 90 days old', 'Days since the newest granted carrier authority, or an unknown age on a first-year DOT.', ['medium'], 'Authority age (90 days)'],
+        'AUTH-01' => ['authority_compliance', 'Operating authority inactive', 'Common and Contract authority status on the FMCSA authority record.', 'Operating authority status'],
+        'AUTH-02' => ['authority_compliance', 'DOT number inactive', 'Presence of a DOT number and the census status code.', 'DOT number status'],
+        'AUTH-03' => ['authority_compliance', 'Active out-of-service order', 'Out-of-service orders with no rescind date.', 'Out-of-service orders'],
+        'AUTH-06' => ['authority_compliance', 'Revocation pending', 'Common / contract / broker revocation-pending flags.', 'Revocation pending'],
+        'AUTH-07' => ['authority_compliance', 'Application pending', 'Common / contract / broker application-pending flags.', 'Application pending'],
+        'AUTH-08' => ['authority_compliance', 'Reinstated after revocation', 'Prior-revoke flag against a currently active authority.', 'Reinstatement after revocation'],
+        'AUTH-09' => ['authority_compliance', 'Revocation history', 'Completed revocations in the authority history.', 'Revocation history'],
+        'AUTH-10' => ['authority_compliance', 'Suspension orders', 'Suspension orders in the authority order history.', 'Suspension orders'],
+        'AUTH-11' => ['authority_compliance', 'Revocation proceedings', 'Involuntary revocation proceedings opened in the last {AUTH-11.window_months} months that did not complete.', 'Revocation proceedings'],
+        'AUTH-12' => ['authority_compliance', 'Dual carrier + broker authority', 'Active broker authority alongside carrier authority, escalated on re-brokering markers.', 'Carrier + broker authority'],
+        'OPS-01' => ['authority_compliance', 'Authority under 30 days old', 'Days since the newest granted carrier authority.', 'Authority age (30 days)'],
+        'OPS-04' => ['authority_compliance', 'Authority under 90 days old', 'Days since the newest granted carrier authority, or an unknown age on a first-year DOT.', 'Authority age (90 days)'],
 
         // ── Insurance & Financial ───────────────────────────────────────
-        'INS-01' => ['insurance_financial', 'No BIPD on file', 'BIPD amount on the authority record and in the insurance filings.', ['fail'], 'BIPD on file'],
-        'INS-02' => ['insurance_financial', 'BIPD below minimum', 'BIPD amount on file against the required minimum.', ['fail'], 'BIPD minimum'],
-        'INS-03' => ['insurance_financial', 'Cargo insurance missing', 'Cargo requirement against cargo filings on record.', ['fail'], 'Cargo insurance'],
-        'INS-04' => ['insurance_financial', 'Bond or trust missing', 'Bond / trust requirement for active broker authority.', ['low'], 'Bond or trust'],
-        'INS-10' => ['insurance_financial', 'Cancellation pending', 'Insurance filings with a future effective cancellation.', ['review'], 'Insurance cancellation'],
-        'INS-11' => ['insurance_financial', 'Rejected filing', 'Insurance filings recorded as rejected.', ['medium'], 'Filing rejections'],
-        'INS-12' => ['insurance_financial', 'Insurer churn', 'Distinct insurance companies across the filing history.', ['low', 'medium'], 'Insurer churn'],
+        'INS-01' => ['insurance_financial', 'No BIPD on file', 'BIPD amount on the authority record and in the insurance filings.', 'BIPD on file'],
+        'INS-02' => ['insurance_financial', 'BIPD below minimum', 'BIPD amount on file against the required minimum.', 'BIPD minimum'],
+        'INS-03' => ['insurance_financial', 'Cargo insurance missing', 'Cargo requirement against cargo filings on record.', 'Cargo insurance'],
+        'INS-04' => ['insurance_financial', 'Bond or trust missing', 'Bond / trust requirement for active broker authority.', 'Bond or trust'],
+        'INS-10' => ['insurance_financial', 'Cancellation pending', 'Insurance filings with a future effective cancellation.', 'Insurance cancellation'],
+        'INS-11' => ['insurance_financial', 'Rejected filing', 'Insurance filings recorded as rejected.', 'Filing rejections'],
+        'INS-12' => ['insurance_financial', 'Insurer churn', 'Distinct insurance companies across the filing history.', 'Insurer churn'],
 
         // ── Safety & Roadside ───────────────────────────────────────────
-        'SAF-01' => ['safety_roadside', 'Unsatisfactory safety rating', 'FMCSA safety rating.', ['fail'], 'Safety rating (Unsatisfactory)'],
-        'SAF-02' => ['safety_roadside', 'Conditional safety rating', 'FMCSA safety rating.', ['fail'], 'Safety rating (Conditional)'],
-        'SMS-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving BASIC over threshold', 'Unsafe Driving measure against the national cut-point.', ['medium'], 'Unsafe Driving BASIC'],
-        'SMS-HOS_DRIV' => ['safety_roadside', 'HOS Compliance BASIC over threshold', 'Hours-of-Service measure against the national cut-point.', ['medium'], 'HOS Compliance BASIC'],
-        'SMS-DRIV_FIT' => ['safety_roadside', 'Driver Fitness BASIC over threshold', 'Driver Fitness measure against the national cut-point.', ['medium'], 'Driver Fitness BASIC'],
-        'SMS-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances BASIC over threshold', 'Controlled Substances measure against the national cut-point.', ['medium'], 'Controlled Substances BASIC'],
-        'SMS-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance BASIC over threshold', 'Vehicle Maintenance measure against the national cut-point.', ['medium'], 'Vehicle Maintenance BASIC'],
-        'SMS-MULTI' => ['safety_roadside', 'Multiple BASICs over threshold', 'Count of BASICs at or above the intervention threshold.', ['review'], 'Multiple BASICs over threshold'],
-        'SAF-AC-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving acute/critical', 'Acute-critical indicator on the Unsafe Driving BASIC.', ['medium'], 'Unsafe Driving acute/critical'],
-        'SAF-AC-HOS_DRIV' => ['safety_roadside', 'HOS acute/critical', 'Acute-critical indicator on the HOS BASIC.', ['medium'], 'HOS acute/critical'],
-        'SAF-AC-DRIV_FIT' => ['safety_roadside', 'Driver Fitness acute/critical', 'Acute-critical indicator on the Driver Fitness BASIC.', ['medium'], 'Driver Fitness acute/critical'],
-        'SAF-AC-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances acute/critical', 'Acute-critical indicator on the Controlled Substances BASIC.', ['medium'], 'Controlled Substances acute/critical'],
-        'SAF-AC-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance acute/critical', 'Acute-critical indicator on the Vehicle Maintenance BASIC.', ['medium'], 'Vehicle Maintenance acute/critical'],
-        'SAF-10' => ['safety_roadside', 'Vehicle OOS rate elevated', 'Vehicle out-of-service rate against the national average, with 5+ vehicle inspections.', ['low', 'medium'], 'Vehicle OOS rate'],
-        'SAF-11' => ['safety_roadside', 'Driver OOS rate elevated', 'Driver out-of-service rate against the national average, with 5+ driver inspections.', ['low', 'medium'], 'Driver OOS rate'],
+        'SAF-01' => ['safety_roadside', 'Unsatisfactory safety rating', 'FMCSA safety rating.', 'Safety rating (Unsatisfactory)'],
+        'SAF-02' => ['safety_roadside', 'Conditional safety rating', 'FMCSA safety rating.', 'Safety rating (Conditional)'],
+        'SMS-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving BASIC over threshold', 'Unsafe Driving measure against the national cut-point.', 'Unsafe Driving BASIC'],
+        'SMS-HOS_DRIV' => ['safety_roadside', 'HOS Compliance BASIC over threshold', 'Hours-of-Service measure against the national cut-point.', 'HOS Compliance BASIC'],
+        'SMS-DRIV_FIT' => ['safety_roadside', 'Driver Fitness BASIC over threshold', 'Driver Fitness measure against the national cut-point.', 'Driver Fitness BASIC'],
+        'SMS-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances BASIC over threshold', 'Controlled Substances measure against the national cut-point.', 'Controlled Substances BASIC'],
+        'SMS-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance BASIC over threshold', 'Vehicle Maintenance measure against the national cut-point.', 'Vehicle Maintenance BASIC'],
+        'SMS-MULTI' => ['safety_roadside', 'Multiple BASICs over threshold', 'Count of BASICs at or above the intervention threshold.', 'Multiple BASICs over threshold'],
+        'SAF-AC-UNSAFE_DRIV' => ['safety_roadside', 'Unsafe Driving acute/critical', 'Acute-critical indicator on the Unsafe Driving BASIC.', 'Unsafe Driving acute/critical'],
+        'SAF-AC-HOS_DRIV' => ['safety_roadside', 'HOS acute/critical', 'Acute-critical indicator on the HOS BASIC.', 'HOS acute/critical'],
+        'SAF-AC-DRIV_FIT' => ['safety_roadside', 'Driver Fitness acute/critical', 'Acute-critical indicator on the Driver Fitness BASIC.', 'Driver Fitness acute/critical'],
+        'SAF-AC-CONTR_SUBST' => ['safety_roadside', 'Controlled Substances acute/critical', 'Acute-critical indicator on the Controlled Substances BASIC.', 'Controlled Substances acute/critical'],
+        'SAF-AC-VEH_MAINT' => ['safety_roadside', 'Vehicle Maintenance acute/critical', 'Acute-critical indicator on the Vehicle Maintenance BASIC.', 'Vehicle Maintenance acute/critical'],
+        'SAF-10' => ['safety_roadside', 'Vehicle OOS rate elevated', 'Vehicle out-of-service rate against the national average, with {SAF-10.min_inspections}+ vehicle inspections.', 'Vehicle OOS rate'],
+        'SAF-11' => ['safety_roadside', 'Driver OOS rate elevated', 'Driver out-of-service rate against the national average, with {SAF-11.min_inspections}+ driver inspections.', 'Driver OOS rate'],
 
         // ── Crash History ───────────────────────────────────────────────
-        'CR-01' => ['crash_history', 'Recent fatal crash', 'Fatal crashes in the last 24 months, normalised by fleet size.', ['medium', 'review'], 'Recent fatal crashes'],
-        'CR-02' => ['crash_history', 'Crash rate per power unit', 'Crashes per power unit per year.', ['low', 'medium'], 'Crash rate per power unit'],
-        'CR-03' => ['crash_history', 'Crash volume', 'Raw crash count over 24 months when fleet size is unreported.', ['low', 'medium'], 'Crash volume'],
-        'CR-04' => ['crash_history', 'Tow-away crashes', 'Tow-away crashes in the last 24 months.', ['low'], 'Tow-away crashes'],
+        'CR-01' => ['crash_history', 'Recent fatal crash', 'Fatal crashes in the last {crash_window_months} months, normalised by fleet size.', 'Recent fatal crashes'],
+        'CR-02' => ['crash_history', 'Crash rate per power unit', 'Crashes per power unit per year.', 'Crash rate per power unit'],
+        'CR-03' => ['crash_history', 'Crash volume', 'Raw crash count over {crash_window_months} months when fleet size is unreported.', 'Crash volume'],
+        'CR-04' => ['crash_history', 'Tow-away crashes', 'Tow-away crashes in the last {crash_window_months} months.', 'Tow-away crashes'],
 
         // ── Inspection Quality ──────────────────────────────────────────
-        'INSP-01' => ['inspection_quality', 'Violation rate', 'Share of inspections that produced violations.', ['low', 'medium'], 'Violation rate'],
-        'INSP-02' => ['inspection_quality', 'Thin inspection history', 'Inspection count against 12+ months of authority.', ['low'], 'Inspection history depth'],
-        'INSP-03' => ['inspection_quality', 'Stale inspection history', 'Time since the most recent roadside inspection.', ['low'], 'Inspection recency'],
+        'INSP-01' => ['inspection_quality', 'Violation rate', 'Share of inspections that produced violations.', 'Violation rate'],
+        'INSP-02' => ['inspection_quality', 'Thin inspection history', 'Inspection count once authority is past {INSP-02.established_after_days} days.', 'Inspection history depth'],
+        'INSP-03' => ['inspection_quality', 'Stale inspection history', 'Time since the most recent roadside inspection.', 'Inspection recency'],
 
         // ── Identity & Fraud ────────────────────────────────────────────
-        'PRT-21' => ['identity_fraud', 'Internally blocked', 'Internal block list.', ['fail'], 'Internal block list'],
-        'PRT-20' => ['identity_fraud', 'Fraud reports', 'Internal fraud reports against this carrier.', ['fail'], 'Fraud reports'],
-        'NET-01' => ['identity_fraud', 'Shared phone number', 'Other DOTs using the same telephone number.', ['low', 'medium', 'review'], 'Shared phone number'],
-        'NET-02' => ['identity_fraud', 'Shared email address', 'Other DOTs using the same email address.', ['low', 'medium', 'review'], 'Shared email address'],
-        'NET-03' => ['identity_fraud', 'Shared physical address', 'Other DOTs at the same physical address.', ['low', 'medium', 'review'], 'Shared physical address'],
-        'NET-04' => ['identity_fraud', 'Shared roadside VINs', 'Other DOTs inspected on the same VINs.', ['low', 'medium', 'review'], 'Shared roadside VINs'],
-        'ID-01' => ['identity_fraud', 'Mail-drop address', 'Physical and mailing street against known mail-drop patterns.', ['low'], 'Mail-drop address'],
-        'ID-03' => ['identity_fraud', 'Free-provider email', 'Contact email domain against the free-provider list.', ['low'], 'Email provider'],
+        'PRT-21' => ['identity_fraud', 'Internally blocked', 'Internal block list.', 'Internal block list'],
+        'PRT-20' => ['identity_fraud', 'Fraud reports', 'Internal fraud reports against this carrier.', 'Fraud reports'],
+        'NET-01' => ['identity_fraud', 'Shared phone number', 'Other DOTs using the same telephone number.', 'Shared phone number'],
+        'NET-02' => ['identity_fraud', 'Shared email address', 'Other DOTs using the same email address.', 'Shared email address'],
+        'NET-03' => ['identity_fraud', 'Shared physical address', 'Other DOTs at the same physical address.', 'Shared physical address'],
+        'NET-04' => ['identity_fraud', 'Shared roadside VINs', 'Other DOTs inspected on the same VINs.', 'Shared roadside VINs'],
+        'ID-01' => ['identity_fraud', 'Mail-drop address', 'Physical and mailing street against known mail-drop patterns.', 'Mail-drop address'],
+        'ID-03' => ['identity_fraud', 'Free-provider email', 'Contact email domain against the free-provider list.', 'Email provider'],
 
         // ── Operations & Experience ─────────────────────────────────────
-        'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', ['low'], 'MCS-150 currency'],
-        'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', ['low'], 'Observed vs reported fleet'],
-        'OPS-12' => ['operations_experience', 'False federal filing', 'Roadside citations under 390.19 / 390.35 in the 24-month violation file.', ['medium'], 'False or misleading filings'],
-        'OPS-13' => ['operations_experience', 'Under-reported fleet', 'Units observed at roadside against power units reported on the MCS-150.', ['low'], 'Reported vs observed fleet'],
+        'OPS-10' => ['operations_experience', 'MCS-150 out of date', 'Years since the last MCS-150 filing.', 'MCS-150 currency'],
+        'OPS-11' => ['operations_experience', 'Ghost fleet', 'Reported power units against units ever observed at roadside.', 'Observed vs reported fleet'],
+        'OPS-12' => ['operations_experience', 'False federal filing', 'Roadside citations under 390.19 / 390.35 in the 24-month violation file.', 'False or misleading filings'],
+        'OPS-13' => ['operations_experience', 'Under-reported fleet', 'Units observed at roadside against power units reported on the MCS-150.', 'Reported vs observed fleet'],
     ];
 
     /**
@@ -2246,7 +2293,7 @@ trait DtTrustScoreV3
 
             $rules = [];
 
-            foreach ($catalogByGroup[$key] ?? [] as $id => [, $name, $checks, $tiers, $subject]) {
+            foreach ($catalogByGroup[$key] ?? [] as $id => [, $name, $checks, $subject]) {
 
                 $hits = $firedById[$id] ?? [];
 
@@ -2254,8 +2301,8 @@ trait DtTrustScoreV3
                     'id' => $id,
                     'name' => $name,
                     'subject' => $subject,
-                    'checks' => $checks,
-                    'possible_tiers' => $tiers,
+                    'checks' => preg_replace_callback('/\{([^}]+)\}/', fn ($m) => (string) $this->dtConfig('rules.'.$m[1]), $checks),
+                    'possible_tiers' => $this->dtPossibleTiers($id),
                     'status' => match (true) {
                         $hits !== [] => 'triggered',
                         isset($blocked[$id]) => 'not_evaluated',
@@ -2309,7 +2356,7 @@ trait DtTrustScoreV3
 
                 'label' => self::DT_GROUP_LABELS[$key] ?? $this->dtHumanize($key),
 
-                'pillar_weight' => self::DT_PILLAR_WEIGHTS[$key] ?? null,
+                'pillar_weight' => $this->dtConfig("pillars.weights.{$key}"),
 
                 'risk_points' => $group['points'],
 
@@ -2359,23 +2406,14 @@ trait DtTrustScoreV3
 
         return [
 
-            'model_version' => 'dt-trust-v3.5-motus',
+            'model_version' => $this->dtConfig('model_version'),
 
             'summary' => $this->dtExplainSummary($ctx, $totals),
 
             'how_it_works' => [
                 'method' => 'Every finding is a rule carrying a fixed tier of risk points. Points are totalled across seven groups, then mapped onto the 0-100 gauge, so the gauge can never contradict the status.',
-                'tier_points' => [
-                    'low' => self::DT_TIER_POINTS_LOW,
-                    'medium' => self::DT_TIER_POINTS_MEDIUM,
-                    'review' => self::DT_TIER_POINTS_REVIEW,
-                    'fail' => self::DT_TIER_POINTS_FAIL,
-                ],
-                'bands' => [
-                    ['points' => 'under 1,000', 'score' => '100 - 55', 'status' => 'Acceptable'],
-                    ['points' => '1,000 - 9,999', 'score' => '54 - 19', 'status' => 'Unacceptable-Review'],
-                    ['points' => '10,000 and over', 'score' => '18 - 0', 'status' => 'Unacceptable-Fail'],
-                ],
+                'tier_points' => $this->dtConfig('tier_points'),
+                'bands' => $this->dtGaugeBands(),
                 'abstention' => 'Missing data never fires a rule and never counts as clean. It lowers data confidence, which caps the score instead.',
                 'caps' => 'A cap is a ceiling, not a deduction: the lowest cap that bites replaces the score outright.',
                 'pillar_weights' => 'Pillar weights are presentation only — the overall score comes from the rule totals, never from the pillar cards.',
@@ -2436,6 +2474,75 @@ trait DtTrustScoreV3
         ];
     }
 
+    /** The gauge segments as the explanation's points -> score table. */
+    private function dtGaugeBands(): array
+    {
+        $statuses = ['Acceptable', 'Unacceptable-Review', 'Unacceptable-Fail'];
+
+        $segments = array_values($this->dtConfig('gauge'));
+
+        $last = count($segments) - 1;
+
+        $bands = [];
+
+        foreach ($segments as $i => [$from, $to, $fromScore, $toScore]) {
+
+            $bands[] = [
+                'points' => match (true) {
+                    $i === 0 => 'under '.number_format($segments[1][0] ?? $to),
+                    $i === $last => number_format($from).' and over',
+                    default => number_format($from).' - '.number_format($segments[$i + 1][0] - 1),
+                },
+                'score' => $fromScore.' - '.($i === $last ? $toScore : $segments[$i + 1][2] + 1),
+                'status' => $statuses[$i] ?? $statuses[2],
+            ];
+
+        }
+
+        return $bands;
+    }
+
+    /** Every tier config/dtscore.php lets this rule land on, in escalation order. */
+    private function dtPossibleTiers(string $id): array
+    {
+        $rule = $this->dtConfig("rules.{$id}", []);
+
+        $tiers = array_keys($rule['tiers'] ?? []);
+
+        foreach (['tier', 'escalated_tier', 'large_fleet_tier'] as $key) {
+            $tiers[] = $rule[$key] ?? null;
+        }
+
+        if (str_starts_with($id, 'SMS-') && $id !== 'SMS-MULTI') {
+            $tiers[] = $this->dtConfig('rules.sms.tier');
+        }
+
+        if (str_starts_with($id, 'SAF-AC-')) {
+            $tiers[] = $this->dtConfig('rules.SAF-AC.tier');
+        }
+
+        if (str_starts_with($id, 'NET-') && in_array('review', $tiers, true)) {
+            $tiers[] = $this->dtConfig('rules.network.large_fleet_tier');
+        }
+
+        $ladder = $this->dtConfig('rules.authority_age', []);
+        $ladder[] = $this->dtConfig('rules.authority_age_unknown_new_dot', []);
+
+        foreach ($ladder as $rung) {
+            if (($rung['rule'] ?? null) === $id) {
+                $tiers[] = $rung['tier'];
+            }
+        }
+
+        $order = array_keys($this->dtConfig('tier_points'));
+
+        $tiers = array_values(array_unique(array_filter($tiers)));
+
+        usort($tiers, fn ($a, $b) => array_search($a, $order, true) <=> array_search($b, $order, true));
+
+        return $tiers;
+    }
+
     /** One line a broker can read off the screen without expanding anything. */
     private function dtExplainSummary(array $ctx, array $totals): string
     {
@@ -2451,7 +2558,7 @@ trait DtTrustScoreV3
         );
 
         if ($ctx['fail']) {
-            $parts[] = 'A Fail-tier rule fired, which pins the score to 18 regardless of the points total.';
+            $parts[] = 'A Fail-tier rule fired, which pins the score to '.$this->dtConfig('fail_score').' regardless of the points total.';
         } elseif ($ctx['cap_applied'] !== null) {
             $parts[] = sprintf(
                 'Capped at %s: %s',
@@ -2499,8 +2606,8 @@ trait DtTrustScoreV3
         if ($ctx['fail']) {
             $steps[] = [
                 'step' => 'Fail override',
-                'detail' => 'A Fail-tier rule fired, so the gauge pins to 18 and the pillar cards are suppressed.',
-                'score' => 18,
+                'detail' => 'A Fail-tier rule fired, so the gauge pins to '.$this->dtConfig('fail_score').' and the pillar cards are suppressed.',
+                'score' => (int) $this->dtConfig('fail_score'),
             ];
         }
 

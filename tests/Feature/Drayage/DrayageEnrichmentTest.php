@@ -3,6 +3,7 @@
 namespace Tests\Feature\Drayage;
 
 use App\Jobs\ScoreCarrierSearchPage;
+use App\Services\DtScore\DtScore;
 use App\Models\CarrierConnectRequest;
 use App\Services\Drayage\DrayageEnrichmentService;
 use Illuminate\Support\Facades\Bus;
@@ -15,7 +16,7 @@ use Laravel\Sanctum\Sanctum;
  *
  * The carrier database is never touched from a test (it is production's).
  * Existence and scores are seeded through the same cache keys the real code
- * reads first - carrier:rowid:{dot} and carrier_dt_score:{dot} - and the
+ * reads first - carrier:rowid:{dot} and DtScore's score cache - and the
  * FMCSA block, which has no cache in front of it, is stubbed at the
  * service.
  */
@@ -31,7 +32,7 @@ class DrayageEnrichmentTest extends DrayageTestCase
     public function test_trust_score_comes_from_the_shared_cache(): void
     {
         Bus::fake([ScoreCarrierSearchPage::class]);
-        Cache::put('carrier_dt_score:3408478', 91, 60);
+        DtScore::store('3408478', 91);
         Sanctum::actingAs($this->brokerUser('agent'));
 
         $this->getJson('/api/v1/drayage/carriers/lm-9224?include=trust_score')->assertOk()
@@ -55,7 +56,7 @@ class DrayageEnrichmentTest extends DrayageTestCase
     public function test_list_trust_scores_are_batched_for_the_page_only(): void
     {
         Bus::fake([ScoreCarrierSearchPage::class]);
-        Cache::put('carrier_dt_score:3408478', 77, 60);
+        DtScore::store('3408478', 77);
         Sanctum::actingAs($this->brokerUser('agent'));
 
         $carriers = $this->getJson('/api/v1/drayage/carriers?include=trust_score&sort=company_name&per_page=3&fields=company_name')
