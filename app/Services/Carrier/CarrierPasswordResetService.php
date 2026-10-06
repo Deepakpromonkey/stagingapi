@@ -6,6 +6,7 @@ use App\Mail\PasswordResetOtpMail;
 use App\Models\CarrierLoginOtp;
 use App\Models\CarrierPasswordResetOtp;
 use App\Models\CarrierUser;
+use App\Services\AuditLog;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -39,12 +40,26 @@ class CarrierPasswordResetService
         $carrierUser = CarrierUser::where('email', strtolower(trim($email)))->first();
 
         if (! $carrierUser) {
+            AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $carrierUser, null, [
+                'email' => $email,
+                'outcome' => 'rejected',
+                'reason' => AuditLog::REASON_UNKNOWN_EMAIL,
+                'portal' => 'carrier',
+            ]);
+
             throw ValidationException::withMessages([
                 'email' => ['No account found with this email address.'],
             ]);
         }
 
         if (! $carrierUser->status) {
+            AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $carrierUser, null, [
+                'email' => $email,
+                'outcome' => 'rejected',
+                'reason' => AuditLog::REASON_DISABLED,
+                'portal' => 'carrier',
+            ]);
+
             throw ValidationException::withMessages([
                 'email' => ['Your account has been deactivated.'],
             ]);
@@ -83,6 +98,12 @@ class CarrierPasswordResetService
             Log::info('========================================');
         }
 
+        AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $carrierUser, null, [
+            'email' => $carrierUser->email,
+            'outcome' => 'otp_sent',
+            'portal' => 'carrier',
+        ]);
+
         return ['otp_session' => $otpSession];
     }
 
@@ -111,6 +132,13 @@ class CarrierPasswordResetService
 
         if (! Hash::check($data['otp'], $record->otp)) {
             $record->increment('attempts');
+
+            AuditLog::record(AuditLog::OTP_FAILED, $record->carrierUser, null, [
+                'reason' => AuditLog::REASON_BAD_OTP,
+                'attempt' => $record->attempts,
+                'flow' => 'password_reset',
+                'portal' => 'carrier',
+            ]);
 
             throw ValidationException::withMessages([
                 'otp' => ['Invalid OTP.'],
@@ -174,6 +202,11 @@ class CarrierPasswordResetService
             CarrierLoginOtp::where('carrier_user_id', $carrierUser->id)->delete();
 
             $record->delete();
+
+            AuditLog::record(AuditLog::PASSWORD_RESET_COMPLETED, $carrierUser, $carrierUser, [
+                'email' => $carrierUser->email,
+                'portal' => 'carrier',
+            ]);
 
             return $carrierUser;
         });

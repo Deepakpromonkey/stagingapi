@@ -24,6 +24,18 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
 | Anything else — a carrier portal token, a driver who has been deactivated —
 | falls through to false and is refused.
 */
+/*
+| A broker company's live updates: shipments added or moving on, and the
+| header bell's feed. Staff of that company only — not drivers or carrier
+| portal accounts. Keyed on the uuid for the same reason as the shipment
+| channel below: a sequential id is trivial to enumerate.
+*/
+Broadcast::channel('company.{companyUuid}', function ($user, $companyUuid) {
+    return $user instanceof User
+        && $user->company !== null
+        && hash_equals((string) $user->company->uuid, (string) $companyUuid);
+});
+
 Broadcast::channel('shipment.{shipmentUuid}', function ($user, $shipmentUuid) {
     $shipment = Shipment::where('uuid', $shipmentUuid)->first();
 

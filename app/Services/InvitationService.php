@@ -45,7 +45,10 @@ class InvitationService
                 'first_name' => $data['first_name'],
                 'last_name' => $data['last_name'] ?? null,
                 'phone' => $data['phone'] ?? null,
+
+                // Added in main branch.
                 'country_code' => $data['country_code'] ?? null,
+
                 'email' => strtolower($data['email']),
                 'password' => $this->unusablePassword(),
                 'is_owner' => false,
@@ -98,6 +101,12 @@ class InvitationService
         });
 
         $this->sendInvitationMail($invitation);
+
+        AuditLog::record(AuditLog::USER_INVITED, $invitation->user, $user, [
+            'email' => $invitation->email,
+            'role' => $role->name,
+            'portal' => 'broker',
+        ]);
 
         return $invitation;
     }
@@ -170,6 +179,11 @@ class InvitationService
             ]);
         }
 
+        AuditLog::record(AuditLog::INVITATION_RESENT, $invitedUser, $actor, [
+            'email' => $invitedUser->email,
+            'portal' => 'broker',
+        ]);
+
         return $invitation;
     }
 
@@ -189,7 +203,7 @@ class InvitationService
     protected function acceptUrl(Invitation $invitation): string
     {
         return rtrim((string) config('app.frontend_url'), '/')
-            .'/accept-invitation?token='.urlencode($invitation->token);
+            . '/accept-invitation?token=' . urlencode($invitation->token);
     }
 
     /**

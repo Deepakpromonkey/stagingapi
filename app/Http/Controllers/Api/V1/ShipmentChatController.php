@@ -9,6 +9,7 @@ use App\Models\ShipmentMessage;
 use App\Models\ShipmentMessage as Message;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -85,7 +86,21 @@ class ShipmentChatController extends BaseController
         // channel name and we already hold it.
         $message->setRelation('shipment', $shipment);
 
-        broadcast(new ShipmentMessageSent($message))->toOthers();
+        /*
+        | The message is already saved, so a broadcast failure must not turn
+        | this into an error: with the queue on `sync` the push to Reverb runs
+        | inside this request, and when Reverb was unreachable the sender got a
+        | 500 for a message that had in fact been sent. The other side still
+        | picks it up on its next fetch of the thread.
+        */
+        try {
+            broadcast(new ShipmentMessageSent($message))->toOthers();
+        } catch (\Throwable $e) {
+            Log::warning('Shipment chat broadcast failed; message was saved', [
+                'message' => $message->uuid,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         return $this->success($message->toWire(), 'Message sent.', 201);
     }

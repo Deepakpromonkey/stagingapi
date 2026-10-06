@@ -1,6 +1,7 @@
 <?php
 
 use App\Exceptions\BillingException;
+use App\Exceptions\DrayageException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -56,6 +57,20 @@ return Application::configure(basePath: dirname(__DIR__))
         // Billing / subscription problems -> consistent API envelope, with the
         // status the failure deserves (Stripe unreachable is not a 400).
         $exceptions->render(function (BillingException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'status' => false,
+                'message' => $e->getMessage(),
+                'errors' => $e->errors,
+            ], $e->status);
+        });
+
+        // Drayage directory refusals (no dataset yet, import already running,
+        // unreadable file) -> the same envelope, with the status they carry.
+        $exceptions->render(function (DrayageException $e, Request $request) {
             if (! $request->is('api/*')) {
                 return null;
             }
