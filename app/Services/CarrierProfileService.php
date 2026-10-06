@@ -703,7 +703,7 @@ class CarrierProfileService
      * Live FMCSA snapshot. Cached for a day and never allowed to break the
      * profile response — the upstream service is slow and often unavailable.
      */
-    protected function fmcsaSnapshot(string $dot): ?array
+    public function fmcsaSnapshot(string $dot): ?array
     {
         $webKey = config('carriers.fmcsa_web_key');
 

@@ -20,7 +20,7 @@ class FleetraTokenController extends BaseController
     {
         $user = auth()->user();
 
-        $path = env('FLEETRA_JWT_PRIVATE_KEY_PATH', storage_path('app/fleetra/jwt-private.pem'));
+        $path = (string) config('services.fleetra.jwt_private_key_path');
         $key = is_readable($path) ? openssl_pkey_get_private(file_get_contents($path)) : false;
         if ($key === false) {
             Log::error('Fleetra signing key missing or unreadable', ['path' => $path]);

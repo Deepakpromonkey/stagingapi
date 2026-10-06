@@ -364,12 +364,29 @@ class ShipmentService
     /**
      * Get all shipments for the authenticated user's company
      */
-    public function getAllForUser($user)
+    /**
+     * @return array<string, int> lower-cased status => shipments
+     */
+    public function countByStatusForUser($user): array
     {
         return Shipment::where('company_id', $user->company_id)
+            ->selectRaw('LOWER(status) as status_key, COUNT(*) as aggregate')
+            ->groupBy('status_key')
+            ->pluck('aggregate', 'status_key')
+            ->map(fn ($count) => (int) $count)
+            ->all();
+    }
+
+    public function getAllForUser($user, ?int $perPage = null)
+    {
+        // The list asks for its page size; it was fixed at 15 whatever it
+        // asked for, so a page of 10 got 15 rows and a page of 25 got 15.
+        $perPage = max(1, min(100, $perPage ?? 15));
+
+        return Shipment::where('company_id', $user->company_id)
             ->with(['stops', 'trackingUpdates'])
-            ->latest('id') 
-            ->paginate(15); 
+            ->latest('id')
+            ->paginate($perPage);
     }
 
 

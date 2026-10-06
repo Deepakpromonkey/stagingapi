@@ -56,6 +56,11 @@ return [
         'key' => env('ANTHROPIC_API_KEY'),
     ],
 
+    // RS256 key the Fleetra assistant tokens are signed with.
+    'fleetra' => [
+        'jwt_private_key_path' => env('FLEETRA_JWT_PRIVATE_KEY_PATH', storage_path('app/fleetra/jwt-private.pem')),
+    ],
+
     // SMS gateway for onboarding OTPs.
     'telnyx' => [
         'key' => env('TELNYX_API_KEY'),

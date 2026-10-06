@@ -134,7 +134,9 @@ class CarrierInvitationService
      */
     public function listUsers(CarrierUser $carrierUser, int $perPage = 15)
     {
-        return CarrierUser::with('roles')
+        // roles.permissions and permissions too: the resource lists every
+        // user's effective permissions, which is two queries a row otherwise.
+        return CarrierUser::with(['roles.permissions', 'permissions'])
             ->where('carrier_company_id', $carrierUser->carrier_company_id)
             ->orderByDesc('is_owner')
             ->orderBy('first_name')
