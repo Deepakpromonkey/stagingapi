@@ -116,16 +116,20 @@ Schedule::command('coi:chase-requests')
 | ELD / telematics
 |--------------------------------------------------------------------------
 |
-| Terminal's webhooks are what normally moves a fleet forward; this is the
-| backstop for the deliveries that never arrive — an endpoint that was down, a
-| provider that went quiet, a connection made while the webhook was
-| misconfigured. Nothing else would notice any of those.
+| Refreshes the fleets of carriers that are actually under load. Terminal bills
+| for data synced rather than for vehicles and drivers held, so polling every
+| carrier who ever finished onboarding would run up a bill for fleets nobody is
+| looking at — the command scopes itself to carriers with an active shipment and
+| goes quiet again when the load is delivered.
 |
-| Hourly rather than by the minute: `resync_after_minutes` decides what is
-| actually stale, and this only queues what has crossed it.
+| The first import after a carrier connects does not come from here: it is
+| dispatched on the spot by the Link exchange. Nor does the routine case of new
+| data arriving — Terminal's sync.completed and vehicle.added webhooks queue a
+| pass as it happens. This is the floor under both of those, for the connection
+| whose webhook was never delivered.
 |
 */
-Schedule::command('eld:sync --stale')
+Schedule::command('eld:sync-active')
     ->hourly()
     ->withoutOverlapping()
     ->onOneServer();

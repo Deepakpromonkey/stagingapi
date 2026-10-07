@@ -21,16 +21,13 @@ use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
 use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
-use App\Models\EldConnection;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
 use App\Models\EmailTemplate;
 use App\Models\User;
-use App\Jobs\SyncEldConnection;
 use App\Services\Carrier\CarrierAccountService;
 use App\Services\Carrier\SignedAgreementService;
-use App\Services\Eld\TerminalClient;
-use App\Services\Eld\TerminalRequestException;
+use App\Services\Eld\EldConnectionService;
 use App\Services\SmsSender;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Request;
@@ -64,8 +61,8 @@ class CarrierConnectController extends BaseController
     public function __construct(
         private CarrierAccountService $carrierAccountService,
         private SignedAgreementService $signedAgreements,
-        private SmsSender $sms,
-        private TerminalClient $terminal
+        private EldConnectionService $eldConnections,
+        private SmsSender $sms
     ) {}
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1054,15 +1051,16 @@ class CarrierConnectController extends BaseController
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Open Terminal Link so the carrier can connect their ELD.
+     * Open the Terminal Link page for this carrier.
      *
-     * We never see their provider credentials: Link is hosted by Terminal, the
-     * carrier authenticates there, and what comes back to us is a short-lived
-     * public token. That is the whole point of using it rather than asking a
-     * trucking company to type their Samsara password into our form.
+     * The URL is minted here rather than in the browser because it carries the
+     * publishable key, the consent template for this broker, and a state nonce
+     * that has to be remembered server-side for the return leg to mean
+     * anything.
      *
-     * `state` is minted here and stored on the request. verifyEld() will not
-     * accept a redirect that does not carry it back.
+     * The carrier signs in to their provider on Terminal's page. Their provider
+     * credentials never touch this application, which is exactly what the step
+     * promises them on screen.
      */
     public function connectEld(CarrierConnectTokenRequest $request)
     {
@@ -1072,47 +1070,70 @@ class CarrierConnectController extends BaseController
             return $this->error('This onboarding link is no longer valid.', null, 404);
         }
 
-        if (! $this->terminal->isConfigured()) {
-            Log::error('Terminal is not configured; cannot connect an ELD.');
+        if (! $this->eldConnections->isConfigured()) {
+            Log::error('Terminal is not configured; cannot open the ELD connection page.');
 
             return $this->error('ELD connection is unavailable right now.', null, 503);
         }
 
-        /*
-        | Reuse an unspent state rather than minting a fresh one.
-        |
-        | Every call used to overwrite it, so a second press of Connect -- or a
-        | second tab, or a re-render -- invalidated the link the carrier was
-        | already part way through, and they came back to "could not be
-        | verified" having done nothing wrong. The state is single use and
-        | cleared on success, so holding one open across repeat presses costs
-        | nothing and makes the step idempotent.
-        */
-        $state = $connectRequest->eld_link_state ?: Str::random(40);
+        $url = $this->eldConnections->linkUrlFor(
+            $connectRequest,
 
-        $connectRequest->forceFill(['eld_link_state' => $state])->save();
+            // Terminal appends `result`, `token` and `state`; the `eld` flag is
+            // ours, and is what tells the wizard which return leg this is.
+            $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=1'
+        );
 
-        $returnUrl = $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=processing';
-
-        $url = $this->terminal->linkUrl([
-            'redirect_url' => $returnUrl,
-            'state' => $state,
-
-            // Lets a webhook that arrives before the carrier's browser does be
-            // traced back to this onboarding.
-            'external_id' => $connectRequest->uuid,
-        ]);
+        if (! $url) {
+            return $this->error('Could not open the ELD connection page. Please try again.', null, 502);
+        }
 
         return $this->success(['url' => $url], 'ELD connection started.');
     }
 
     /**
-     * The carrier is back from Terminal Link. Trade their public token for a
-     * connection token and start the first sync.
+     * Share a connection the carrier already made with this broker.
      *
-     * The sync itself is queued: a first pass backfills a month of duty status
-     * logs for the whole fleet, and the carrier is waiting on this response to
-     * move to the next step.
+     * A carrier hauling for several brokers links their provider once. The
+     * second broker still needs the carrier's consent — the wizard names them
+     * on the button — but not another trip through the provider's login, since
+     * the token already exists and Terminal would only dedupe back onto the
+     * same connection.
+     */
+    public function shareEld(CarrierConnectTokenRequest $request)
+    {
+        $connectRequest = $this->resolveRequest($request->validated()['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $connection = $this->eldConnections->share($connectRequest);
+
+        if (! $connection) {
+            return $this->error(
+                'There is no connected ELD to share. Please connect one.',
+                null,
+                422
+            );
+        }
+
+        return $this->respondAfterStep(
+            $connectRequest->refresh(),
+            ($connection->provider ? $connection->provider.' shared' : 'ELD shared')
+                .' with '.($connectRequest->company?->company_name ?? 'this broker').'.'
+        );
+    }
+
+    /**
+     * Finish the connection the carrier just made.
+     *
+     * Exchanges the single-use public token for the connection token, dedupes
+     * against a connection the carrier already has, records this broker's
+     * consent, and queues the first fleet import.
+     *
+     * The import is deliberately not waited on: a large fleet takes minutes,
+     * and the carrier has five more steps to get through.
      */
     public function verifyEld(CarrierEldVerifyRequest $request)
     {
@@ -1124,96 +1145,23 @@ class CarrierConnectController extends BaseController
             return $this->error('This onboarding link is no longer valid.', null, 404);
         }
 
-        if (! $this->terminal->isConfigured()) {
-            return $this->error('ELD connection is unavailable right now.', null, 503);
-        }
-
-        /*
-        | Already done. The browser sends this twice under React's development
-        | double-invoke, and the second arrival must not report failure over a
-        | connection the first one completed -- the state is cleared on success,
-        | so the check below would otherwise reject it.
-        */
-        if ($connectRequest->eld_connection_id && ! $connectRequest->eld_link_state) {
-            return $this->respondWithRequest($connectRequest, 'ELD already connected.');
-        }
-
-        // Single use, and compared in constant time. Without this a public
-        // token lifted from someone else's redirect would attach their
-        // telematics account to this onboarding.
-        if (! $connectRequest->eld_link_state
-            || ! hash_equals($connectRequest->eld_link_state, $data['state'])) {
-            return $this->error('That ELD connection could not be verified. Please try again.', null, 422);
-        }
-
-        try {
-            $exchange = $this->terminal->exchangePublicToken($data['public_token']);
-        } catch (TerminalRequestException $e) {
-            Log::error('Terminal public token exchange failed', array_merge([
-                'connect_request' => $connectRequest->uuid,
-            ], $e->context()));
-
-            return $this->error('Could not finish connecting your ELD. Please try again.', null, 502);
-        }
-
-        // Terminal's exchange response has been documented both flat and
-        // wrapped in a connection object; accept either rather than break on a
-        // shape change.
-        $connectionToken = $exchange['connectionToken']
-            ?? $exchange['token']
-            ?? Arr::get($exchange, 'connection.token');
-
-        $terminalConnectionId = $exchange['connectionId']
-            ?? $exchange['id']
-            ?? Arr::get($exchange, 'connection.id');
-
-        if (! $connectionToken || ! $terminalConnectionId) {
-            Log::error('Terminal exchange returned no connection', [
-                'connect_request' => $connectRequest->uuid,
-                'keys' => array_keys($exchange),
-            ]);
-
-            return $this->error('Could not finish connecting your ELD. Please try again.', null, 502);
-        }
-
-        $connection = EldConnection::updateOrCreate(
-            ['terminal_connection_id' => $terminalConnectionId],
-            [
-                'uuid' => Str::uuid(),
-                'connection_token' => $connectionToken,
-                'status' => EldConnection::STATUS_CONNECTED,
-                'external_id' => $connectRequest->uuid,
-                'connected_at' => now(),
-                'disconnected_at' => null,
-                'sync_status' => 'pending',
-            ]
+        $connection = $this->eldConnections->completeFromPublicToken(
+            $connectRequest,
+            $data['public_token'],
+            $data['state']
         );
 
-        // Provider name up front so the wizard can say "Motive connected"
-        // rather than "connected" while the fleet is still importing. Best
-        // effort: the queued sync fetches this again, so a blip here costs a
-        // label, not the connection.
-        try {
-            app(\App\Services\Eld\EldSyncService::class)->refreshConnection($connection);
-        } catch (\Throwable $e) {
-            Log::warning('Could not read the new Terminal connection', [
-                'connection' => $terminalConnectionId,
-                'error' => $e->getMessage(),
-            ]);
+        if (! $connection) {
+            return $this->error(
+                'Could not finish connecting your ELD. Please try again.',
+                null,
+                422
+            );
         }
 
-        $connectRequest->forceFill([
-            'eld_connection_id' => $connection->id,
-            'eld_connected_at' => now(),
-            'eld_skipped_at' => null,
-            'eld_link_state' => null,
-        ])->save();
-
-        SyncEldConnection::dispatchFor($connection);
-
-        return $this->respondWithRequest(
-            $connectRequest->fresh(),
-            'ELD connected. We are importing your fleet now.'
+        return $this->respondAfterStep(
+            $connectRequest->refresh(),
+            'ELD connected. Your fleet is importing in the background.'
         );
     }
 
@@ -1324,7 +1272,10 @@ class CarrierConnectController extends BaseController
         }
 
         if ($data['step'] === 'eld') {
-            if ($connectRequest->eld_connection_id) {
+            // Same reasoning as the ID check: a carrier who has already linked
+            // a provider should not be able to throw that away by pressing the
+            // skip link on a stale page.
+            if ($connectRequest->eld_connected_at !== null) {
                 return $this->respondWithRequest($connectRequest, 'Your ELD is already connected.');
             }
 

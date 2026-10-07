@@ -4,148 +4,183 @@ namespace App\Http\Controllers\Api\V1\Eld;
 
 use App\Http\Controllers\Controller;
 use App\Jobs\SyncEldConnection;
-use App\Models\EldConnection;
+use App\Models\Eld\EldConnection;
+use App\Models\Eld\EldWebhookEvent;
+use App\Services\Eld\EldConnectionService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Terminal's webhooks.
+ * Terminal's server-to-server events.
  *
- * Public route — Terminal has no session here. Authenticity comes from the
- * signature, which is why verify() runs before anything is read out of the
- * body, and why a failure is a flat 401 rather than a helpful explanation.
+ * The redirect back from the Link page is not a reliable signal — carriers
+ * close the tab, lose signal in a yard, or hand the phone back before it
+ * returns. These events are: they arrive whatever the browser did, and they
+ * keep arriving afterwards when a connection breaks or a sync finishes.
  *
- * Terminal delivers through Svix, so the scheme is Svix's: HMAC-SHA256 over
- * "{svix-id}.{svix-timestamp}.{body}", keyed by the base64 half of the
- * whsec_ secret, compared against any of the space-separated versioned
- * signatures in svix-signature.
- *
- * Handlers must be idempotent. Terminal retries anything that is not 2xx, and
- * duplicate deliveries are explicitly expected.
+ * Public by necessity, so the signature check below is the only thing standing
+ * between this endpoint and anyone who knows the URL.
  */
 class TerminalWebhookController extends Controller
 {
-    /** How far out of step a delivery's timestamp may be before it is a replay. */
+    /**
+     * Terminal delivers through Svix, whose signature covers the id, the
+     * timestamp and the exact bytes of the body.
+     */
     private const TOLERANCE_SECONDS = 300;
 
-    public function __invoke(Request $request)
+    public function __construct(private EldConnectionService $connections) {}
+
+    public function handle(Request $request)
     {
-        if (! $this->verify($request)) {
-            return response()->json(['message' => 'Invalid signature.'], 401);
+        if (! $this->signatureIsValid($request)) {
+            // 401 rather than 4xx-with-detail: an unverified caller learns
+            // nothing about why it failed.
+            return response()->json(['error' => 'Invalid signature'], 401);
         }
 
-        $type = $request->input('type');
-        $detail = $request->input('detail', []);
+        $payload = $request->json()->all();
 
-        $terminalConnectionId = Arr::get($detail, 'connection.id');
+        $eventId = (string) data_get($payload, 'id');
+        $type = (string) data_get($payload, 'type');
 
-        // Everything we act on names a connection. An event that does not is
-        // one we have no state for, so acknowledge and move on rather than
-        // making Terminal retry it forever.
-        if (! $terminalConnectionId) {
-            return response()->json(['received' => true]);
+        if ($eventId === '' || $type === '') {
+            return response()->json(['error' => 'Malformed event'], 422);
         }
 
-        $connection = EldConnection::where('terminal_connection_id', $terminalConnectionId)->first();
+        $connectionId = (string) (data_get($payload, 'detail.connection.id') ?? '');
 
-        if (! $connection) {
-            Log::info('Terminal webhook for an unknown connection', [
-                'type' => $type,
-                'connection' => $terminalConnectionId,
-            ]);
+        /*
+        | Idempotency, and the reason this answers 2xx on a repeat. A retry of
+        | something already handled must not sync twice — Terminal bills for
+        | what gets read.
+        */
+        $event = EldWebhookEvent::firstOrNew(['event_id' => $eventId]);
 
-            return response()->json(['received' => true]);
+        if ($event->exists && $event->processed_at !== null) {
+            return response()->json(['status' => 'duplicate']);
         }
 
-        match (true) {
-            // A sync finished at Terminal's end; ours is what pulls it across.
-            in_array($type, ['sync.completed', 'connection.first_sync_completed'], true)
-                => $this->onSyncCompleted($connection, $detail),
-
-            $type === 'connection.disconnected' => $this->onDisconnected($connection),
-            $type === 'connection.deleted' => $this->onDeleted($connection),
-            $type === 'connection.reconnected' => $this->onReconnected($connection),
-
-            // Fleet churn between scheduled passes. Cheaper to re-sync the
-            // connection than to apply a partial diff, and ShouldBeUnique
-            // collapses a burst of these into one job.
-            str_starts_with((string) $type, 'vehicle.'),
-            str_starts_with((string) $type, 'driver.')
-                => SyncEldConnection::dispatchFor($connection),
-
-            default => null,
-        };
-
-        return response()->json(['received' => true]);
-    }
-
-    private function onSyncCompleted(EldConnection $connection, array $detail): void
-    {
-        $connection->forceFill(array_filter([
-            'sync_status' => Arr::get($detail, 'sync.status'),
-            'sync_progress' => Arr::get($detail, 'sync.progress'),
-        ], fn ($value) => $value !== null))->save();
-
-        SyncEldConnection::dispatchFor($connection);
-    }
-
-    private function onDisconnected(EldConnection $connection): void
-    {
-        $connection->forceFill([
-            'status' => EldConnection::STATUS_DISCONNECTED,
-            'disconnected_at' => now(),
-        ])->save();
-    }
-
-    private function onDeleted(EldConnection $connection): void
-    {
-        // The stored fleet stays. A broker looking at a completed onboarding
-        // still needs to see what was true when the carrier was assessed.
-        $connection->forceFill([
-            'status' => EldConnection::STATUS_DELETED,
-            'disconnected_at' => $connection->disconnected_at ?? now(),
-        ])->save();
-    }
-
-    private function onReconnected(EldConnection $connection): void
-    {
-        $connection->forceFill([
-            'status' => EldConnection::STATUS_CONNECTED,
-            'disconnected_at' => null,
+        $event->fill([
+            'type' => $type,
+            'terminal_connection_id' => $connectionId ?: null,
+            'payload' => $payload,
         ])->save();
 
-        SyncEldConnection::dispatchFor($connection);
+        $this->dispatchEvent($type, $connectionId, $payload);
+
+        $event->forceFill(['processed_at' => now()])->save();
+
+        return response()->json(['status' => 'ok']);
+    }
+
+    private function dispatchEvent(string $type, string $connectionId, array $payload): void
+    {
+        $connection = $connectionId !== ''
+            ? EldConnection::where('terminal_connection_id', $connectionId)->first()
+            : null;
+
+        switch ($type) {
+            case 'connection.created':
+                /*
+                | Usually already stored: the carrier's browser came back first
+                | and the exchange ran on the request. When it did not — a
+                | closed tab, a dropped redirect — this is the only notice we
+                | get, and without the connection token that the exchange
+                | returns there is nothing to store. Logged loudly rather than
+                | swallowed, because it means a carrier believes they are
+                | connected and we do not agree.
+                */
+                if (! $connection) {
+                    Log::warning('Terminal connection.created for a connection we never exchanged', [
+                        'terminal_connection_id' => $connectionId,
+                        'external_id' => data_get($payload, 'detail.connection.externalId'),
+                    ]);
+                }
+
+                break;
+
+            case 'connection.disconnected':
+                if ($connection) {
+                    $this->connections->markDisconnected($connection);
+                }
+
+                break;
+
+            case 'sync.completed':
+            case 'vehicle.added':
+            case 'driver.added':
+                /*
+                | New data is waiting. The job is checkpointed and throttled to
+                | one pass per connection per ten minutes, so a provider that
+                | adds forty trucks at once produces one sync, not forty.
+                */
+                if ($connection?->isSyncable()) {
+                    SyncEldConnection::dispatch($connection->id);
+                }
+
+                break;
+
+            case 'sync.failed':
+                if ($connection) {
+                    $connection->forceFill([
+                        'sync_status' => EldConnection::SYNC_FAILED,
+                        'last_sync_error' => (string) (data_get($payload, 'detail.sync.error')
+                            ?: 'Terminal reported a failed sync.'),
+                    ])->save();
+                }
+
+                break;
+
+            case 'safety_event.added':
+                /*
+                | Recorded but not yet acted on: there is no safety_events table
+                | on this side, and inventing one here would be scope creep. The
+                | event row above keeps the payload, so nothing is lost when the
+                | risk-alert feed is built against it. See docs/eld-terminal.md.
+                */
+                break;
+
+            default:
+                // Delivery events and anything Terminal adds later. Answering
+                // 2xx stops the retries; ignoring the body is deliberate.
+                break;
+        }
     }
 
     /**
      * Svix signature check.
+     *
+     * The signed content is `id.timestamp.body`, HMAC-SHA256 with the raw bytes
+     * of the signing secret, compared in constant time. The timestamp bound is
+     * what stops a captured delivery being replayed days later.
      */
-    private function verify(Request $request): bool
+    private function signatureIsValid(Request $request): bool
     {
-        $secret = config('terminal.webhook_secret');
+        $secret = (string) config('services.terminal.webhook_secret');
 
-        if (! $secret) {
+        if ($secret === '') {
+            // Refusing beats trusting: an endpoint that accepts unverified
+            // payloads can be told a connection is fine when it is not.
             Log::error('Terminal webhook secret is not configured; rejecting delivery.');
 
             return false;
         }
 
-        $id = $request->header('svix-id');
-        $timestamp = $request->header('svix-timestamp');
-        $signatures = $request->header('svix-signature');
+        $id = (string) $request->header('svix-id');
+        $timestamp = (string) $request->header('svix-timestamp');
+        $signatures = (string) $request->header('svix-signature');
 
-        if (! $id || ! $timestamp || ! $signatures) {
+        if ($id === '' || $timestamp === '' || $signatures === '') {
             return false;
         }
 
-        // A signature stays valid forever without this, so a captured delivery
-        // could be replayed at any point.
         if (abs(time() - (int) $timestamp) > self::TOLERANCE_SECONDS) {
             return false;
         }
 
-        $key = base64_decode(str_starts_with($secret, 'whsec_') ? substr($secret, 6) : $secret, true);
+        // `whsec_` prefixes a base64 secret; the HMAC is over its raw bytes.
+        $key = base64_decode(substr($secret, 0, 6) === 'whsec_' ? substr($secret, 6) : $secret, true);
 
         if ($key === false) {
             Log::error('Terminal webhook secret is not valid base64.');
@@ -157,8 +192,11 @@ class TerminalWebhookController extends Controller
             hash_hmac('sha256', $id.'.'.$timestamp.'.'.$request->getContent(), $key, true)
         );
 
-        // The header carries space-separated "v1,<signature>" pairs so a secret
-        // can be rotated without dropping deliveries signed by the old one.
+        /*
+        | The header carries a space-separated list — Svix sends every currently
+        | valid signature during a secret rotation, so matching any one of them
+        | is correct.
+        */
         foreach (explode(' ', $signatures) as $candidate) {
             $parts = explode(',', $candidate, 2);
 

@@ -28,6 +28,12 @@ class Company extends Model
         'country',
         'zip_code',
         'status',
+
+        // The Terminal consent template this broker's carriers are shown when
+        // they link an ELD, so the Link page names the same broker the
+        // onboarding wizard does. See docs/eld-terminal.md.
+        'eld_consent_template',
+
         'stripe_customer_id',
         'created_by',
     ];

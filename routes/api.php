@@ -86,7 +86,12 @@ Route::prefix('v1')->group(function () {
     | throttle: throttling a webhook means Terminal retries, which arrives as
     | more of the same traffic.
     */
-    Route::post('/webhooks/terminal', TerminalWebhookController::class);
+    //
+    // /webhooks/terminal is the URL production's Terminal dashboard already
+    // delivers to; /eld/terminal/webhook is the one staging uses. Both reach
+    // the same idempotent handler.
+    Route::post('/webhooks/terminal', [TerminalWebhookController::class, 'handle']);
+    Route::post('/eld/terminal/webhook', [TerminalWebhookController::class, 'handle']);
     Route::post('/verify-login-otp', [AuthController::class, 'verifyLoginOtp']);
     Route::get('/getCarrier', [ShipmentController::class, 'getCarrier']);
 
@@ -160,6 +165,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/stripe/verify', [CarrierConnectController::class, 'verifyStripe']);
             Route::post('/eld/connect', [CarrierConnectController::class, 'connectEld']);
             Route::post('/eld/verify', [CarrierConnectController::class, 'verifyEld']);
+            Route::post('/eld/share', [CarrierConnectController::class, 'shareEld']);
             Route::post('/factoring', [CarrierConnectController::class, 'saveFactoring']);
             Route::post('/skip', [CarrierConnectController::class, 'skipStep']);
             Route::post('/questions', [CarrierConnectController::class, 'questions']);
