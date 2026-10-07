@@ -84,8 +84,7 @@ return [
         'carrier_connect' => [
             'label' => 'Carrier connection request',
             'description' => 'Sent to a carrier when a broker clicks Connect on their profile.',
-            // No default_subject: the carrier onboarding invitation stays on
-            // its own mail (CarrierConnectInvitationMail) on production.
+            'default_subject' => '{{company_name}} would like to connect with you on DollarTraq',
             'variables' => [
                 'carrier_name' => 'Carrier legal name',
                 'dot_number' => 'Carrier DOT number',
