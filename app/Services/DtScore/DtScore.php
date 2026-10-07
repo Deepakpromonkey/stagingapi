@@ -57,6 +57,9 @@ final class DtScore
 
     private ?string $configFingerprint = null;
 
+    /** Bump when the cached entry gains or loses a field. */
+    private const CACHE_SHAPE = 2;
+
     /** Self-driven unit types, in the feed's own vocabulary. */
     private const POWER_UNIT_TYPES = [
         'TRUCK TRACTOR',
@@ -123,7 +126,7 @@ final class DtScore
      * High Risk / Rejected) alongside each score.
      *
      * @param  array<int, mixed>  $dots
-     * @return array<string, array{score: int, status: ?string}>
+     * @return array<string, array{score: int, status: ?string, band: ?string, needs_manual_review: bool}>
      */
     public static function manyWithStatus(array $dots): array
     {
@@ -231,15 +234,56 @@ final class DtScore
      * Put a known score into the cache, as if it had just been calculated —
      * for tests that must not reach the carrier database.
      */
-    public static function store(string $dot, int $score, ?string $status = null): void
+    public static function store(string $dot, int $score, ?string $status = null, ?string $band = null, bool $needsManualReview = false): void
     {
-        self::instance()->remember($dot, ['overall_score' => $score, 'status' => $status]);
+        self::instance()->remember($dot, [
+            'overall_score' => $score,
+            'status' => $status,
+            'band' => $band === null ? null : ['key' => $band],
+            'needs_manual_review' => $needsManualReview,
+        ]);
     }
 
     /** Letter grade for a 0-100 score, from dtscore.grades. */
     public static function grade(int $score): string
     {
         return self::instance()->getGrade($score);
+    }
+
+    /**
+     * Cached entries (score, status, band, review flag) for many DOTs in one
+     * cache round trip, without calculating anything.
+     *
+     * @param  array<int, mixed>  $dots
+     * @return array<string, array{score: int, status: ?string, band: ?string, needs_manual_review: bool}>
+     */
+    public static function cachedEntries(array $dots): array
+    {
+        $score = self::instance();
+
+        $keys = [];
+
+        foreach ($dots as $dot) {
+            $dot = trim((string) $dot);
+
+            if ($dot !== '') {
+                $keys[$score->cacheKey($dot)] = $dot;
+            }
+        }
+
+        if (! $keys) {
+            return [];
+        }
+
+        $entries = [];
+
+        foreach (Cache::many(array_keys($keys)) as $key => $cached) {
+            if (is_array($cached)) {
+                $entries[$keys[$key]] = $cached;
+            }
+        }
+
+        return $entries;
     }
 
     /** The cached number for a DOT, without calculating anything. */
@@ -421,7 +465,10 @@ final class DtScore
     /**
      * Cache the score from a full result, and return what was cached.
      *
-     * @return array{score: int, status: ?string}|null
+     * The band and the review flag ride along so search and shortlist cards
+     * can tell a clean 83 from a flagged one without recalculating.
+     *
+     * @return array{score: int, status: ?string, band: ?string, needs_manual_review: bool}|null
      */
     private function remember(string $dot, array $result): ?array
     {
@@ -432,6 +479,8 @@ final class DtScore
         $entry = [
             'score' => (int) $result['overall_score'],
             'status' => $result['status'] ?? null,
+            'band' => $result['band']['key'] ?? null,
+            'needs_manual_review' => (bool) ($result['needs_manual_review'] ?? false),
         ];
 
         Cache::put($this->cacheKey($dot), $entry, now()->addHours((int) config('dtscore.cache_hours')));
@@ -441,11 +490,12 @@ final class DtScore
 
     /**
      * carrier_dt_score:{config fingerprint}:{dot}. The fingerprint changes
-     * whenever config/dtscore.php does, so stale scores are never served.
+     * whenever config/dtscore.php does, or the shape of a cached entry does
+     * (CACHE_SHAPE), so stale scores and stale shapes are never served.
      */
     private function cacheKey(string $dot): string
     {
-        $this->configFingerprint ??= substr(md5(serialize(config('dtscore'))), 0, 10);
+        $this->configFingerprint ??= substr(md5(serialize([config('dtscore'), self::CACHE_SHAPE])), 0, 10);
 
         return "carrier_dt_score:{$this->configFingerprint}:{$dot}";
     }
