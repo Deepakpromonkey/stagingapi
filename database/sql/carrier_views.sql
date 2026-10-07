@@ -235,23 +235,31 @@ SELECT d._row_id AS id, CAST(d._row_id AS CHAR) AS row_id,
        d._loaded_at AS created_at, d._loaded_at AS updated_at
 FROM crash_file d;
 
+-- Active vs history: FMCSA's ActPendInsur file holds the filings in force
+-- (and pending), InsHist the ones cancelled or replaced. These two views had
+-- their sources the wrong way round, so "active filings" were all cancelled
+-- ones: on 2026-10-07, 396,213 of 402,302 carriers whose authority says a
+-- BIPD filing is on file showed no live BIPD filing here; reading
+-- ActPendInsur, 31,999 do. Same column names as before, so no model changes;
+-- columns the source file does not carry are NULL.
 CREATE OR REPLACE VIEW insurance_filings AS
-SELECT f._row_id AS id, CAST(f._row_id AS CHAR) AS row_id,
-       f.docket_number, f.dot_int AS dot_number, f.ins_form_code,
-       f.cancl_method_gen, f.ins_cancl_form, f.ins_type_ind, f.ins_type_desc,
-       f.policy_no, f.min_cov_amount, f.ins_class_code, f.effective_date,
-       f.underl_lim_amount, f.max_cov_amount, f.cancl_effective_date,
-       f.cancl_method, f.inser_branch, f.name_company,
-       f._loaded_at AS created_at, f._loaded_at AS updated_at
-FROM inshist_all_with_history f;
+SELECT p._row_id AS id, CAST(p._row_id AS CHAR) AS row_id,
+       p.docket_number, p.dot_int AS dot_number, p.ins_form_code,
+       NULL AS cancl_method_gen, NULL AS ins_cancl_form, NULL AS ins_type_ind,
+       p.mod_col_1 AS ins_type_desc,
+       p.policy_no, NULL AS min_cov_amount, NULL AS ins_class_code, p.effective_date,
+       p.underl_lim_amount, p.max_cov_amount, p.cancl_effective_date,
+       NULL AS cancl_method, NULL AS inser_branch, p.name_company,
+       p._loaded_at AS created_at, p._loaded_at AS updated_at
+FROM actpendinsur_all_with_history p;
 
 CREATE OR REPLACE VIEW insurance_filings_history AS
 SELECT h._row_id AS id, CAST(h._row_id AS CHAR) AS row_id,
        h.docket_number, h.dot_int AS dot_number, h.ins_form_code,
-       h.mod_col_1 AS ins_type_desc, h.name_company, h.policy_no, h.trans_date,
+       h.ins_type_desc, h.name_company, h.policy_no, NULL AS trans_date,
        h.underl_lim_amount, h.max_cov_amount, h.effective_date, h.cancl_effective_date,
        h._loaded_at AS created_at, h._loaded_at AS updated_at
-FROM actpendinsur_all_with_history h;
+FROM inshist_all_with_history h;
 
 CREATE OR REPLACE VIEW insurance_filings_pending AS
 SELECT j._row_id AS id, CAST(j._row_id AS CHAR) AS row_id,
