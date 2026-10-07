@@ -599,7 +599,7 @@ class CarrierController extends Controller
 
                 // FMCSA data started long before 2000,
                 // so convert 74 → 1974, 06 → 2006
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
 
                 $fixedDate = substr($addDate, 0, -2).$century.$year;
 
@@ -1679,7 +1679,7 @@ class CarrierController extends Controller
             // FMCSA format: 01-JUN-74
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($value))) {
                 $year = substr($value, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $fixed = substr($value, 0, -2).$century.$year;
 
                 return Carbon::createFromFormat('d-M-Y', strtoupper($fixed));

@@ -135,8 +135,9 @@ trait DtTrustScoreSupport
 
     /**
      * FMCSA writes dates as '01-JUN-74', which Carbon cannot read on its own
-     * and which has no century. Anything later than the current two-digit
-     * year is read as 19xx — a 1974 add date is real, a 2074 one is not.
+     * and which has no century. Anything more than ten years past the current
+     * two-digit year is read as 19xx — a 1974 add date is real, a 2074 one is
+     * not, and a notice dated next year stays next year.
      */
     private function parseFmcsaDate(?string $value): ?Carbon
     {
@@ -148,7 +149,7 @@ trait DtTrustScoreSupport
             // FMCSA format: 01-JUN-74
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($value))) {
                 $year = substr($value, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $fixed = substr($value, 0, -2).$century.$year;
 
                 return Carbon::createFromFormat('d-M-Y', strtoupper($fixed));

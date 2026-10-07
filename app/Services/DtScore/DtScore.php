@@ -489,7 +489,7 @@ final class DtScore
 
                 $year = substr($addDate, -2);
 
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
 
                 $parsed = Carbon::createFromFormat('d-M-Y', strtoupper(substr($addDate, 0, -2).$century.$year));
 
