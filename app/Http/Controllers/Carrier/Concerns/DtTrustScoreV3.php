@@ -1391,8 +1391,12 @@ trait DtTrustScoreV3
 
         $street = strtoupper(($carrier->phy_street ?? '').' | '.($carrier->mailing_street ?? ''));
 
+        $physical = strtoupper($carrier->phy_street ?? '');
+
         $virtual = collect($this->dtConfig('rules.ID-01.patterns'))
-            ->contains(fn ($pattern) => str_contains($street, $pattern));
+            ->contains(fn ($pattern) => str_contains($street, $pattern))
+            || collect($this->dtConfig('rules.ID-01.physical_only_patterns', []))
+                ->contains(fn ($pattern) => str_contains($physical, $pattern));
 
         if ($virtual) {
             $this->dtFire($g, 'ID-01', $this->dtRuleTier('ID-01'), 'Physical or mailing address matches a known mail-drop pattern.');
