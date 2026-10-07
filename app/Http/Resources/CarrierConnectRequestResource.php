@@ -218,6 +218,11 @@ class CarrierConnectRequestResource extends JsonResource
                 ? url('/api/v1/carrier-connect/'.$this->uuid.'/files/signature')
                 : null,
 
+            // The agreement with the signature stamped on it.
+            'signed_agreement_url' => $this->signed_agreement_path
+                ? url('/api/v1/carrier-connect/'.$this->uuid.'/files/signed_agreement')
+                : null,
+
             'signed_at' => $this->signed_at,
 
             // Whether the carrier can log in to the carrier portal yet, and why

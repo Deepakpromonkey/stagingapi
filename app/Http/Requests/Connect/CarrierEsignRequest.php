@@ -33,6 +33,16 @@ class CarrierEsignRequest extends CarrierConnectTokenRequest
                 'numeric',
                 'between:0,100',
             ],
+
+            // The agreement with the signature already stamped on it by the
+            // wizard. Used only when the server cannot stamp the original
+            // itself — see SignedAgreementService.
+            'signed_agreement' => [
+                'nullable',
+                'file',
+                'mimes:pdf',
+                'max:20480',
+            ],
         ]);
     }
 
