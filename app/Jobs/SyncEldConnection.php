@@ -2,76 +2,73 @@
 
 namespace App\Jobs;
 
-use App\Models\EldConnection;
+use App\Models\Eld\EldConnection;
 use App\Services\Eld\EldSyncService;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
 /**
- * Pull one carrier's fleet from Terminal.
+ * Pull one connection's fleet from Terminal.
  *
- * Queued rather than inline because a first sync backfills a month of duty
- * status logs for a whole fleet, and the carrier who triggered it is sitting on
- * a redirect back from Terminal Link.
- *
- * QUEUE_CONNECTION is `sync` on this box, so the connection is named explicitly
- * at dispatch — see dispatchFor(). Without it this would run inside the request
- * it was meant to stay out of.
+ * Always off the request path. The first pass runs the moment a carrier
+ * finishes the Link flow, and the wizard says so rather than showing a tick
+ * beside an empty fleet — the carrier reaches the next step while their trucks
+ * are still arriving.
  */
 class SyncEldConnection implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
-    public int $tries = 5;
-
-    public int $maxExceptions = 3;
-
-    /** A fleet backfill is not quick. */
-    public int $timeout = 600;
+    public int $tries = 3;
 
     /**
-     * Terminal rate-limits, and a 429 during a backfill is ordinary rather than
-     * exceptional. Back off rather than burn the attempts.
-     *
-     * @var array<int, int>
+     * A location pass is a call per truck, so a large fleet's first sync is not
+     * quick. Still bounded, so a provider that hangs cannot hold a worker.
      */
-    public array $backoff = [60, 300, 900];
+    public int $timeout = 900;
+
+    /**
+     * One connection syncs at most once every ten minutes, however many brokers
+     * or webhooks ask for it. Terminal bills for what is read, so a duplicate
+     * pass is not merely wasted work.
+     */
+    public int $uniqueFor = 600;
 
     public function __construct(
-        public int $connectionId
-    ) {}
-
-    /** One sync per connection in flight at a time. */
-    public function uniqueId(): string
-    {
-        return 'eld-sync-'.$this->connectionId;
-    }
-
-    /**
-     * Dispatch onto the queue the scheduler's worker actually drains.
-     *
-     * The `database` connection is named because QUEUE_CONNECTION is `sync`
-     * here; the queue is named so a fleet backfill cannot sit in front of a
-     * broker waiting on mail. Both must stay in step with routes/console.php.
-     */
-    public static function dispatchFor(EldConnection $connection): void
-    {
-        static::dispatch($connection->id)
-            ->onConnection('database')
-            ->onQueue(config('terminal.queue', 'eld'));
+        public int $connectionId,
+        public bool $initial = false
+    ) {
+        // Pinned for the same reason the VIN jobs are: QUEUE_CONNECTION is
+        // `sync` on this box, and inheriting it would run a full fleet import
+        // inside the carrier's HTTP request.
+        $this->onConnection(config('vin.connection', 'database'));
+        $this->onQueue('eld');
     }
 
     public function handle(EldSyncService $sync): void
     {
         $connection = EldConnection::find($this->connectionId);
 
-        // Deleted between dispatch and run, or revoked by the carrier. Neither
-        // is a failure worth retrying.
-        if (! $connection || ! $connection->isUsable()) {
+        if (! $connection) {
             return;
         }
 
-        $sync->sync($connection);
+        $sync->sync($connection, $this->initial);
+    }
+
+    public function uniqueId(): string
+    {
+        return (string) $this->connectionId;
+    }
+
+    /**
+     * Backoff rather than immediate retries: the usual reason a sync fails is a
+     * provider Terminal is proxying being briefly unavailable, and hammering it
+     * helps nobody.
+     */
+    public function backoff(): array
+    {
+        return [60, 300];
     }
 }

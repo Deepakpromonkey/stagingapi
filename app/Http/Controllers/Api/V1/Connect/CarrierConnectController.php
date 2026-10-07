@@ -21,15 +21,13 @@ use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
 use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
-use App\Models\EldConnection;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
 use App\Models\EmailTemplate;
 use App\Models\User;
-use App\Jobs\SyncEldConnection;
 use App\Services\Carrier\CarrierAccountService;
-use App\Services\Eld\TerminalClient;
-use App\Services\Eld\TerminalRequestException;
+use App\Services\Carrier\SignedAgreementService;
+use App\Services\Eld\EldConnectionService;
 use App\Services\SmsSender;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Request;
@@ -62,8 +60,9 @@ class CarrierConnectController extends BaseController
 
     public function __construct(
         private CarrierAccountService $carrierAccountService,
-        private SmsSender $sms,
-        private TerminalClient $terminal
+        private SignedAgreementService $signedAgreements,
+        private EldConnectionService $eldConnections,
+        private SmsSender $sms
     ) {}
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -438,6 +437,14 @@ class CarrierConnectController extends BaseController
             ];
         }
 
+        if ($type === 'signed_agreement') {
+            return [
+                $connectRequest->signed_agreement_disk,
+                $connectRequest->signed_agreement_path,
+                'signed-agreement.pdf',
+            ];
+        }
+
         $document = $connectRequest->documents()->where('type', $type)->first();
 
         if (! $document) {
@@ -581,6 +588,17 @@ class CarrierConnectController extends BaseController
 
         if (! $document) {
             abort(404);
+        }
+
+        // Once signed, the carrier is shown the copy they signed.
+        if ($connectRequest->signed_agreement_path
+            && Storage::disk($connectRequest->signed_agreement_disk)->exists($connectRequest->signed_agreement_path)) {
+            $document = (object) [
+                'disk' => $connectRequest->signed_agreement_disk,
+                'file_path' => $connectRequest->signed_agreement_path,
+                'mime_type' => 'application/pdf',
+                'file_name' => 'signed-'.($document->file_name ?: 'agreement.pdf'),
+            ];
         }
 
         $disk = Storage::disk($document->disk);
@@ -784,7 +802,7 @@ class CarrierConnectController extends BaseController
             'otp_attempts' => 0,
             'last_otp_attempt_at' => now(),
             'mobile_verified_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_MOBILE_VERIFIED,
+            'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_MOBILE_VERIFIED),
         ])->save();
 
         return $this->respondWithRequest($connectRequest, 'Phone number verified.');
@@ -1022,10 +1040,10 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill([
             'stripe_verified_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_BANK_VERIFIED,
+            'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_BANK_VERIFIED),
         ])->save();
 
-        return $this->respondWithRequest($connectRequest, 'Bank account connected.');
+        return $this->respondAfterStep($connectRequest, 'Bank account connected.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1033,15 +1051,16 @@ class CarrierConnectController extends BaseController
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Open Terminal Link so the carrier can connect their ELD.
+     * Open the Terminal Link page for this carrier.
      *
-     * We never see their provider credentials: Link is hosted by Terminal, the
-     * carrier authenticates there, and what comes back to us is a short-lived
-     * public token. That is the whole point of using it rather than asking a
-     * trucking company to type their Samsara password into our form.
+     * The URL is minted here rather than in the browser because it carries the
+     * publishable key, the consent template for this broker, and a state nonce
+     * that has to be remembered server-side for the return leg to mean
+     * anything.
      *
-     * `state` is minted here and stored on the request. verifyEld() will not
-     * accept a redirect that does not carry it back.
+     * The carrier signs in to their provider on Terminal's page. Their provider
+     * credentials never touch this application, which is exactly what the step
+     * promises them on screen.
      */
     public function connectEld(CarrierConnectTokenRequest $request)
     {
@@ -1051,47 +1070,70 @@ class CarrierConnectController extends BaseController
             return $this->error('This onboarding link is no longer valid.', null, 404);
         }
 
-        if (! $this->terminal->isConfigured()) {
-            Log::error('Terminal is not configured; cannot connect an ELD.');
+        if (! $this->eldConnections->isConfigured()) {
+            Log::error('Terminal is not configured; cannot open the ELD connection page.');
 
             return $this->error('ELD connection is unavailable right now.', null, 503);
         }
 
-        /*
-        | Reuse an unspent state rather than minting a fresh one.
-        |
-        | Every call used to overwrite it, so a second press of Connect -- or a
-        | second tab, or a re-render -- invalidated the link the carrier was
-        | already part way through, and they came back to "could not be
-        | verified" having done nothing wrong. The state is single use and
-        | cleared on success, so holding one open across repeat presses costs
-        | nothing and makes the step idempotent.
-        */
-        $state = $connectRequest->eld_link_state ?: Str::random(40);
+        $url = $this->eldConnections->linkUrlFor(
+            $connectRequest,
 
-        $connectRequest->forceFill(['eld_link_state' => $state])->save();
+            // Terminal appends `result`, `token` and `state`; the `eld` flag is
+            // ours, and is what tells the wizard which return leg this is.
+            $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=1'
+        );
 
-        $returnUrl = $this->frontendUrl('/carrier/connect/'.$connectRequest->token).'?eld=processing';
-
-        $url = $this->terminal->linkUrl([
-            'redirect_url' => $returnUrl,
-            'state' => $state,
-
-            // Lets a webhook that arrives before the carrier's browser does be
-            // traced back to this onboarding.
-            'external_id' => $connectRequest->uuid,
-        ]);
+        if (! $url) {
+            return $this->error('Could not open the ELD connection page. Please try again.', null, 502);
+        }
 
         return $this->success(['url' => $url], 'ELD connection started.');
     }
 
     /**
-     * The carrier is back from Terminal Link. Trade their public token for a
-     * connection token and start the first sync.
+     * Share a connection the carrier already made with this broker.
      *
-     * The sync itself is queued: a first pass backfills a month of duty status
-     * logs for the whole fleet, and the carrier is waiting on this response to
-     * move to the next step.
+     * A carrier hauling for several brokers links their provider once. The
+     * second broker still needs the carrier's consent — the wizard names them
+     * on the button — but not another trip through the provider's login, since
+     * the token already exists and Terminal would only dedupe back onto the
+     * same connection.
+     */
+    public function shareEld(CarrierConnectTokenRequest $request)
+    {
+        $connectRequest = $this->resolveRequest($request->validated()['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $connection = $this->eldConnections->share($connectRequest);
+
+        if (! $connection) {
+            return $this->error(
+                'There is no connected ELD to share. Please connect one.',
+                null,
+                422
+            );
+        }
+
+        return $this->respondAfterStep(
+            $connectRequest->refresh(),
+            ($connection->provider ? $connection->provider.' shared' : 'ELD shared')
+                .' with '.($connectRequest->company?->company_name ?? 'this broker').'.'
+        );
+    }
+
+    /**
+     * Finish the connection the carrier just made.
+     *
+     * Exchanges the single-use public token for the connection token, dedupes
+     * against a connection the carrier already has, records this broker's
+     * consent, and queues the first fleet import.
+     *
+     * The import is deliberately not waited on: a large fleet takes minutes,
+     * and the carrier has five more steps to get through.
      */
     public function verifyEld(CarrierEldVerifyRequest $request)
     {
@@ -1103,96 +1145,23 @@ class CarrierConnectController extends BaseController
             return $this->error('This onboarding link is no longer valid.', null, 404);
         }
 
-        if (! $this->terminal->isConfigured()) {
-            return $this->error('ELD connection is unavailable right now.', null, 503);
-        }
-
-        /*
-        | Already done. The browser sends this twice under React's development
-        | double-invoke, and the second arrival must not report failure over a
-        | connection the first one completed -- the state is cleared on success,
-        | so the check below would otherwise reject it.
-        */
-        if ($connectRequest->eld_connection_id && ! $connectRequest->eld_link_state) {
-            return $this->respondWithRequest($connectRequest, 'ELD already connected.');
-        }
-
-        // Single use, and compared in constant time. Without this a public
-        // token lifted from someone else's redirect would attach their
-        // telematics account to this onboarding.
-        if (! $connectRequest->eld_link_state
-            || ! hash_equals($connectRequest->eld_link_state, $data['state'])) {
-            return $this->error('That ELD connection could not be verified. Please try again.', null, 422);
-        }
-
-        try {
-            $exchange = $this->terminal->exchangePublicToken($data['public_token']);
-        } catch (TerminalRequestException $e) {
-            Log::error('Terminal public token exchange failed', array_merge([
-                'connect_request' => $connectRequest->uuid,
-            ], $e->context()));
-
-            return $this->error('Could not finish connecting your ELD. Please try again.', null, 502);
-        }
-
-        // Terminal's exchange response has been documented both flat and
-        // wrapped in a connection object; accept either rather than break on a
-        // shape change.
-        $connectionToken = $exchange['connectionToken']
-            ?? $exchange['token']
-            ?? Arr::get($exchange, 'connection.token');
-
-        $terminalConnectionId = $exchange['connectionId']
-            ?? $exchange['id']
-            ?? Arr::get($exchange, 'connection.id');
-
-        if (! $connectionToken || ! $terminalConnectionId) {
-            Log::error('Terminal exchange returned no connection', [
-                'connect_request' => $connectRequest->uuid,
-                'keys' => array_keys($exchange),
-            ]);
-
-            return $this->error('Could not finish connecting your ELD. Please try again.', null, 502);
-        }
-
-        $connection = EldConnection::updateOrCreate(
-            ['terminal_connection_id' => $terminalConnectionId],
-            [
-                'uuid' => Str::uuid(),
-                'connection_token' => $connectionToken,
-                'status' => EldConnection::STATUS_CONNECTED,
-                'external_id' => $connectRequest->uuid,
-                'connected_at' => now(),
-                'disconnected_at' => null,
-                'sync_status' => 'pending',
-            ]
+        $connection = $this->eldConnections->completeFromPublicToken(
+            $connectRequest,
+            $data['public_token'],
+            $data['state']
         );
 
-        // Provider name up front so the wizard can say "Motive connected"
-        // rather than "connected" while the fleet is still importing. Best
-        // effort: the queued sync fetches this again, so a blip here costs a
-        // label, not the connection.
-        try {
-            app(\App\Services\Eld\EldSyncService::class)->refreshConnection($connection);
-        } catch (\Throwable $e) {
-            Log::warning('Could not read the new Terminal connection', [
-                'connection' => $terminalConnectionId,
-                'error' => $e->getMessage(),
-            ]);
+        if (! $connection) {
+            return $this->error(
+                'Could not finish connecting your ELD. Please try again.',
+                null,
+                422
+            );
         }
 
-        $connectRequest->forceFill([
-            'eld_connection_id' => $connection->id,
-            'eld_connected_at' => now(),
-            'eld_skipped_at' => null,
-            'eld_link_state' => null,
-        ])->save();
-
-        SyncEldConnection::dispatchFor($connection);
-
-        return $this->respondWithRequest(
-            $connectRequest->fresh(),
-            'ELD connected. We are importing your fleet now.'
+        return $this->respondAfterStep(
+            $connectRequest->refresh(),
+            'ELD connected. Your fleet is importing in the background.'
         );
     }
 
@@ -1270,7 +1239,7 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill($attributes)->save();
 
-        return $this->respondWithRequest($connectRequest, 'Factoring details saved.');
+        return $this->respondAfterStep($connectRequest, 'Factoring details saved.');
     }
 
     /**
@@ -1299,17 +1268,20 @@ class CarrierConnectController extends BaseController
 
             $connectRequest->forceFill(['identity_skipped_at' => now()])->save();
 
-            return $this->respondWithRequest($connectRequest, 'Government ID step skipped.');
+            return $this->respondAfterStep($connectRequest, 'Government ID step skipped.');
         }
 
         if ($data['step'] === 'eld') {
-            if ($connectRequest->eld_connection_id) {
+            // Same reasoning as the ID check: a carrier who has already linked
+            // a provider should not be able to throw that away by pressing the
+            // skip link on a stale page.
+            if ($connectRequest->eld_connected_at !== null) {
                 return $this->respondWithRequest($connectRequest, 'Your ELD is already connected.');
             }
 
             $connectRequest->forceFill(['eld_skipped_at' => now()])->save();
 
-            return $this->respondWithRequest($connectRequest, 'ELD step skipped.');
+            return $this->respondAfterStep($connectRequest, 'ELD step skipped.');
         }
 
         if ($connectRequest->stripe_verified_at !== null) {
@@ -1318,7 +1290,7 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill(['bank_skipped_at' => now()])->save();
 
-        return $this->respondWithRequest($connectRequest, 'Bank account step skipped.');
+        return $this->respondAfterStep($connectRequest, 'Bank account step skipped.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1387,10 +1359,10 @@ class CarrierConnectController extends BaseController
         if ($questions->isEmpty()) {
             $connectRequest->forceFill([
                 'questionnaire_completed_at' => now(),
-                'status' => CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE,
+                'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE),
             ])->save();
 
-            return $this->respondWithRequest($connectRequest, 'No questions to answer.');
+            return $this->respondAfterStep($connectRequest, 'No questions to answer.');
         }
 
         $submitted = collect($data['answers'])->keyBy('question_id');
@@ -1472,11 +1444,11 @@ class CarrierConnectController extends BaseController
 
             $connectRequest->forceFill([
                 'questionnaire_completed_at' => now(),
-                'status' => CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE,
+                'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE),
             ])->save();
         });
 
-        return $this->respondWithRequest($connectRequest, 'Answers saved.');
+        return $this->respondAfterStep($connectRequest, 'Answers saved.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1528,7 +1500,7 @@ class CarrierConnectController extends BaseController
 
         $this->syncDocumentsCompletion($connectRequest);
 
-        return $this->respondWithRequest($connectRequest->refresh(), 'Document uploaded.');
+        return $this->respondAfterStep($connectRequest->refresh(), 'Document uploaded.');
     }
 
     /**
@@ -1612,31 +1584,34 @@ class CarrierConnectController extends BaseController
             'signature_x_pct' => $data['x_pct'],
             'signature_y_pct' => $data['y_pct'],
             'signed_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_COMPLETED,
         ])->save();
 
-        // Signing is the last step, so this is where the carrier stops being a
-        // one-off invitation and gets an account of their own. Provisioning
-        // must not be able to undo a signature that is already saved, so a
-        // failure here is logged and the onboarding still reports complete —
-        // the account can be re-provisioned from the stored request.
-        $accountCreated = false;
+        /*
+        | Stamp the signature onto the agreement and keep that copy. A failure
+        | here must not undo a signature that is already saved — the original,
+        | the signature and its position are all on the row, so the copy can be
+        | produced again — so it is logged and signing still succeeds.
+        */
+        $signed = $this->signedAgreements->createFor(
+            $connectRequest->load('agreementDocument'),
+            $request->file('signed_agreement')
+        );
 
-        try {
-            $accountCreated = $this->carrierAccountService->provisionFor($connectRequest) !== null;
-        } catch (\Throwable $e) {
-            Log::error('Carrier portal account provisioning failed', [
-                'connect_request' => $connectRequest->uuid,
-                'error' => $e->getMessage(),
-            ]);
+        if ($signed) {
+            $previous = [$connectRequest->signed_agreement_disk, $connectRequest->signed_agreement_path];
+
+            $connectRequest->forceFill([
+                'signed_agreement_disk' => $signed['disk'],
+                'signed_agreement_path' => $signed['path'],
+            ])->save();
+
+            $this->deletePrivateFile(...$previous);
         }
 
-        return $this->respondWithRequest(
-            $connectRequest->refresh(),
-            $accountCreated
-                ? 'Agreement signed. Onboarding complete — your carrier portal login has been emailed to you.'
-                : 'Agreement signed. Onboarding complete.'
-        );
+        // Signing is no longer the last step, so it does not finish the
+        // onboarding on its own; respondAfterStep does that once every
+        // required step is settled.
+        return $this->respondAfterStep($connectRequest->refresh(), 'Agreement signed.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1682,6 +1657,91 @@ class CarrierConnectController extends BaseController
      * their W-9 was shown the empty dropzone again, with no name, no size and
      * no way to view what they had sent — the upload had in fact worked.
      */
+    /**
+     * Respond to a carrier step, finishing the onboarding first if that step
+     * was the last one outstanding.
+     */
+    private function respondAfterStep(CarrierConnectRequest $connectRequest, string $message)
+    {
+        $result = $this->completeIfReady($connectRequest);
+
+        if ($result !== null) {
+            $message = rtrim($message, '.').'. '.($result
+                ? 'Onboarding complete — your carrier portal login has been emailed to you.'
+                : 'Onboarding complete.');
+        }
+
+        return $this->respondWithRequest($connectRequest, $message);
+    }
+
+    /**
+     * Mark the onboarding complete once every required step is settled, and
+     * give the carrier their portal account.
+     *
+     * Completion used to happen on signing, back when signing was the last
+     * step. The wizard now signs before the questions, ELD and bank steps, so
+     * this runs after each step instead and fires on whichever one settles the
+     * last requirement — in any order, so an older wizard that still signs last
+     * completes exactly as before.
+     *
+     * ELD is not required: the wizard gates on it, and a wizard with the ELD
+     * step switched off must still be able to finish.
+     *
+     * @return bool|null null when nothing changed, otherwise whether a portal
+     *                   account was provisioned
+     */
+    private function completeIfReady(CarrierConnectRequest $connectRequest): ?bool
+    {
+        if ($connectRequest->status === CarrierConnectRequest::STATUS_COMPLETED) {
+            return null;
+        }
+
+        $ready = $connectRequest->mobile_verified_at !== null
+            && ($connectRequest->didit_status === 'Approved' || $connectRequest->identity_skipped_at !== null)
+            && $connectRequest->documents_completed_at !== null
+            && $connectRequest->signed_at !== null
+            && ($connectRequest->questionnaire_completed_at !== null
+                // The wizard never posts answers to a broker with no
+                // questions, so there is nothing to wait for.
+                || ! CarrierQuestion::where('company_id', $connectRequest->company_id)->exists())
+            && $connectRequest->factoring_answered_at !== null
+            && ($connectRequest->uses_factoring_company
+                || $connectRequest->stripe_verified_at !== null
+                || $connectRequest->bank_skipped_at !== null);
+
+        if (! $ready) {
+            return null;
+        }
+
+        $connectRequest->forceFill(['status' => CarrierConnectRequest::STATUS_COMPLETED])->save();
+
+        // Provisioning must not be able to undo a completed onboarding, so a
+        // failure is logged and the account can be re-provisioned from the
+        // stored request.
+        try {
+            return $this->carrierAccountService->provisionFor($connectRequest) !== null;
+        } catch (\Throwable $e) {
+            Log::error('Carrier portal account provisioning failed', [
+                'connect_request' => $connectRequest->uuid,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * `status` tracks the furthest step reached. Steps no longer run in a fixed
+     * order relative to completion, so a step revisited afterwards must not
+     * move a completed onboarding back to an in-progress status.
+     */
+    private function advanceStatus(CarrierConnectRequest $connectRequest, string $status): string
+    {
+        return $connectRequest->status === CarrierConnectRequest::STATUS_COMPLETED
+            ? CarrierConnectRequest::STATUS_COMPLETED
+            : $status;
+    }
+
     private function respondWithRequest(
         CarrierConnectRequest $connectRequest,
         string $message,
@@ -1964,7 +2024,7 @@ class CarrierConnectController extends BaseController
         // Only advance the status on approval; a rejected or pending decision
         // must not move the carrier past the ID step.
         if ($status === 'Approved') {
-            $attributes['status'] = CarrierConnectRequest::STATUS_ID_VERIFIED;
+            $attributes['status'] = $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_ID_VERIFIED);
         }
 
         $connectRequest->forceFill($attributes)->save();

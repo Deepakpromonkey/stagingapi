@@ -1,45 +1,34 @@
 <?php
 
-namespace App\Models;
+namespace App\Models\Eld;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-/**
- * One duty-status change from a driver's log.
- */
 class EldHosLog extends Model
 {
     protected $fillable = [
         'eld_connection_id',
         'terminal_id',
-        'source_id',
-        'provider',
-        'status',
         'driver_terminal_id',
         'vehicle_terminal_id',
+        'duty_status',
         'started_at',
         'ended_at',
-        'latitude',
-        'longitude',
-        'remarks',
+        'duration_seconds',
         'payload',
+        'terminal_modified_at',
     ];
 
     protected $casts = [
         'payload' => 'array',
         'started_at' => 'datetime',
         'ended_at' => 'datetime',
-        'latitude' => 'float',
-        'longitude' => 'float',
+        'terminal_modified_at' => 'datetime',
     ];
 
-    public function connection()
+    public function connection(): BelongsTo
     {
         return $this->belongsTo(EldConnection::class, 'eld_connection_id');
-    }
-
-    public function driver()
-    {
-        return $this->belongsTo(EldDriver::class, 'driver_terminal_id', 'terminal_id');
     }
 }

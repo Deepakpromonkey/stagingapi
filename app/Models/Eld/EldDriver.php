@@ -1,37 +1,33 @@
 <?php
 
-namespace App\Models;
+namespace App\Models\Eld;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class EldDriver extends Model
 {
     protected $fillable = [
         'eld_connection_id',
         'terminal_id',
-        'source_id',
-        'provider',
-        'status',
         'first_name',
         'last_name',
-        'email',
+        'username',
         'phone',
         'license_number',
         'license_state',
+        'status',
         'payload',
+        'terminal_modified_at',
     ];
 
     protected $casts = [
         'payload' => 'array',
+        'terminal_modified_at' => 'datetime',
     ];
 
-    public function connection()
+    public function connection(): BelongsTo
     {
         return $this->belongsTo(EldConnection::class, 'eld_connection_id');
-    }
-
-    public function getFullNameAttribute(): string
-    {
-        return trim(($this->first_name ?? '').' '.($this->last_name ?? ''));
     }
 }

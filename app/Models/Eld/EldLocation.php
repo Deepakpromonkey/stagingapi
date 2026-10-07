@@ -1,37 +1,31 @@
 <?php
 
-namespace App\Models;
+namespace App\Models\Eld;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-/**
- * Where a truck was last seen. One row per vehicle, overwritten each sync —
- * the trail lives at Terminal, not here.
- */
-class EldVehicleLocation extends Model
+class EldLocation extends Model
 {
     protected $fillable = [
         'eld_connection_id',
         'vehicle_terminal_id',
+        'located_at',
         'latitude',
         'longitude',
-        'speed',
-        'heading',
+        'speed_mph',
+        'heading_degrees',
+        'odometer_miles',
         'description',
-        'located_at',
         'payload',
     ];
 
     protected $casts = [
         'payload' => 'array',
         'located_at' => 'datetime',
-        'latitude' => 'float',
-        'longitude' => 'float',
-        'speed' => 'float',
-        'heading' => 'float',
     ];
 
-    public function connection()
+    public function connection(): BelongsTo
     {
         return $this->belongsTo(EldConnection::class, 'eld_connection_id');
     }
