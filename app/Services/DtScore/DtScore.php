@@ -185,6 +185,26 @@ final class DtScore
     }
 
     /**
+     * Full, freshly calculated results for a few DOTs, loading each carrier
+     * the same way a search page does - for verification packs and audits.
+     *
+     * @param  array<int, string>  $dots
+     * @return array<string, array>
+     */
+    public static function fullResultsFor(array $dots): array
+    {
+        $score = self::instance();
+
+        $results = [];
+
+        foreach (Carrier::query()->whereIn('dot_number', $dots)->with(self::RELATIONS)->get() as $carrier) {
+            $results[(string) $carrier->dot_number] = self::forCarrier($carrier);
+        }
+
+        return $results;
+    }
+
+    /**
      * Does the carrier hold a live (uncancelled) filing of this coverage
      * kind — 'bipd', 'cargo' or 'bond'? The same test the score applies,
      * for cards that show insurance status next to the score. Needs the
