@@ -25,6 +25,7 @@ use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
 use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
+use App\Services\Carrier\SignedAgreementService;
 use App\Services\Eld\EldConnectionService;
 use App\Services\SmsSender;
 use Illuminate\Http\Client\PendingRequest;
@@ -58,6 +59,7 @@ class CarrierConnectController extends BaseController
 
     public function __construct(
         private CarrierAccountService $carrierAccountService,
+        private SignedAgreementService $signedAgreements,
         private EldConnectionService $eldConnections,
         private SmsSender $sms
     ) {}
@@ -79,7 +81,7 @@ class CarrierConnectController extends BaseController
         $search = trim((string) $request->input('search'));
 
         $query = CarrierConnectRequest::forCompany($request->user()->company_id)
-            ->with(['user:id,first_name,last_name','documents',])
+            ->with(['user:id,first_name,last_name', 'documents'])
             ->when($search !== '', function ($builder) use ($search) {
                 $builder->where(function ($inner) use ($search) {
                     $inner->where('carrier_legal_name', 'like', "%{$search}%")
@@ -619,7 +621,6 @@ class CarrierConnectController extends BaseController
         ));
     }
 
-
     public function downloadFile(Request $request, string $uuid, string $type)
     {
         $connectRequest = CarrierConnectRequest::forCompany($request->user()->company_id)
@@ -662,6 +663,14 @@ class CarrierConnectController extends BaseController
             ];
         }
 
+        if ($type === 'signed_agreement') {
+            return [
+                $connectRequest->signed_agreement_disk,
+                $connectRequest->signed_agreement_path,
+                'signed-agreement.pdf',
+            ];
+        }
+
         $document = $connectRequest->documents()->where('type', $type)->first();
 
         if (! $document) {
@@ -670,8 +679,6 @@ class CarrierConnectController extends BaseController
 
         return [$document->disk, $document->path, $document->name];
     }
-
-
 
     // ─────────────────────────────────────────────────────────────────────────
     // Carrier side — the invitation link
@@ -808,6 +815,17 @@ class CarrierConnectController extends BaseController
 
         if (! $document) {
             abort(404);
+        }
+
+        // Once signed, the carrier is shown the copy they signed.
+        if ($connectRequest->signed_agreement_path
+            && Storage::disk($connectRequest->signed_agreement_disk)->exists($connectRequest->signed_agreement_path)) {
+            $document = (object) [
+                'disk' => $connectRequest->signed_agreement_disk,
+                'file_path' => $connectRequest->signed_agreement_path,
+                'mime_type' => 'application/pdf',
+                'file_name' => 'signed-'.($document->file_name ?: 'agreement.pdf'),
+            ];
         }
 
         $disk = Storage::disk($document->disk);
@@ -1011,7 +1029,7 @@ class CarrierConnectController extends BaseController
             'otp_attempts' => 0,
             'last_otp_attempt_at' => now(),
             'mobile_verified_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_MOBILE_VERIFIED,
+            'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_MOBILE_VERIFIED),
         ])->save();
 
         return $this->respondWithRequest($connectRequest, 'Phone number verified.');
@@ -1249,10 +1267,10 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill([
             'stripe_verified_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_BANK_VERIFIED,
+            'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_BANK_VERIFIED),
         ])->save();
 
-        return $this->respondWithRequest($connectRequest, 'Bank account connected.');
+        return $this->respondAfterStep($connectRequest, 'Bank account connected.');
     }
 
     /**
@@ -1329,7 +1347,7 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill($attributes)->save();
 
-        return $this->respondWithRequest($connectRequest, 'Factoring details saved.');
+        return $this->respondAfterStep($connectRequest, 'Factoring details saved.');
     }
 
     /**
@@ -1358,7 +1376,7 @@ class CarrierConnectController extends BaseController
 
             $connectRequest->forceFill(['identity_skipped_at' => now()])->save();
 
-            return $this->respondWithRequest($connectRequest, 'Government ID step skipped.');
+            return $this->respondAfterStep($connectRequest, 'Government ID step skipped.');
         }
 
         if ($data['step'] === 'eld') {
@@ -1371,7 +1389,7 @@ class CarrierConnectController extends BaseController
 
             $connectRequest->forceFill(['eld_skipped_at' => now()])->save();
 
-            return $this->respondWithRequest($connectRequest, 'ELD step skipped.');
+            return $this->respondAfterStep($connectRequest, 'ELD step skipped.');
         }
 
         if ($connectRequest->stripe_verified_at !== null) {
@@ -1380,7 +1398,7 @@ class CarrierConnectController extends BaseController
 
         $connectRequest->forceFill(['bank_skipped_at' => now()])->save();
 
-        return $this->respondWithRequest($connectRequest, 'Bank account step skipped.');
+        return $this->respondAfterStep($connectRequest, 'Bank account step skipped.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1455,7 +1473,7 @@ class CarrierConnectController extends BaseController
             );
         }
 
-        return $this->respondWithRequest(
+        return $this->respondAfterStep(
             $connectRequest->refresh(),
             ($connection->provider ? $connection->provider.' shared' : 'ELD shared')
                 .' with '.($connectRequest->company?->company_name ?? 'this broker').'.'
@@ -1496,7 +1514,7 @@ class CarrierConnectController extends BaseController
             );
         }
 
-        return $this->respondWithRequest(
+        return $this->respondAfterStep(
             $connectRequest->refresh(),
             'ELD connected. Your fleet is importing in the background.'
         );
@@ -1568,10 +1586,10 @@ class CarrierConnectController extends BaseController
         if ($questions->isEmpty()) {
             $connectRequest->forceFill([
                 'questionnaire_completed_at' => now(),
-                'status' => CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE,
+                'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE),
             ])->save();
 
-            return $this->respondWithRequest($connectRequest, 'No questions to answer.');
+            return $this->respondAfterStep($connectRequest, 'No questions to answer.');
         }
 
         $submitted = collect($data['answers'])->keyBy('question_id');
@@ -1653,11 +1671,11 @@ class CarrierConnectController extends BaseController
 
             $connectRequest->forceFill([
                 'questionnaire_completed_at' => now(),
-                'status' => CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE,
+                'status' => $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_QUESTIONNAIRE_DONE),
             ])->save();
         });
 
-        return $this->respondWithRequest($connectRequest, 'Answers saved.');
+        return $this->respondAfterStep($connectRequest, 'Answers saved.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1709,7 +1727,7 @@ class CarrierConnectController extends BaseController
 
         $this->syncDocumentsCompletion($connectRequest);
 
-        return $this->respondWithRequest($connectRequest->refresh(), 'Document uploaded.');
+        return $this->respondAfterStep($connectRequest->refresh(), 'Document uploaded.');
     }
 
     /**
@@ -1793,31 +1811,34 @@ class CarrierConnectController extends BaseController
             'signature_x_pct' => $data['x_pct'],
             'signature_y_pct' => $data['y_pct'],
             'signed_at' => now(),
-            'status' => CarrierConnectRequest::STATUS_COMPLETED,
         ])->save();
 
-        // Signing is the last step, so this is where the carrier stops being a
-        // one-off invitation and gets an account of their own. Provisioning
-        // must not be able to undo a signature that is already saved, so a
-        // failure here is logged and the onboarding still reports complete —
-        // the account can be re-provisioned from the stored request.
-        $accountCreated = false;
+        /*
+        | Stamp the signature onto the agreement and keep that copy. A failure
+        | here must not undo a signature that is already saved — the original,
+        | the signature and its position are all on the row, so the copy can be
+        | produced again — so it is logged and signing still succeeds.
+        */
+        $signed = $this->signedAgreements->createFor(
+            $connectRequest->load('agreementDocument'),
+            $request->file('signed_agreement')
+        );
 
-        try {
-            $accountCreated = $this->carrierAccountService->provisionFor($connectRequest) !== null;
-        } catch (\Throwable $e) {
-            Log::error('Carrier portal account provisioning failed', [
-                'connect_request' => $connectRequest->uuid,
-                'error' => $e->getMessage(),
-            ]);
+        if ($signed) {
+            $previous = [$connectRequest->signed_agreement_disk, $connectRequest->signed_agreement_path];
+
+            $connectRequest->forceFill([
+                'signed_agreement_disk' => $signed['disk'],
+                'signed_agreement_path' => $signed['path'],
+            ])->save();
+
+            $this->deletePrivateFile(...$previous);
         }
 
-        return $this->respondWithRequest(
-            $connectRequest->refresh(),
-            $accountCreated
-                ? 'Agreement signed. Onboarding complete — your carrier portal login has been emailed to you.'
-                : 'Agreement signed. Onboarding complete.'
-        );
+        // Signing is no longer the last step, so it does not finish the
+        // onboarding on its own; respondAfterStep does that once every
+        // required step is settled.
+        return $this->respondAfterStep($connectRequest->refresh(), 'Agreement signed.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1863,6 +1884,91 @@ class CarrierConnectController extends BaseController
      * their W-9 was shown the empty dropzone again, with no name, no size and
      * no way to view what they had sent — the upload had in fact worked.
      */
+    /**
+     * Respond to a carrier step, finishing the onboarding first if that step
+     * was the last one outstanding.
+     */
+    private function respondAfterStep(CarrierConnectRequest $connectRequest, string $message)
+    {
+        $result = $this->completeIfReady($connectRequest);
+
+        if ($result !== null) {
+            $message = rtrim($message, '.').'. '.($result
+                ? 'Onboarding complete — your carrier portal login has been emailed to you.'
+                : 'Onboarding complete.');
+        }
+
+        return $this->respondWithRequest($connectRequest, $message);
+    }
+
+    /**
+     * Mark the onboarding complete once every required step is settled, and
+     * give the carrier their portal account.
+     *
+     * Completion used to happen on signing, back when signing was the last
+     * step. The wizard now signs before the questions, ELD and bank steps, so
+     * this runs after each step instead and fires on whichever one settles the
+     * last requirement — in any order, so an older wizard that still signs last
+     * completes exactly as before.
+     *
+     * ELD is not required: the wizard gates on it, and a wizard with the ELD
+     * step switched off must still be able to finish.
+     *
+     * @return bool|null null when nothing changed, otherwise whether a portal
+     *                   account was provisioned
+     */
+    private function completeIfReady(CarrierConnectRequest $connectRequest): ?bool
+    {
+        if ($connectRequest->status === CarrierConnectRequest::STATUS_COMPLETED) {
+            return null;
+        }
+
+        $ready = $connectRequest->mobile_verified_at !== null
+            && ($connectRequest->didit_status === 'Approved' || $connectRequest->identity_skipped_at !== null)
+            && $connectRequest->documents_completed_at !== null
+            && $connectRequest->signed_at !== null
+            && ($connectRequest->questionnaire_completed_at !== null
+                // The wizard never posts answers to a broker with no
+                // questions, so there is nothing to wait for.
+                || ! CarrierQuestion::where('company_id', $connectRequest->company_id)->exists())
+            && $connectRequest->factoring_answered_at !== null
+            && ($connectRequest->uses_factoring_company
+                || $connectRequest->stripe_verified_at !== null
+                || $connectRequest->bank_skipped_at !== null);
+
+        if (! $ready) {
+            return null;
+        }
+
+        $connectRequest->forceFill(['status' => CarrierConnectRequest::STATUS_COMPLETED])->save();
+
+        // Provisioning must not be able to undo a completed onboarding, so a
+        // failure is logged and the account can be re-provisioned from the
+        // stored request.
+        try {
+            return $this->carrierAccountService->provisionFor($connectRequest) !== null;
+        } catch (\Throwable $e) {
+            Log::error('Carrier portal account provisioning failed', [
+                'connect_request' => $connectRequest->uuid,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * `status` tracks the furthest step reached. Steps no longer run in a fixed
+     * order relative to completion, so a step revisited afterwards must not
+     * move a completed onboarding back to an in-progress status.
+     */
+    private function advanceStatus(CarrierConnectRequest $connectRequest, string $status): string
+    {
+        return $connectRequest->status === CarrierConnectRequest::STATUS_COMPLETED
+            ? CarrierConnectRequest::STATUS_COMPLETED
+            : $status;
+    }
+
     private function respondWithRequest(
         CarrierConnectRequest $connectRequest,
         string $message,
@@ -2122,7 +2228,7 @@ class CarrierConnectController extends BaseController
         // Only advance the status on approval; a rejected or pending decision
         // must not move the carrier past the ID step.
         if ($status === 'Approved') {
-            $attributes['status'] = CarrierConnectRequest::STATUS_ID_VERIFIED;
+            $attributes['status'] = $this->advanceStatus($connectRequest, CarrierConnectRequest::STATUS_ID_VERIFIED);
         }
 
         $connectRequest->forceFill($attributes)->save();
@@ -2182,7 +2288,7 @@ class CarrierConnectController extends BaseController
 
             // A finished onboarding is the most complete source; failing that,
             // the most recently worked on.
-            ->orderByRaw("CASE WHEN status = ? THEN 0 ELSE 1 END", [CarrierConnectRequest::STATUS_COMPLETED])
+            ->orderByRaw('CASE WHEN status = ? THEN 0 ELSE 1 END', [CarrierConnectRequest::STATUS_COMPLETED])
             ->orderByDesc('updated_at')
             ->with('documents')
             ->first();

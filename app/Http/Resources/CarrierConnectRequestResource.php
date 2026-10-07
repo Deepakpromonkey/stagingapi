@@ -5,8 +5,8 @@ namespace App\Http\Resources;
 use App\Models\CarrierConnectDocument;
 use App\Models\CarrierConnectRequest;
 use App\Models\Eld\EldConnection;
-use App\Services\Eld\EldConnectionService;
 use App\Services\Carrier\CarrierAccountService;
+use App\Services\Eld\EldConnectionService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -239,6 +239,11 @@ class CarrierConnectRequestResource extends JsonResource
             // The signature image itself, once the agreement has been signed.
             'signature_url' => $this->signature_path
                 ? url('/api/v1/carrier-connect/'.$this->uuid.'/files/signature')
+                : null,
+
+            // The agreement with the signature stamped on it.
+            'signed_agreement_url' => $this->signed_agreement_path
+                ? url('/api/v1/carrier-connect/'.$this->uuid.'/files/signed_agreement')
                 : null,
 
             'signed_at' => $this->signed_at,

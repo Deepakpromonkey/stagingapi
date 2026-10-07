@@ -80,6 +80,15 @@ class CarrierPortalDocumentService
                 return null;
             }
 
+            // The copy with their signature on it, where one was produced.
+            if ($connection->signed_agreement_path) {
+                return [
+                    'disk' => $connection->signed_agreement_disk,
+                    'path' => $connection->signed_agreement_path,
+                    'name' => 'signed-'.($agreement->file_name ?: 'carrier-agreement.pdf'),
+                ];
+            }
+
             return [
                 'disk' => $agreement->disk,
                 'path' => $agreement->file_path,
@@ -155,9 +164,10 @@ class CarrierPortalDocumentService
                 'broker' => $broker,
                 'type' => self::TYPE_AGREEMENT,
                 'label' => self::LABELS[self::TYPE_AGREEMENT],
-                'name' => $connection->agreementDocument->file_name,
-                'size' => $connection->agreementDocument->file_size,
-                'mime' => $connection->agreementDocument->mime_type,
+                'name' => ($connection->signed_agreement_path ? 'signed-' : '')
+                    .$connection->agreementDocument->file_name,
+                'size' => $connection->signed_agreement_path ? null : $connection->agreementDocument->file_size,
+                'mime' => $connection->signed_agreement_path ? 'application/pdf' : $connection->agreementDocument->mime_type,
                 'uploaded_at' => $connection->signed_at->toIso8601String(),
             ];
         }
