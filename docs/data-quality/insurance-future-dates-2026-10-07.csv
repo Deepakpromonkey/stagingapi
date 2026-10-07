@@ -1,0 +1,98 @@
+table_name,_row_id,docket_number,ins_form_code,policy_no,effective_date,cancl_effective_date,suggested_effective_date,suggested_cancl_effective_date,reason,approved
+inshist_all_with_history,2241,MC366324,91X,V107683,2001-07-23,2030-07-21,2001-07-23,2030-07-21,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,156068,MC473205,91X,AT1-391-434456-014,2040-09-07,2004-10-12,1940-09-07,2004-10-12,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,226542,MC305218,91X,70APN282863,2080-02-21,2005-02-18,1980-02-21,2005-02-18,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,235586,MC1151066,91X,05TRM049798-01,2022-12-14,2032-03-07,2022-12-14,2032-03-07,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,264193,MC343451,34,IMP1351547,2083-11-27,2004-01-11,1983-11-27,2004-01-11,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,340072,MC1068668,91X,2-MAT-PA-21-S0111939-00,2029-10-28,2026-01-27,2029-10-28,2026-01-27,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,362824,MC586765,91X,CA 6429615,2048-01-01,2019-02-14,1948-01-01,2019-02-14,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,428448,MC473680,85,24550,2033-11-28,2004-02-29,1933-11-28,2004-02-29,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,558237,MC143677,34,CLP007471,2088-03-29,2000-03-29,1988-03-29,2000-03-29,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,558238,MC143677,91X,CLP007471,2088-03-29,2000-03-29,1988-03-29,2000-03-29,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,579663,MC1121432,91X,CA03379203,2022-06-09,2032-01-10,2022-06-09,2032-01-10,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,619628,MC134449,91X,TPO 203313,4196-01-23,2001-02-17,,2001-02-17,garbage year; blank it,yes
+inshist_all_with_history,659498,MC302073,91X,RHZ5655172-02,2033-12-28,2003-12-28,1933-12-28,2003-12-28,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,659500,MC302073,91X,RHZ5655172-02,2003-07-08,2033-12-28,2003-07-08,2033-12-28,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,671297,MC152250,34,PP025478,2087-04-03,2001-06-08,1987-04-03,2001-06-08,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,781969,MC996591,91X,DE25MOT02336700,2028-10-27,2026-01-11,2028-10-27,2026-01-11,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,820760,MC336857,91X,MCP04302A,2014-05-11,2055-05-11,2014-05-11,2055-05-11,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,824093,MC468511,91X,1955438,2033-07-30,2004-03-10,1933-07-30,2004-03-10,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,904584,MC923359,91X,CSC00001005018,2032-02-10,2024-03-22,2032-02-10,2024-03-22,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,1379295,MC109226,91X,2006975244,2048-09-27,2019-02-04,1948-09-27,2019-02-04,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,1431345,MC076276,91X,FCT001490-01,2018-03-30,2030-03-24,2018-03-30,2030-03-24,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,1629624,MC999357,91X,ST204985,2019-05-16,2049-06-20,2019-05-16,2049-06-20,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,1659031,MC977163,91X,TCA-P000327-00,2033-06-13,2023-07-19,2033-06-13,2023-07-19,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,2067522,MC1033679,91X,CA 0614986,2041-04-15,2020-08-24,2041-04-15,2020-08-24,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,2432145,MC323532,91X,L033739,2004-05-27,2070-05-20,2004-05-27,2070-05-20,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,2482242,MC069864,91X,FOP124452023,2032-06-10,2024-06-10,1932-06-10,2024-06-10,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,2487970,MC1553516,91X,19 CBC 1956081,2029-05-29,2024-10-11,2029-05-29,2024-10-11,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,2759604,MC370187,91X,TC003674,2080-08-08,2003-09-18,1980-08-08,2003-09-18,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,2868802,MC1590017,91X,0066610-01-CA,2028-08-28,2025-11-30,2028-08-28,2025-11-30,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,3001931,MC376550,91X,OA 66 34 76,2033-03-03,2001-01-03,1933-03-03,2001-01-03,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,3071741,MC531912,34,70MTC017103,2060-04-11,2006-05-24,1960-04-11,2006-05-24,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,3148727,MC353002,91X,75APN272329,2034-06-20,2004-12-17,1934-06-20,2004-12-17,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,3186949,MC873708,91X,957927001,2022-12-09,2030-09-22,2022-12-09,2030-09-22,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,3476557,MC1042368,91X,02TRM040096-01,2021-06-29,2033-06-29,2021-06-29,2033-06-29,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,3566891,MC283877,91X,CB005100,2066-01-13,2000-01-13,1966-01-13,2000-01-13,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,3705357,MC861656,91X,AE-000323-04,2021-04-11,2033-03-21,2021-04-11,2033-03-21,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,3733375,MC095762,91X,CA 7919769,2018-11-08,2048-07-27,2018-11-08,2048-07-27,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,3771205,MC809881,91X,03TRM001968,2012-12-27,2073-01-22,2012-12-27,2073-01-22,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4041834,MC445832,91X,JX00AL001513,2033-12-05,2003-11-14,1933-12-05,2003-11-14,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,4058592,MC1588875,91X,TIEIL003694-00,2029-02-06,2026-04-01,2029-02-06,2026-04-01,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4070766,MC129576,91X,CLP00397N,2087-10-29,2002-10-22,1987-10-29,2002-10-22,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,4286538,MC1007057,84,615119672,2032-01-06,2024-01-05,2032-01-06,2024-01-05,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4371385,MC306719,34,73MTE705924,2050-09-30,2006-09-30,1950-09-30,2006-09-30,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,4475316,MC1616307,91X,L16902,2029-02-28,2024-07-07,2029-02-28,2024-07-07,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4691823,MC1052993,91X,CA1138062,2019-09-20,2041-09-20,2019-09-20,2041-09-20,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4691826,MC1052993,91X,CA1138062,2041-09-20,2020-02-05,2041-09-20,2020-02-05,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4777464,MC245204,91X,DSHN00000886,2003-04-12,2044-04-12,2003-04-12,2044-04-12,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,4818805,MC1006355,91X,WN346505,2034-03-30,2025-11-05,2034-03-30,2025-11-05,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,5103983,MC461132,91X,73TRN295058,2040-09-20,2005-02-22,1940-09-20,2005-02-22,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,5103984,MC461132,34,73TRN295058,2040-09-20,2005-02-22,1940-09-20,2005-02-22,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,5461990,MC326488,91X,VT 0001480,2042-12-30,1998-09-02,1942-12-30,1998-09-02,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,5663396,MC1477668,91X,FMSAL2388,2023-11-30,2032-11-30,2023-11-30,2032-11-30,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,5902016,MC1514824,91X,CA00306661,2032-02-23,2023-07-27,2032-02-23,2023-07-27,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,5933571,MC339547,91X,LHT0000673,2039-05-02,1999-07-08,1939-05-02,1999-07-08,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,5933572,MC339547,34,LHT0000673,2039-05-02,1999-07-08,1939-05-02,1999-07-08,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6127234,MC558463,91X,73TRS000576,2060-11-10,2007-11-16,1960-11-10,2007-11-16,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6236409,MC345605,34,SPF163070699,2033-06-18,2000-07-21,1933-06-18,2000-07-21,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6442234,MC345464,91X,70TRN239636,2040-07-30,2005-02-23,1940-07-30,2005-02-23,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6442235,MC345464,34,70TRN239636,2040-07-30,2005-02-23,1940-07-30,2005-02-23,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6505963,MC149616,91X,CLP03247M,2088-05-24,2001-10-01,1988-05-24,2001-10-01,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6505964,MC149616,34,CLP03247M,2088-05-24,2001-10-01,1988-05-24,2001-10-01,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,6882731,MC1738880,91X,QCA-65052-01,2028-07-15,2025-10-28,2028-07-15,2025-10-28,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,7022303,MC486998,91X,L037591,2004-04-26,2051-04-26,2004-04-26,2051-04-26,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,7123278,MC1372498,91X,CA956017598,2022-02-16,2032-03-27,2022-02-16,2032-03-27,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,7141767,MC828783,91X,WN229256,2061-01-03,2019-10-08,2061-01-03,2019-10-08,NOT a century shift (new docket or impossible after shift); likely typo - review,
+inshist_all_with_history,7147795,MC478877,91X,STP14783,2033-11-03,2004-11-11,1933-11-03,2004-11-11,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,7213502,MC236019,91X,LCW100874,2033-11-20,2004-12-12,1933-11-20,2004-12-12,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,7622713,MC200338,34,CLP000211,2087-09-25,2007-08-20,1987-09-25,2007-08-20,century shift; old docket; consistent with cancellation,yes
+inshist_all_with_history,7654933,MC432179,91,H82100144,2002-06-13,2802-11-28,2002-06-13,,garbage year (likely typo); review,
+inshist_all_with_history,7728456,MC983352,91X,CTP-018010,2020-03-27,2029-03-27,2020-03-27,2029-03-27,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,318,MC1572973,91X,CA972204680,2032-08-10,2032-08-10,2032-08-10,2032-08-10,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,319,MC1310583,91X,CAL11859-01,2032-01-10,2032-01-10,2032-01-10,2032-01-10,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,320,MC1327009,91X,2-XPT-TX-19-S-348100-00,2029-12-31,2029-12-31,2029-12-31,2029-12-31,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,321,MC1646210,91X,2029175710,2029-08-18,2026-05-29,2029-08-18,2026-05-29,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,322,MC1142920,91X,CA942411322,2029-07-29,2029-07-29,2029-07-29,2029-07-29,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,323,MC1426121,91X,CA-FE4697,2029-04-28,2029-04-28,2029-04-28,2029-04-28,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,324,MC1533364,91X,CA862819256,2028-11-28,,2028-11-28,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,389,MC938496,91X,CIMGA000362-00,2028-11-28,,2028-11-28,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,390,MC109206,91X,AFC103778-25,2028-10-01,,1928-10-01,,century shift; old docket; consistent with cancellation,yes
+actpendinsur_all_with_history,391,MC1547963,91X,HICA-1-24-101554-02,2028-07-08,,2028-07-08,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,392,MC1519783,91X,CA967300908,2028-04-15,2028-04-15,2028-04-15,2028-04-15,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,393,MC1047265,91X,UWPGA4467-04,2028-02-27,2028-02-28,2028-02-27,2028-02-28,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,426,MC1327009,91X,2-XPT-TX-19-S-348100-00,2026-12-31,2029-12-31,2026-12-31,2029-12-31,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,141965,MC1572973,91X,CA972204680,2023-08-10,2032-08-10,2023-08-10,2032-08-10,NOT a century shift (new docket or impossible after shift); likely typo - review,
+actpendinsur_all_with_history,256059,MC1305778,91X,CA961342634,2022-09-06,2032-06-12,2022-09-06,2032-06-12,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,147722,MC1310583,91X,CAL11859-01,2032-01-10,,2032-01-10,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,151093,MC1327009,91X,2-XPT-TX-19-S-348100-00,2029-12-31,,2029-12-31,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,167014,MC1142920,91X,CA942411322,2029-07-29,,2029-07-29,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,173689,MC938496,91X,CIMGA000362-00,2028-11-28,,2028-11-28,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,249897,MC1646210,91X,2029175710,2029-08-18,,2029-08-18,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,373063,MC1426121,91X,CA-FE4697,2029-04-28,,2029-04-28,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,569537,MC109206,91X,AFC103778-25,2028-10-01,,1928-10-01,,century shift; old docket; consistent with cancellation,yes
+insur_all_with_history,641112,MC1519783,91X,CA967300908,2028-04-15,,2028-04-15,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,644545,MC1533364,91X,CA862819256,2028-11-28,,2028-11-28,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,648435,MC1547963,91X,HICA-1-24-101554-02,2028-07-08,,2028-07-08,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,669579,MC1047265,91X,UWPGA4467-04,2028-02-27,,2028-02-27,,NOT a century shift (new docket or impossible after shift); likely typo - review,
+insur_all_with_history,704767,MC1572973,91X,CA972204680,2032-08-10,,2032-08-10,,NOT a century shift (new docket or impossible after shift); likely typo - review,
