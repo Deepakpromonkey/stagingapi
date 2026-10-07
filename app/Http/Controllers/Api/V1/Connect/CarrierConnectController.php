@@ -23,7 +23,6 @@ use App\Models\CarrierLoginAttempt;
 use App\Models\CarrierQuestion;
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\CarrierAuthority;
-use App\Models\EmailTemplate;
 use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
 use App\Services\Carrier\SignedAgreementService;
@@ -82,7 +81,7 @@ class CarrierConnectController extends BaseController
         $search = trim((string) $request->input('search'));
 
         $query = CarrierConnectRequest::forCompany($request->user()->company_id)
-            ->with(['user:id,first_name,last_name','documents',])
+            ->with(['user:id,first_name,last_name', 'documents'])
             ->when($search !== '', function ($builder) use ($search) {
                 $builder->where(function ($inner) use ($search) {
                     $inner->where('carrier_legal_name', 'like', "%{$search}%")
@@ -343,6 +342,234 @@ class CarrierConnectController extends BaseController
         );
     }
 
+    /** Emailing hundreds of carriers off one bad paste is not a typo you can undo. */
+    private const BULK_IMPORT_MAX_ROWS = 200;
+
+    /**
+     * The Import button on the Connected Carriers page - invites every DOT
+     * number in an uploaded CSV in one go.
+     *
+     * Same two rules store() enforces: the company needs an active broker
+     * agreement on file before anyone can be invited, and a carrier is only
+     * invited if its FMCSA record has a usable email. Always sends to that
+     * address - store()'s alternate-email-with-approval path is an
+     * interactive, one-carrier-at-a-time flow, and has no sane meaning
+     * across a file of dozens or hundreds of rows, so bulk import doesn't
+     * offer it.
+     *
+     * The create-or-refresh block below is store()'s own FMCSA-address path,
+     * duplicated rather than shared - same judgement call already on record
+     * for CarrierShortlistController's copy of its scoring logic: this
+     * touches a live, tested invitation flow (real mail, a real agreement
+     * requirement) that is not to be disturbed for a second caller. Keep
+     * the two in step by hand if that path changes.
+     *
+     * Never aborts the whole file over one bad row - a DOT that doesn't
+     * resolve, or has no usable email, is recorded in the response instead
+     * of stopping everything after it.
+     */
+    public function bulkImport(Request $request)
+    {
+        $request->validate([
+            'file' => ['required', 'file', 'mimes:csv,txt', 'max:10240'],
+        ]);
+
+        $user = $request->user();
+
+        $agreement = BrokerAgreementDocument::forCompany($user->company_id)
+            ->active()
+            ->latest()
+            ->first();
+
+        if (! $agreement) {
+            return $this->error(
+                'Upload your broker agreement before sending onboarding invitations. '
+                .'Without one the carrier cannot sign at the final step.',
+                null,
+                422
+            );
+        }
+
+        $dots = $this->parseImportDots($request->file('file'));
+
+        if (empty($dots)) {
+            return $this->error(
+                'No DOT numbers were found in that file. It needs a column headed DOT, '
+                .'DOT Number, dot_number or USDOT.',
+                null,
+                422
+            );
+        }
+
+        if (count($dots) > self::BULK_IMPORT_MAX_ROWS) {
+            return $this->error(
+                'That file has '.count($dots).' rows - imports are capped at '
+                .self::BULK_IMPORT_MAX_ROWS.' at a time, so a bad paste cannot email '
+                .'hundreds of carriers at once.',
+                null,
+                422
+            );
+        }
+
+        $invited = [];
+        $skipped = [];
+        $toMail = [];
+
+        foreach ($dots as $dot) {
+            $carrier = $this->findCarrier($dot);
+
+            if (! $carrier) {
+                $skipped[] = ['dot_number' => $dot, 'reason' => 'No carrier found with this DOT number.'];
+
+                continue;
+            }
+
+            $email = trim((string) (config('carrier_connect.test_email') ?: $carrier->email_address));
+
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $skipped[] = [
+                    'dot_number' => $carrier->dot_number,
+                    'legal_name' => $carrier->legal_name,
+                    'reason' => 'No usable email address on file.',
+                ];
+
+                continue;
+            }
+
+            $connectRequest = DB::transaction(function () use ($user, $carrier, $email, $agreement) {
+                $connectRequest = CarrierConnectRequest::firstOrNew([
+                    'company_id' => $user->company_id,
+                    'carrier_row_id' => $carrier->row_id,
+                ]);
+
+                $isNew = ! $connectRequest->exists;
+
+                if ($isNew) {
+                    $connectRequest->uuid = Str::uuid();
+                    $connectRequest->token = Str::random(64);
+                    $connectRequest->status = CarrierConnectRequest::STATUS_NEW;
+                }
+
+                $connectRequest->fill([
+                    'user_id' => $user->id,
+                    'carrier_dot_number' => $carrier->dot_number,
+                    'carrier_legal_name' => $carrier->legal_name ?: $carrier->dba_name,
+                    'carrier_phone' => $carrier->telephone,
+                    'agreement_document_id' => $agreement->id,
+                    'carrier_email' => $email,
+                    'pending_email' => null,
+                    'pending_email_token' => null,
+                    'pending_email_requested_at' => null,
+                    'pending_email_approved_at' => null,
+                    'sent_on' => now(),
+                ]);
+
+                $connectRequest->save();
+
+                if ($isNew) {
+                    $this->prefillFromPreviousOnboarding($connectRequest);
+                }
+
+                return $connectRequest->fresh(['company']);
+            });
+
+            $invited[] = [
+                'dot_number' => $carrier->dot_number,
+                'legal_name' => $connectRequest->carrier_legal_name,
+            ];
+
+            $toMail[] = $connectRequest;
+        }
+
+        if (! empty($toMail)) {
+            // One deferred callback for the whole batch, not one dispatch per
+            // row - afterResponse() registers a terminating callback, and a
+            // hundred of those is a hundred closures Laravel walks through
+            // for no reason a single loop doesn't already cover.
+            $this->afterResponse(function () use ($toMail, $user) {
+                foreach ($toMail as $connectRequest) {
+                    $this->sendInvitationMail($connectRequest, $user);
+                }
+            });
+        }
+
+        return $this->success([
+            'invited' => $invited,
+            'skipped' => $skipped,
+            'total_invited' => count($invited),
+            'total_skipped' => count($skipped),
+        ], count($invited).' of '.count($dots).' carriers invited.');
+    }
+
+    /**
+     * DOT numbers out of an uploaded CSV/TXT file.
+     *
+     * Recognises the same header spellings CarrierImportModal already
+     * advertises elsewhere in the app (DOT, DOT Number, dot_number, USDOT),
+     * case-insensitively. Any other column is ignored. If no recognised
+     * header is found, the first row is treated as data rather than a
+     * header - so a bare single-column list of DOT numbers with no header
+     * at all still works, and nothing is silently dropped for lacking one.
+     *
+     * @return array<int, string>
+     */
+    private function parseImportDots($file): array
+    {
+        $handle = fopen($file->getRealPath(), 'r');
+
+        if (! $handle) {
+            return [];
+        }
+
+        // Escape char pinned explicitly - PHP 8.4 deprecates the implicit
+        // default, and DOT numbers never contain one anyway.
+        $header = fgetcsv($handle, escape: '\\');
+
+        if ($header === false) {
+            fclose($handle);
+
+            return [];
+        }
+
+        $aliases = ['dot', 'dot number', 'dot_number', 'usdot'];
+        $normalized = array_map(fn ($h) => strtolower(trim((string) $h)), $header);
+
+        $dotIndex = null;
+
+        foreach ($normalized as $i => $name) {
+            if (in_array($name, $aliases, true)) {
+                $dotIndex = $i;
+
+                break;
+            }
+        }
+
+        $dots = [];
+
+        if ($dotIndex === null) {
+            $dotIndex = 0;
+
+            $first = preg_replace('/[^0-9]/', '', (string) ($header[0] ?? ''));
+
+            if ($first !== '') {
+                $dots[] = $first;
+            }
+        }
+
+        while (($line = fgetcsv($handle, escape: '\\')) !== false) {
+            $raw = trim((string) ($line[$dotIndex] ?? ''));
+            $dot = preg_replace('/[^0-9]/', '', $raw);
+
+            if ($dot !== '') {
+                $dots[] = $dot;
+            }
+        }
+
+        fclose($handle);
+
+        return array_values(array_unique($dots));
+    }
+
     /**
      * The link in the approval email, opened from the carrier's FMCSA-registered
      * inbox. Reaching it is the carrier's consent to onboarding being run
@@ -393,7 +620,6 @@ class CarrierConnectController extends BaseController
             '/carrier/email-approval?status=approved&email='.urlencode($approvedEmail)
         ));
     }
-
 
     public function downloadFile(Request $request, string $uuid, string $type)
     {
@@ -453,8 +679,6 @@ class CarrierConnectController extends BaseController
 
         return [$document->disk, $document->path, $document->name];
     }
-
-
 
     // ─────────────────────────────────────────────────────────────────────────
     // Carrier side — the invitation link
@@ -547,6 +771,9 @@ class CarrierConnectController extends BaseController
 
         $carrier = $this->findCarrier($connectRequest->carrier_row_id);
 
+        // eldConnection included so a carrier returning to the wizard sees the
+        // provider and the fleet counts on the ELD tile, rather than a bare
+        // tick with nothing behind it.
         $connectRequest->load(['agreementDocument', 'documents', 'eldConnection']);
 
         return $this->success([
@@ -1046,8 +1273,136 @@ class CarrierConnectController extends BaseController
         return $this->respondAfterStep($connectRequest, 'Bank account connected.');
     }
 
+    /**
+     * Factoring, asked alongside bank verification.
+     *
+     * If the carrier factors its receivables the broker cannot pay the carrier
+     * directly, so the notice of assignment is mandatory on a yes.
+     */
+    public function saveFactoring(CarrierFactoringRequest $request)
+    {
+        $data = $request->validated();
+
+        $connectRequest = $this->resolveRequest($data['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        $usesFactoring = $request->boolean('uses_factoring_company');
+
+        $attributes = [
+            'uses_factoring_company' => $usesFactoring,
+            'factoring_company_name' => $usesFactoring ? ($data['factoring_company_name'] ?? null) : null,
+            'factoring_answered_at' => now(),
+        ];
+
+        if ($usesFactoring) {
+            $file = $request->file('document');
+
+            $stored = $this->storePrivateFile(
+                $file,
+                'carrier-factoring/'.$connectRequest->company_id,
+                $connectRequest->uuid
+            );
+
+            if (! $stored) {
+                return $this->error('Could not save the factoring document. Please try again.', null, 500);
+            }
+
+            $attributes['factoring_document_disk'] = $stored['disk'];
+            $attributes['factoring_document_path'] = $stored['path'];
+            $attributes['factoring_document_name'] = $file->getClientOriginalName();
+        } else {
+            // Switching back to no clears a document uploaded on an earlier pass,
+            // otherwise the broker would still see a notice of assignment for a
+            // carrier who has since said they do not factor.
+            $this->deletePrivateFile(
+                $connectRequest->factoring_document_disk,
+                $connectRequest->factoring_document_path
+            );
+
+            $attributes['factoring_document_disk'] = null;
+            $attributes['factoring_document_path'] = null;
+            $attributes['factoring_document_name'] = null;
+        }
+
+        /*
+        | A carrier who factors is paid by their factoring company, not by the
+        | broker, so there is no payout account for the broker to collect — the
+        | bank step stops applying the moment they say yes. Recorded as a skip
+        | so the broker sees why it is not there, rather than as an unexplained
+        | gap.
+        |
+        | Switching back to "no" clears it again: the bank step applies once
+        | more, and a stale skip would let them past a step that now counts.
+        */
+        if ($usesFactoring) {
+            if ($connectRequest->stripe_verified_at === null) {
+                $attributes['bank_skipped_at'] = now();
+            }
+        } elseif ($connectRequest->bank_skipped_at !== null) {
+            $attributes['bank_skipped_at'] = null;
+        }
+
+        $connectRequest->forceFill($attributes)->save();
+
+        return $this->respondAfterStep($connectRequest, 'Factoring details saved.');
+    }
+
+    /**
+     * Records that the carrier chose to move past the government ID, ELD, or
+     * bank step without completing it.
+     *
+     * Only these three are skippable. The phone check, the questionnaire and
+     * the agreement are not: the first is what proves we are talking to the
+     * carrier, and the other two are the broker's own requirements.
+     */
+    public function skipStep(CarrierSkipStepRequest $request)
+    {
+        $data = $request->validated();
+
+        $connectRequest = $this->resolveRequest($data['token']);
+
+        if (! $connectRequest) {
+            return $this->error('This onboarding link is no longer valid.', null, 404);
+        }
+
+        // Skipping something already done would throw away a real verification.
+        if ($data['step'] === 'identity') {
+            if ($connectRequest->didit_status === 'Approved') {
+                return $this->respondWithRequest($connectRequest, 'Your ID is already verified.');
+            }
+
+            $connectRequest->forceFill(['identity_skipped_at' => now()])->save();
+
+            return $this->respondAfterStep($connectRequest, 'Government ID step skipped.');
+        }
+
+        if ($data['step'] === 'eld') {
+            // Same reasoning as the ID check: a carrier who has already linked
+            // a provider should not be able to throw that away by pressing the
+            // skip link on a stale page.
+            if ($connectRequest->eld_connected_at !== null) {
+                return $this->respondWithRequest($connectRequest, 'Your ELD is already connected.');
+            }
+
+            $connectRequest->forceFill(['eld_skipped_at' => now()])->save();
+
+            return $this->respondAfterStep($connectRequest, 'ELD step skipped.');
+        }
+
+        if ($connectRequest->stripe_verified_at !== null) {
+            return $this->respondWithRequest($connectRequest, 'Your bank account is already connected.');
+        }
+
+        $connectRequest->forceFill(['bank_skipped_at' => now()])->save();
+
+        return $this->respondAfterStep($connectRequest, 'Bank account step skipped.');
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
-    // ELD / telematics — Terminal
+    // Step 4 — ELD / telematics (Terminal)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -1165,136 +1520,8 @@ class CarrierConnectController extends BaseController
         );
     }
 
-    /**
-     * Factoring, asked alongside bank verification.
-     *
-     * If the carrier factors its receivables the broker cannot pay the carrier
-     * directly, so the notice of assignment is mandatory on a yes.
-     */
-    public function saveFactoring(CarrierFactoringRequest $request)
-    {
-        $data = $request->validated();
-
-        $connectRequest = $this->resolveRequest($data['token']);
-
-        if (! $connectRequest) {
-            return $this->error('This onboarding link is no longer valid.', null, 404);
-        }
-
-        $usesFactoring = $request->boolean('uses_factoring_company');
-
-        $attributes = [
-            'uses_factoring_company' => $usesFactoring,
-            'factoring_company_name' => $usesFactoring ? ($data['factoring_company_name'] ?? null) : null,
-            'factoring_answered_at' => now(),
-        ];
-
-        if ($usesFactoring) {
-            $file = $request->file('document');
-
-            $stored = $this->storePrivateFile(
-                $file,
-                'carrier-factoring/'.$connectRequest->company_id,
-                $connectRequest->uuid
-            );
-
-            if (! $stored) {
-                return $this->error('Could not save the factoring document. Please try again.', null, 500);
-            }
-
-            $attributes['factoring_document_disk'] = $stored['disk'];
-            $attributes['factoring_document_path'] = $stored['path'];
-            $attributes['factoring_document_name'] = $file->getClientOriginalName();
-        } else {
-            // Switching back to no clears a document uploaded on an earlier pass,
-            // otherwise the broker would still see a notice of assignment for a
-            // carrier who has since said they do not factor.
-            $this->deletePrivateFile(
-                $connectRequest->factoring_document_disk,
-                $connectRequest->factoring_document_path
-            );
-
-            $attributes['factoring_document_disk'] = null;
-            $attributes['factoring_document_path'] = null;
-            $attributes['factoring_document_name'] = null;
-        }
-
-        /*
-        | A carrier who factors is paid by their factoring company, not by the
-        | broker, so there is no payout account for the broker to collect — the
-        | bank step stops applying the moment they say yes. Recorded as a skip
-        | so the broker sees why it is not there, rather than as an unexplained
-        | gap.
-        |
-        | Switching back to "no" clears it again: the bank step applies once
-        | more, and a stale skip would let them past a step that now counts.
-        */
-        if ($usesFactoring) {
-            if ($connectRequest->stripe_verified_at === null) {
-                $attributes['bank_skipped_at'] = now();
-            }
-        } elseif ($connectRequest->bank_skipped_at !== null) {
-            $attributes['bank_skipped_at'] = null;
-        }
-
-        $connectRequest->forceFill($attributes)->save();
-
-        return $this->respondAfterStep($connectRequest, 'Factoring details saved.');
-    }
-
-    /**
-     * Records that the carrier chose to move past the government ID or bank
-     * step without completing it.
-     *
-     * Only these two are skippable. The phone check, the questionnaire and the
-     * agreement are not: the first is what proves we are talking to the
-     * carrier, and the other two are the broker's own requirements.
-     */
-    public function skipStep(CarrierSkipStepRequest $request)
-    {
-        $data = $request->validated();
-
-        $connectRequest = $this->resolveRequest($data['token']);
-
-        if (! $connectRequest) {
-            return $this->error('This onboarding link is no longer valid.', null, 404);
-        }
-
-        // Skipping something already done would throw away a real verification.
-        if ($data['step'] === 'identity') {
-            if ($connectRequest->didit_status === 'Approved') {
-                return $this->respondWithRequest($connectRequest, 'Your ID is already verified.');
-            }
-
-            $connectRequest->forceFill(['identity_skipped_at' => now()])->save();
-
-            return $this->respondAfterStep($connectRequest, 'Government ID step skipped.');
-        }
-
-        if ($data['step'] === 'eld') {
-            // Same reasoning as the ID check: a carrier who has already linked
-            // a provider should not be able to throw that away by pressing the
-            // skip link on a stale page.
-            if ($connectRequest->eld_connected_at !== null) {
-                return $this->respondWithRequest($connectRequest, 'Your ELD is already connected.');
-            }
-
-            $connectRequest->forceFill(['eld_skipped_at' => now()])->save();
-
-            return $this->respondAfterStep($connectRequest, 'ELD step skipped.');
-        }
-
-        if ($connectRequest->stripe_verified_at !== null) {
-            return $this->respondWithRequest($connectRequest, 'Your bank account is already connected.');
-        }
-
-        $connectRequest->forceFill(['bank_skipped_at' => now()])->save();
-
-        return $this->respondAfterStep($connectRequest, 'Bank account step skipped.');
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 4 — the broker's own questions
+    // Step 5 — the broker's own questions
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -1452,7 +1679,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 5 — documents (W-9, COI)
+    // Step 6 — documents (W-9, COI)
     // ─────────────────────────────────────────────────────────────────────────
 
     public function uploadDocument(CarrierDocumentRequest $request)
@@ -1544,7 +1771,7 @@ class CarrierConnectController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Step 6 — e-sign
+    // Step 7 — e-sign
     // ─────────────────────────────────────────────────────────────────────────
 
     public function esign(CarrierEsignRequest $request)
@@ -1749,6 +1976,8 @@ class CarrierConnectController extends BaseController
     ) {
         return $this->success(
             new CarrierConnectRequestResource(
+                // eldConnection comes along so the ELD tile can report the
+                // provider and the import's progress without a second call.
                 $connectRequest->load(['agreementDocument', 'documents', 'eldConnection'])
             ),
             $message,
@@ -1876,9 +2105,9 @@ class CarrierConnectController extends BaseController
     }
 
     /**
-     * Uses the company's own carrier_connect email template when it has one,
-     * and falls back to the packaged mailable otherwise. A delivery failure
-     * must not lose the request that was just created, so it only logs.
+     * The mailable uses the company's own carrier_connect email template when
+     * it has one, and the stock design otherwise. A delivery failure must not
+     * lose the request that was just created, so it only logs.
      */
     private function sendInvitationMail(CarrierConnectRequest $connectRequest, ?User $user): void
     {
@@ -1894,33 +2123,8 @@ class CarrierConnectController extends BaseController
             ?: $connectRequest->company->company_name;
 
         try {
-            $template = EmailTemplate::forCompany($connectRequest->company_id)
-                ->active()
-                ->where('type', 'carrier_connect')
-                ->orderByDesc('is_default')
-                ->first();
-
-            if ($template) {
-                $rendered = $template->render([
-                    'carrier_name' => $connectRequest->carrier_legal_name,
-                    'dot_number' => $connectRequest->carrier_dot_number,
-                    'company_name' => $connectRequest->company->company_name,
-                    'sender_name' => $brokerName,
-                    'connect_url' => $connectUrl,
-                    'expires_at' => $connectRequest->sent_on
-                        ->copy()
-                        ->addHours((int) config('carrier_connect.request_lifetime_hours', 72))
-                        ->format('m/d/y h:i A'),
-                ]);
-
-                Mail::html($rendered['body_html'], function ($message) use ($connectRequest, $rendered) {
-                    $message->to($connectRequest->carrier_email)
-                        ->subject($rendered['subject']);
-                });
-            } else {
-                Mail::to($connectRequest->carrier_email)
-                    ->send(new CarrierConnectInvitationMail($connectRequest, $connectUrl, $brokerName));
-            }
+            Mail::to($connectRequest->carrier_email)
+                ->send(new CarrierConnectInvitationMail($connectRequest, $connectUrl, $brokerName));
         } catch (\Throwable $e) {
             Log::error('Carrier connect invitation email failed', [
                 'connect_request' => $connectRequest->uuid,
@@ -2084,7 +2288,7 @@ class CarrierConnectController extends BaseController
 
             // A finished onboarding is the most complete source; failing that,
             // the most recently worked on.
-            ->orderByRaw("CASE WHEN status = ? THEN 0 ELSE 1 END", [CarrierConnectRequest::STATUS_COMPLETED])
+            ->orderByRaw('CASE WHEN status = ? THEN 0 ELSE 1 END', [CarrierConnectRequest::STATUS_COMPLETED])
             ->orderByDesc('updated_at')
             ->with('documents')
             ->first();
