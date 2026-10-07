@@ -179,6 +179,7 @@ final class DtScore
         $result = $score->calculate($carrier, $inspectionStats, $crashStats);
 
         $score->remember((string) $carrier->dot_number, $result);
+        $score->recordEvaluation((string) $carrier->dot_number, $result);
 
         return $result;
     }
@@ -409,6 +410,8 @@ final class DtScore
                 $results[$dot] = $entry;
             }
 
+            $this->recordEvaluation($dot, $result);
+
         }
 
         return $results;
@@ -486,6 +489,64 @@ final class DtScore
         Cache::put($this->cacheKey($dot), $entry, now()->addHours((int) config('dtscore.cache_hours')));
 
         return $entry;
+    }
+
+    /**
+     * Keep the receipt for a freshly calculated score in
+     * trust_score_evaluations, once per distinct result: the same score,
+     * status, fired rules and cap under the same config write nothing new.
+     *
+     * Never allowed to cost a broker their score, so a failure here (the
+     * table not migrated yet, a lost connection) is logged and dropped.
+     */
+    public function recordEvaluation(string $dot, array $result): void
+    {
+        if (! isset($result['overall_score'])) {
+            return;
+        }
+
+        $this->cacheKey($dot); // sets the config fingerprint
+
+        try {
+            DB::table('trust_score_evaluations')->insertOrIgnore([
+                'dot_number' => $dot,
+                'model_version' => (string) config('dtscore.model_version'),
+                'config_fingerprint' => $this->configFingerprint,
+                'score' => (int) $result['overall_score'],
+                'status' => (string) ($result['status'] ?? ''),
+                'band' => (string) ($result['band']['key'] ?? ''),
+                'needs_manual_review' => (bool) ($result['needs_manual_review'] ?? false),
+                'payload' => json_encode($result),
+                'payload_fingerprint' => sha1(json_encode([
+                    $this->configFingerprint,
+                    $result['overall_score'],
+                    $result['status'] ?? null,
+                    array_column($result['v3']['rules_fired'] ?? [], 'id'),
+                    $result['v3']['score_cap_applied'] ?? null,
+                ])),
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("[DtScore] could not record evaluation for DOT {$dot}: ".$e->getMessage());
+        }
+    }
+
+    /** The newest evaluation id for a DOT, for stamping a booking. */
+    public static function latestEvaluationId(?string $dot): ?int
+    {
+        $dot = trim((string) $dot);
+
+        if ($dot === '') {
+            return null;
+        }
+
+        try {
+            $id = DB::table('trust_score_evaluations')->where('dot_number', $dot)->max('id');
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $id === null ? null : (int) $id;
     }
 
     /**

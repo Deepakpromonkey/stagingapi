@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Shipment;
+use App\Services\DtScore\DtScore;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -65,6 +66,11 @@ class ShipmentService
                 'carrier_dot' => isset($data['carrier_dot'])
                     ? strtoupper(trim($data['carrier_dot']))
                     : $eld['carrier_dot'],
+
+                // The DT score the broker booked on, frozen at booking time.
+                'trust_score_evaluation_id' => DtScore::latestEvaluationId(
+                    isset($data['carrier_dot']) ? trim($data['carrier_dot']) : $eld['carrier_dot']
+                ),
 
                 'carrier_phone' => $data['carrier_phone'] ?? null,
 
