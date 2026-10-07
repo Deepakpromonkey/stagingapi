@@ -88,6 +88,8 @@ class CarrierConnectRequest extends Model
         'signature_x_pct',
         'signature_y_pct',
         'signed_at',
+        'signed_agreement_disk',
+        'signed_agreement_path',
         'portal_account_provisioned_at',
         'portal_account_email',
         'portal_account_error',
