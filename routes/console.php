@@ -169,3 +169,27 @@ Schedule::command('eld:poll-shipments')
 Schedule::command('activitylog:clean --force')
     ->dailyAt('02:00')
     ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
+| Operational alerts
+|--------------------------------------------------------------------------
+|
+| See config/ops.php. Production checks its own services; the watcher (the
+| staging box) checks the production sites from outside, which is the only
+| way an outage of the whole production box gets reported. Not onOneServer:
+| each box has its own job, and they share no cache to agree through.
+*/
+if (config('ops.role') === 'production') {
+    Schedule::command('ops:check-services')
+        ->everyMinute()
+        ->withoutOverlapping(5)
+        ->runInBackground();
+}
+
+if (config('ops.role') === 'watcher') {
+    Schedule::command('ops:check-uptime')
+        ->everyMinute()
+        ->withoutOverlapping(5)
+        ->runInBackground();
+}

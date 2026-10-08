@@ -2,6 +2,7 @@
 
 use App\Exceptions\BillingException;
 use App\Exceptions\DrayageException;
+use App\Services\Ops\OpsAlert;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -53,6 +54,24 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+
+        /*
+        | Every reported exception - the ones that become a 500, not 404s,
+        | validation or sign-in failures, which Laravel does not report - goes
+        | to the Teams channel and the alert mailboxes. Sent once the response
+        | has gone out, so a slow webhook or mail server never holds up the
+        | broker. See config/ops.php; nothing is sent unless OPS_ROLE is set.
+        */
+        $exceptions->report(function (Throwable $e) {
+            if (! OpsAlert::enabled()) {
+                return;
+            }
+
+            $request = app()->bound('request') ? request() : null;
+            $send = fn () => app(OpsAlert::class)->exception($e, $request);
+
+            app()->runningInConsole() ? $send() : app()->terminating($send);
+        });
 
         // Billing / subscription problems -> consistent API envelope, with the
         // status the failure deserves (Stripe unreachable is not a 400).
