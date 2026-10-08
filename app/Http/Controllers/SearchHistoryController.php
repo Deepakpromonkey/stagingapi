@@ -11,9 +11,13 @@ class SearchHistoryController extends Controller
     public function index(Request $request)
     {
         // Company-wide history: anyone on the team sees what the company
-        // looked at, not just their own views.
+        // looked at, not just their own views. A repeat view only touches
+        // updated_at (updateOrCreate on company + carrier), so order on that:
+        // latest() orders on created_at, which left a re-searched carrier
+        // buried under ten newer first-time views and missing from the list.
         $history = SearchHistory::where('company_id', $request->user()->company_id)
-            ->latest()
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
             ->take(10)
             ->get();
 
@@ -104,7 +108,13 @@ class SearchHistoryController extends Controller
                     SELECT 1 FROM insurance_filings f WHERE f.dot_number = c.dot_number
                 ) AS insurance_active
             FROM carriers c
-            LEFT JOIN carrier_authorities ca ON ca.dot_number = c.dot_number
+            -- One authority row per carrier, the latest, as the carrier search
+            -- picks it. A plain join returned a row per docket (~24k DOTs have
+            -- several) and keyBy kept whichever came last, so the MC number and
+            -- authority status shown could differ from the search result.
+            LEFT JOIN carrier_authorities ca ON ca.id = (
+                SELECT MAX(ca2.id) FROM carrier_authorities ca2 WHERE ca2.dot_number = c.dot_number
+            )
             WHERE c.id IN ({$placeholders})
         ", $carrierIds))->keyBy('id');
     }
