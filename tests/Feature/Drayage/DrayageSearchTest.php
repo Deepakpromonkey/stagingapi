@@ -285,7 +285,13 @@ class DrayageSearchTest extends DrayageTestCase
     {
         $data = $this->getJson('/api/v1/drayage/fields')->assertOk()->json('data');
 
-        $this->assertCount(121, $data['fields']);
+        $this->assertCount(119, $data['fields']);
+        $this->assertNull(collect($data['fields'])->firstWhere('key', 'profile_url'));
+        $this->assertNull(collect($data['fields'])->firstWhere('key', 'directory_url'));
+        $checked = collect($data['fields'])->where('default_visible', true)->pluck('key')->sort()->values()->all();
+        $expected = ['company_name', 'metros', 'hq_city', 'hq_state', 'scac', 'mc', 'usdot', 'cargo_insurance', 'hazmat', 'drivers_approx', 'twic', 'private_chassis', 'phone', 'pricing_email', 'dispatch_email', 'last_updated'];
+        sort($expected);
+        $this->assertSame($expected, $checked);
         $hazmat = collect($data['fields'])->firstWhere('key', 'hazmat');
         $this->assertSame(['tri_state'], $hazmat['filters']);
         $this->assertSame('Special cargo & services', $hazmat['group_label']);
