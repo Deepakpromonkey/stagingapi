@@ -99,7 +99,7 @@ class CsvSourceParser implements SourceParser
             $label = trim((string) $label);
             $normalized = DrayageFields::normalizeHeader($label);
 
-            if ($normalized === '') {
+            if ($normalized === '' || in_array($normalized, DrayageFields::DROPPED, true)) {
                 $columns[$i] = ['skip', ''];
 
                 continue;

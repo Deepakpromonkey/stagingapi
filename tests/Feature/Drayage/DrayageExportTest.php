@@ -36,7 +36,7 @@ class DrayageExportTest extends DrayageTestCase
 
         $csv = $this->exportCsv(['q' => 'genesis']);
 
-        $this->assertCount(121, $csv['header']);
+        $this->assertCount(119, $csv['header']);
         $this->assertSame('Company', $csv['header'][0]);
         $this->assertContains('20′ containers', $csv['header']);
         $this->assertCount(1, $csv['rows']);

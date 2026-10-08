@@ -302,7 +302,7 @@ class DrayageImportTest extends DrayageTestCase
 
         $this->assertSame([
             'meta', 'identity', 'location', 'coverage', 'authority', 'insurance', 'compliance',
-            'drayage', 'special_cargo', 'fleet', 'equipment', 'contact', 'profile_dates', 'links', 'extra',
+            'drayage', 'special_cargo', 'fleet', 'equipment', 'contact', 'profile_dates', 'extra',
         ], array_keys($document));
 
         $this->assertSame('LoadMatch / Drayage.com directory (imported)', $document['meta']['source']);
