@@ -461,7 +461,10 @@ class CarrierController extends Controller
             case 'dot_number':
             default:
 
-                $query->where('dot_number', $search);
+                // Brokers paste 'DOT 1234567', 'USDOT#1234567' or '1,234,567'
+                // (the input's own placeholder reads 'DOT  1234567'); an exact
+                // match on that found nothing. Compare on the digits.
+                $query->where('dot_number', preg_replace('/\D+/', '', $search) ?: $search);
         }
 
         return $query;
