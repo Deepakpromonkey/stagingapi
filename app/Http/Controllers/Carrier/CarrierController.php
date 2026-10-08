@@ -30,6 +30,7 @@ use App\Support\Fmcsa;
 use App\Support\Vin;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -440,9 +441,16 @@ class CarrierController extends Controller
 
                 break;
 
+            case 'legal_name_prefix':
+
+                // Answered from idx_carriers_legal_name: a few milliseconds
+                // however rare the name.
+                $query->where('legal_name', 'LIKE', $this->escapeLike($search).'%');
+                break;
+
             case 'legal_name':
 
-                $query->where('legal_name', 'LIKE', "%{$search}%");
+                $query->where('legal_name', 'LIKE', '%'.$this->escapeLike($search).'%');
                 break;
 
             case 'phone':
@@ -760,6 +768,15 @@ class CarrierController extends Controller
         ];
     }
 
+    /** How long a company search may scan for the text inside names. */
+    private const NAME_CONTAINS_TIMEOUT_MS = 1500;
+
+    /** The text matched literally: a typed % or _ is not a wildcard. */
+    private function escapeLike(string $value): string
+    {
+        return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $value);
+    }
+
     public function search(Request $request)
     {
         $search = trim((string) $request->query('query', ''));
@@ -769,13 +786,52 @@ class CarrierController extends Controller
         $perPage = max(1, min(100, (int) $request->query('per_page', 10)));
         $page = max(1, (int) $request->query('page', 1));
 
-        [$rows, $hasMore, $total] = $this->runCarrierSearch(
-            fn (EloquentBuilder $query) => $this->applyCarrierSearchFilter($query, $search, $searchedBy),
-            $page,
-            $perPage,
-            $sortDir,
-            "search|{$searchedBy}|".mb_strtolower($search),
-        );
+        /*
+        | Company search matches the start of the legal name. `LIKE '%term%'`
+        | cannot use the index, so a specific name - the usual search - scanned
+        | all 4.5M carriers (~3.5s). Only when nothing starts with the text does
+        | it look inside names, and that scan is capped so it cannot hang.
+        */
+        $containsCapped = false;
+
+        if ($searchedBy === 'legal_name' && $search !== '') {
+            $startsWith = Carrier::query()
+                ->where('legal_name', 'LIKE', $this->escapeLike($search).'%')
+                ->exists();
+
+            if ($startsWith) {
+                $searchedBy = 'legal_name_prefix';
+            } else {
+                $containsCapped = true;
+            }
+        }
+
+        $connection = Carrier::query()->getConnection();
+
+        try {
+            if ($containsCapped) {
+                $connection->statement('SET SESSION max_execution_time = '.self::NAME_CONTAINS_TIMEOUT_MS);
+            }
+
+            [$rows, $hasMore, $total] = $this->runCarrierSearch(
+                fn (EloquentBuilder $query) => $this->applyCarrierSearchFilter($query, $search, $searchedBy),
+                $page,
+                $perPage,
+                $sortDir,
+                "search|{$searchedBy}|".mb_strtolower($search),
+            );
+        } catch (QueryException $e) {
+            // 3024: the capped scan ran out of time - nothing close enough.
+            if (! $containsCapped || (int) ($e->errorInfo[1] ?? 0) !== 3024) {
+                throw $e;
+            }
+
+            [$rows, $hasMore, $total] = [collect(), false, 0];
+        } finally {
+            if ($containsCapped) {
+                $connection->statement('SET SESSION max_execution_time = 0');
+            }
+        }
 
         $scores = $this->searchRowScores($rows);
 
