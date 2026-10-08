@@ -55,6 +55,10 @@ class DrayageCarrierController extends BaseController
         $record = DrayageNormalizer::flatten($document);
         $dot = $record['usdot'] ?? null;
 
+        // Datasets imported before the profile / directory links were dropped
+        // still carry them in a `links` section.
+        unset($document['links']);
+
         $data = ['carrier' => $document];
 
         if (in_array('onboarding', $includes, true) || in_array('fmcsa', $includes, true)) {

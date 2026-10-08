@@ -36,8 +36,15 @@ class DrayageFields
     public const SECTIONS = [
         'meta', 'identity', 'location', 'coverage', 'authority', 'insurance',
         'compliance', 'drayage', 'special_cargo', 'fleet', 'equipment',
-        'contact', 'profile_dates', 'links', 'extra',
+        'contact', 'profile_dates', 'extra',
     ];
+
+    /**
+     * Source columns that are deliberately not kept: the LoadMatch profile and
+     * directory page links. The parsers drop them rather than filing them
+     * under `extra`, so they appear nowhere in the API or the export.
+     */
+    public const DROPPED = ['profile url', 'directory url', 'profile_url', 'directory_url'];
 
     public const RECORD_TYPES = [
         'full' => 'Full profile',
@@ -182,8 +189,6 @@ class DrayageFields
         'Profile last updated' => ['last_updated', 'date', 'contact', 'profile_dates'],
         'Profile first added' => ['first_added', 'date', 'contact', 'profile_dates'],
         'LoadMatch ID' => ['loadmatch_id', 'string', 'contact', 'meta'],
-        'Profile URL' => ['profile_url', 'string', 'contact', 'links'],
-        'Directory URL' => ['directory_url', 'string', 'contact', 'links'],
     ];
 
     /** List filters: `{key}[]=value`, with `{key}_mode=any|all`. */
@@ -209,12 +214,16 @@ class DrayageFields
     /** Sortable beyond the numbers and dates. */
     private const SORTABLE_TEXT = ['company_name', 'hq_city', 'hq_state', 'record_type', 'scac'];
 
-    /** The list endpoint's default `fields`. */
+    /**
+     * The list endpoint's default `fields`, and the columns GET /drayage/fields
+     * marks default_visible (checked) - carrier_key aside, which every row
+     * carries so the frontend can open the carrier.
+     */
     public const CARD_FIELDS = [
-        'carrier_key', 'company_name', 'record_type', 'hq_city', 'hq_state',
-        'metros', 'scac', 'mc', 'usdot', 'cargo_insurance', 'drivers_approx',
-        'hazmat', 'reefer_drayage', 'twic', 'private_chassis', 'phone',
-        'last_updated', 'completeness',
+        'carrier_key', 'company_name', 'metros', 'hq_city', 'hq_state',
+        'scac', 'mc', 'usdot', 'cargo_insurance', 'hazmat', 'drivers_approx',
+        'twic', 'private_chassis', 'phone', 'pricing_email', 'dispatch_email',
+        'last_updated',
     ];
 
     /** Counted by the completeness score, in the brief's order. */
