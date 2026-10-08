@@ -88,7 +88,7 @@ class JsonSourceParser implements SourceParser
 
         // A document nested by section is flattened one level first.
         foreach ($record as $name => $value) {
-            if (in_array($name, DrayageFields::SECTIONS, true) && is_array($value) && ! array_is_list($value)) {
+            if ((in_array($name, DrayageFields::SECTIONS, true) || $name === 'links') && is_array($value) && ! array_is_list($value)) {
                 unset($record[$name]);
 
                 if ($name === 'extra') {
@@ -104,7 +104,12 @@ class JsonSourceParser implements SourceParser
         }
 
         foreach ($record as $name => $value) {
-            $key = $map[DrayageFields::normalizeHeader((string) $name)] ?? null;
+            $normalized = DrayageFields::normalizeHeader((string) $name);
+            $key = $map[$normalized] ?? null;
+
+            if (in_array($normalized, DrayageFields::DROPPED, true)) {
+                continue;
+            }
 
             if ($key !== null) {
                 $values[$key] = $value;
