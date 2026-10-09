@@ -2168,7 +2168,26 @@ class CarrierController extends Controller
 
     public function show(string $dot)
     {
-        $result = $this->strengthsWeaknesses($dot);
+        /*
+        | Kept per carrier for 6 hours - the same window as its DT score
+        | (carrier_dt_score:{dot}) and the network-graph counts.
+        |
+        | Building this is ~20 queries against the carrier database, several
+        | of them cross-carrier lookups over the 4.48M-row census (shared
+        | phone / email / address / DUNS / VINs). The profile page asks for
+        | it twice per visit (once per factor card) and the Chrome extension
+        | on every hover, and each of those used to pay the whole cost again.
+        |
+        | v1 in the key so a change to the labels in META can be rolled out
+        | by bumping it, rather than waiting six hours for old entries to go.
+        | A carrier that isn't found is not kept (remember() treats null as
+        | a miss), and a failure throws before anything is stored.
+        */
+        $result = Cache::remember(
+            'carrier_risk:v1:'.$dot,
+            now()->addHours(6),
+            fn () => $this->strengthsWeaknesses($dot),
+        );
 
         if ($result === null) {
             return response()->json([
