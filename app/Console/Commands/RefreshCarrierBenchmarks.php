@@ -56,7 +56,7 @@ class RefreshCarrierBenchmarks extends Command
 
         Cache::store(config('cache.durable_store'))->forever(CarrierBenchmarks::CACHE_KEY, $values + CarrierBenchmarks::DEFAULTS);
 
-        $this->components->task('sms percentile cut-points', function () {
+        $this->components->task('sms peer-group cut-points', function () {
             $cuts = $this->smsCuts();
 
             if ($cuts === null) {
@@ -78,45 +78,64 @@ class RefreshCarrierBenchmarks extends Command
     }
 
     /**
-     * The 50th / 75th / 90th cut-point of each BASIC measure, in one pass.
+     * The 50/65/75/80/90th cut-points of each BASIC measure inside each
+     * FMCSA safety-event peer group (CarrierBenchmarks::SMS_GROUPS), among
+     * carriers with a measure above zero and at least the group floor of
+     * relevant events. One window query per BASIC.
      *
-     * @return array<string, array<int, float>>|null
+     * A group the population leaves empty keeps the shipped snapshot.
+     *
+     * @return array{cuts: array, meta: array}|null
      */
     private function smsCuts(): ?array
     {
-        $cases = [];
-        $windows = [];
-
-        foreach (CarrierBenchmarks::SMS_BASICS as $i => $basic) {
-            $windows[] = "{$basic}_measure AS m{$i}";
-            $windows[] = "PERCENT_RANK() OVER (ORDER BY {$basic}_measure) AS r{$i}";
-
-            foreach ([50, 75, 90] as $p) {
-                $cases[] = "MAX(CASE WHEN r{$i} <= ".($p / 100)." THEN m{$i} END) AS p{$p}_{$i}";
-            }
-        }
-
-        try {
-            $row = DB::connection('external_db')->selectOne(
-                'SELECT '.implode(', ', $cases).
-                ' FROM (SELECT '.implode(', ', $windows).
-                ' FROM sms_measures WHERE insp_total > 0) t'
-            );
-        } catch (\Throwable $e) {
-            $this->components->warn("sms cuts: {$e->getMessage()}");
-
-            return null;
-        }
-
         $cuts = [];
+        $meta = ['generated_at' => now()->toIso8601String(), 'groups_n' => []];
 
-        foreach (CarrierBenchmarks::SMS_BASICS as $i => $basic) {
-            foreach ([50, 75, 90] as $p) {
-                $cuts[$basic][$p] = (float) ($row->{"p{$p}_{$i}"} ?? CarrierBenchmarks::SMS_DEFAULTS[$basic][$p]);
+        foreach (CarrierBenchmarks::SMS_GROUPS as $basic => $spec) {
+
+            $case = 'CASE';
+            foreach ($spec['bounds'] as $i => $edge) {
+                $case .= " WHEN {$spec['count']} <= {$edge} THEN ".($i + 1);
             }
+            $case .= ' ELSE '.(count($spec['bounds']) + 1).' END';
+
+            $pcts = 'COUNT(*) n';
+            foreach (CarrierBenchmarks::SMS_PERCENTILES as $p) {
+                $pcts .= ', MAX(CASE WHEN r <= '.($p / 100)." THEN m END) p{$p}";
+            }
+
+            try {
+                $rows = DB::connection('external_db')->select(
+                    "SELECT grp, {$pcts}
+                     FROM (SELECT {$basic}_measure m, {$case} grp,
+                                  PERCENT_RANK() OVER (PARTITION BY {$case}
+                                                       ORDER BY {$basic}_measure) r
+                           FROM sms_measures
+                           WHERE {$basic}_measure > 0 AND {$spec['count']} >= {$spec['min']}) t
+                     GROUP BY grp"
+                );
+            } catch (\Throwable $e) {
+                $this->components->warn("sms cuts ({$basic}): {$e->getMessage()}");
+
+                return null;
+            }
+
+            foreach ($rows as $row) {
+                foreach (CarrierBenchmarks::SMS_PERCENTILES as $p) {
+                    $cuts[$basic][(int) $row->grp][$p] = (float) ($row->{"p{$p}"} ?? 0);
+                }
+                $meta['groups_n'][$basic][(int) $row->grp] = (int) $row->n;
+            }
+
+            foreach (array_keys(CarrierBenchmarks::SMS_DEFAULTS[$basic]) as $grp) {
+                $cuts[$basic][$grp] ??= CarrierBenchmarks::SMS_DEFAULTS[$basic][$grp];
+            }
+
+            ksort($cuts[$basic]);
         }
 
-        return $cuts;
+        return ['cuts' => $cuts, 'meta' => $meta];
     }
 
     /**

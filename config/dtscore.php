@@ -307,8 +307,13 @@ return [
             'tier' => 'low',
             'patterns' => [
                 'UPS STORE', 'REGUS', 'WEWORK', 'PMB ', 'POSTAL ANNEX',
-                'MAIL BOXES ETC', 'MAILBOX', 'REGISTERED AGENT', 'VIRTUAL OFFICE', 'SUITE #',
+                'MAIL BOXES ETC', 'MAILBOX', 'REGISTERED AGENT', 'VIRTUAL OFFICE',
             ],
+            // Checked against the physical street only. A PO Box is an ordinary
+            // mailing address (411,467 of 4.5M carriers on 2026-10-07), but no
+            // truck is based at one: 15,841 carriers give one as their physical
+            // address. 'SUITE #' was dropped: 2,341 hits, mostly strip malls.
+            'physical_only_patterns' => ['P.O. BOX', 'PO BOX'],
         ],
         'ID-03' => [                          // free-provider email
             'tier' => 'low',

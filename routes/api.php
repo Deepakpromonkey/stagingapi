@@ -519,8 +519,19 @@ Route::prefix('v1')->group(function () {
             Route::get('/carrier/{dot}/safety-history', [CarrierController::class, 'safetyHistory'])
                 ->where('dot', '[0-9]+');
 
+            // When and why this carrier's DT score changed (trust_score_evaluations).
+            Route::get('/carrier/{dot}/score-history', [\App\Http\Controllers\Api\V1\CarrierScoreHistoryController::class, 'show'])
+                ->where('dot', '[0-9]+');
+
             // Check DOT compliance (PHMSA, CARB, SmartWay)
             Route::post('/carrier-compliance/check', [\App\Http\Controllers\Api\V1\CarrierComplianceController::class, 'checkCompliance']);
+
+            // Chrome extension hover card - see ExtensionCarrierController.
+            // 60/min is generous for hovering by hand and still stops a
+            // script from walking the census through one account.
+            Route::get('/extension/carrier/{dot}', [\App\Http\Controllers\Api\V1\Extension\ExtensionCarrierController::class, 'show'])
+                ->where('dot', '[0-9]{1,9}')
+                ->middleware('throttle:60,1');
         });
 
         /*

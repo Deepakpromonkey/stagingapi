@@ -136,6 +136,13 @@ namespace Illuminate\Support\Facades {
 class Cache
 {
     public static function remember($key, $ttl, $cb) { return $cb(); }
+
+    // CarrierBenchmarks reads its refreshed cuts from a durable store; the
+    // harness has none, so it falls back to the shipped snapshot.
+    public static function store($name = null): object
+    {
+        return new class { public function get($key, $default = null) { return $default; } };
+    }
 }
 
 }
@@ -194,6 +201,7 @@ class Rec
 namespace App\Http\Controllers\Carrier {
 
 require dirname(__DIR__, 2).'/app/Http/Controllers/Carrier/Concerns/DtTrustScoreV3.php';
+require dirname(__DIR__, 2).'/app/Support/CarrierBenchmarks.php';
 
 use App\Support\Fmcsa;
 
@@ -230,10 +238,24 @@ class FakeController
         });
     }
 
+    /*
+     * Grouped like the real cuts ([basic][group][percentile]). Every group
+     * gets the same simple lines so the older scenarios read as they always
+     * did: the 65th sits at 5 and the 80th at 10. Scenarios that need the
+     * measured snapshot set $GLOBALS['dt_sms_cuts'].
+     */
     private function smsPercentiles(): array
     {
+        if (isset($GLOBALS['dt_sms_cuts'])) {
+            return $GLOBALS['dt_sms_cuts'];
+        }
+
         $cuts = [];
-        foreach (self::SMS_BASICS as $b) { $cuts[$b] = [50 => 1.0, 75 => 5.0, 90 => 10.0]; }
+        foreach (self::SMS_BASICS as $b) {
+            foreach (range(1, 5) as $g) {
+                $cuts[$b][$g] = [50 => 1.0, 65 => 5.0, 75 => 5.0, 80 => 10.0, 90 => 10.0];
+            }
+        }
         return $cuts;
     }
 
@@ -417,14 +439,14 @@ check('bond gap with active broker -> INS-04 + AUTH-12, 83',
     json_encode([$r['overall_score'], $r['v3']['rules_fired']]));
 
 /* 10. Two BASICs at/over the cut -> Review (demoted from Fail in v3.2.1) */
-$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2, 'hos_driv_measure' => 5.5])]);
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2, 'hos_driv_measure' => 5.5, 'unsafe_driv_insp_w_viol' => 3])]);
 check('two BASICs over -> 52 Review, demoted, no knockout',
     $r['overall_score'] === 52 && $r['status'] === 'Review' && $r['knockout']['triggered'] === false
     && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'SMS-MULTI' && $x['tier'] === 'review'),
     json_encode([$r['overall_score'], $r['status'], $r['v3']['rules_fired']]));
 
 /* 11. One BASIC over -> Medium, still Acceptable */
-$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2])]);
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 6.2, 'unsafe_driv_insp_w_viol' => 3, 'veh_maint_insp_w_viol' => 0])]);
 check('one BASIC over -> Medium 250, ~89, Approved',
     $r['overall_score'] === 89 && $r['status'] === 'Approved' && $r['v3']['status'] === 'Acceptable',
     json_encode([$r['overall_score'], $r['v3']['risk_points'], $r['v3']['rules_fired']]));
@@ -597,14 +619,20 @@ $r = run($c, [
     'observedUnits' => 1,
     'vehicleOosPct' => 0.0, 'driverOosPct' => 0.0,
 ]);
-check('Warrior composite -> 1750 pts, 51, Review required',
-    $r['v3']['risk_points'] === 1750 && $r['overall_score'] === 51 && $r['v3']['band']['key'] === 'review_required' && in_array('dual_authority', $r['v3']['flags'], true),
+// Peer groups (v2 cuts): 3 driver inspections is under FMCSA's floor of 5,
+// so HOS is not ranked and SMS-HOS no longer adds 250 - the expected mover.
+check('Warrior composite -> 1500 pts, 52, Review required, HOS not ranked',
+    $r['v3']['risk_points'] === 1500 && $r['overall_score'] === 52 && $r['v3']['band']['key'] === 'review_required' && in_array('dual_authority', $r['v3']['flags'], true)
+    && in_array('hos_driv_peer_group', array_column($r['v3']['unknown_inputs'], 'field'), true),
     json_encode([$r['v3']['risk_points'], $r['overall_score'], $r['v3']['band']['key'], $r['v3']['rules_fired']]));
 
 
 /* 35. VR Transport LLP (DOT 3175931): 1 truck, 5 inspections, unsafe 7.82 /
    veh_maint 15 over national cuts, 50% vehicle OOS on 4 vehicle inspections.
-   Was 18/Disqualified; correct answer is Review with findings listed. */
+   Was 18/Disqualified, then 51/Review on the demotion. With peer groups:
+   2 Unsafe Driving inspections and 4 vehicle inspections are both under
+   FMCSA's floors, so neither BASIC has a percentile and neither flags -
+   exactly as FMCSA (and Highway) read it. */
 $vrCarrier = carrier([
     'nbr_power_unit' => 1,
     'authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(2900))]),
@@ -623,9 +651,11 @@ $r = run($c, [
     'vehicleOosPct' => 50.0, 'driverOosPct' => 0.0,
     'observedUnits' => 1,
 ]);
-check('VR Transport pattern -> 51 Review required, not Disqualified',
-    $r['overall_score'] === 51 && $r['v3']['band']['key'] === 'review_required' && $r['knockout']['triggered'] === false
-    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'SMS-MULTI' && $x['tier'] === 'review'),
+check('VR Transport pattern -> BASICs not ranked, no SMS flags, not Disqualified',
+    $r['overall_score'] === 89 && $r['knockout']['triggered'] === false
+    && ! collect($r['v3']['rules_fired'])->contains(fn ($x) => str_starts_with($x['id'], 'SMS-'))
+    && ($r['sms_basics']['unsafe_driv']['verdict'] ?? null) === 'not_ranked'
+    && ($r['sms_basics']['veh_maint']['verdict'] ?? null) === 'not_ranked',
     json_encode([$r['overall_score'], $r['v3']['risk_points'], $r['v3']['rules_fired']]));
 
 
@@ -791,6 +821,46 @@ check('why_this_score: authority-age row shows 300 days, score_cap names the 84 
 $r = run($c, ['carrier' => carrier(['authorityHistory' => \collect([histRow('GRANTED', 'GRANTED', d(400))])])]);
 check('why_this_score: no cap -> score_cap null', $r['why_this_score']['score_cap'] === null,
     json_encode($r['why_this_score']['score_cap']));
+
+/* ---- peer-grouped BASIC percentiles (v2 cuts, measured 2026-10-07) ---- */
+
+$GLOBALS['dt_sms_cuts'] = \App\Support\CarrierBenchmarks::SMS_DEFAULTS;
+
+/* 52. The crowd matters: the same Unsafe Driving measure 3.8 passes in
+   group 1 (cut 6.54) and fires in group 4 (cut 2.11). */
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 3.8, 'unsafe_driv_insp_w_viol' => 5])]);
+$small = $r;
+$r = run($c, ['sms' => sms(['unsafe_driv_measure' => 3.8, 'unsafe_driv_insp_w_viol' => 150, 'insp_total' => 300])]);
+check('peer groups: Unsafe 3.8 passes at 5 insp_w_viol (g1, 6.54), fires at 150 (g4, 2.11)',
+    ! collect($small['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'SMS-UNSAFE_DRIV')
+    && $small['sms_basics']['unsafe_driv']['peer_group'] === 1 && $small['sms_basics']['unsafe_driv']['verdict'] === 'clear'
+    && collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'SMS-UNSAFE_DRIV')
+    && $r['sms_basics']['unsafe_driv']['peer_group'] === 4 && $r['sms_basics']['unsafe_driv']['verdict'] === 'over'
+    && $r['sms_basics']['unsafe_driv']['cuts'][65] === 2.11,
+    json_encode([$small['sms_basics']['unsafe_driv'], $r['sms_basics']['unsafe_driv']]));
+
+/* 53. Drug & Alcohol is alive: measure 2.0 with 8 driver inspections fires
+   (group 1, cut 1.81). Under the flat cuts this rule could never fire. */
+$r = run($c, ['sms' => sms(['contr_subst_measure' => 2.0, 'driver_insp_total' => 8])]);
+check('peer groups: Drug & Alcohol 2.0 at 8 driver inspections fires (g1, 1.81)',
+    collect($r['v3']['rules_fired'])->contains(fn ($x) => $x['id'] === 'SMS-CONTR_SUBST')
+    && $r['sms_basics']['contr_subst']['peer_group'] === 1 && $r['sms_basics']['contr_subst']['verdict'] === 'over',
+    json_encode($r['sms_basics']['contr_subst']));
+
+/* 54. Payload contract: verdicts, receipt line, vintage. */
+$r = run($c, ['sms' => sms(['veh_maint_measure' => 9.0, 'vehicle_insp_total' => 8, 'hos_driv_measure' => 0])]);
+$vm = $r['sms_basics']['veh_maint'];
+$fired = run($c, ['sms' => sms(['hos_driv_measure' => 3.4, 'driver_insp_total' => 8])]);
+$line = array_values(array_filter($fired['v3']['rules_fired'], fn ($x) => $x['id'] === 'SMS-HOS_DRIV'))[0]['label'] ?? '';
+check('payload: veh_maint 9.00 elevated ≈73rd in g1 of 52,818; HOS clear at 0; receipt names group; vintage set',
+    $vm['verdict'] === 'elevated' && $vm['percentile_est'] === 73 && $vm['group_n'] === 52818
+    && $vm['peer_group_label'] === '5–10 vehicle inspections' && $vm['threshold_pct'] === 80
+    && $r['sms_basics']['hos_driv']['verdict'] === 'clear'
+    && str_contains($line, 'measure 3.40 vs 65th-percentile cut 2.00 · peer group 1 (5–10 driver inspections, 36,610 carriers ranked) · ≈')
+    && $r['benchmark_vintage'] === '2026-10-07',
+    json_encode([$vm, $line, $r['benchmark_vintage']]));
+
+unset($GLOBALS['dt_sms_cuts']);
 
 echo "\n{$pass} passed, {$fail} failed\n";
 exit($fail === 0 ? 0 : 1);

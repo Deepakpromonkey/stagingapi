@@ -610,7 +610,7 @@ class CarrierProfileService
         try {
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($addDate))) {
                 $year = substr($addDate, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $addDate = substr($addDate, 0, -2).$century.$year;
 
                 return (int) Carbon::createFromFormat('d-M-Y', strtoupper($addDate))->diffInYears(now());

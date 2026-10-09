@@ -1,3 +1,7 @@
+-- ANALYST SCRATCH ONLY. This file is NOT the engine and WILL drift from
+-- config/dtscore.php. Never wire it to any UI or API. The one calculator
+-- is App\Services\DtScore\DtScore.
+--
 -- DT score, calculated live from the carrier DB (the same model the app runs in PHP).
 -- Weights: safety 24, identity 20, insurance 18, authority 12, crash 10, inspection 8, operations 8.
 -- A knockout caps the carrier at 18 / grade F / Rejected.

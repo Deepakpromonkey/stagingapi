@@ -21,6 +21,7 @@ class Shipment extends Model
         'carrier_name',
         'carrier_mc',
         'carrier_dot',
+        'trust_score_evaluation_id',
         'carrier_phone',
         'carrier_extension',
         'tracking_method',
