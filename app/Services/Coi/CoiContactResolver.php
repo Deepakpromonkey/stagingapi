@@ -2,7 +2,6 @@
 
 namespace App\Services\Coi;
 
-use App\Models\Carriers\Carrier;
 use App\Models\CoiDocumentExtraction;
 
 /**
@@ -10,9 +9,9 @@ use App\Models\CoiDocumentExtraction;
  *
  * The address wanted is the agency's, not the carrier's: an ACORD 25 names the
  * producer — the broker of record who issued the certificate — and they are the
- * only party who can answer "what is it now". The carrier's own census address
- * is the fallback, and it is a poor one, so which of the two was used is
- * recorded on the request rather than left to be guessed later.
+ * only party who can answer "what is it now". The carrier's own FMCSA census
+ * address is deliberately not used: it reaches the carrier, not the agency.
+ * With no producer address the request is refused rather than misdirected.
  *
  * The extraction JSON is not a fixed shape. It is whatever the OCR made of a
  * scanned PDF, and the key names differ between certificates, so this walks the
@@ -20,6 +19,8 @@ use App\Models\CoiDocumentExtraction;
  */
 class CoiContactResolver
 {
+    public function __construct(private readonly CoiProducerEmailReader $documents) {}
+
     /**
      * Key fragments that mark the producer / agency side of a certificate.
      * Matched case-insensitively against the path a value was found at.
@@ -49,10 +50,12 @@ class CoiContactResolver
             return ['email' => $fromOcr, 'source' => 'ocr'];
         }
 
-        $fromCensus = $this->fromCarrierRecord($dotNumber);
+        // The OCR rarely keeps the E-MAIL line, so the certificate itself is
+        // read for it — every agency's address is different.
+        $fromDocument = $this->documents->read($dotNumber);
 
-        if ($fromCensus !== null) {
-            return ['email' => $fromCensus, 'source' => 'fmcsa'];
+        if ($fromDocument !== null && $this->isUsable($fromDocument)) {
+            return ['email' => $fromDocument, 'source' => 'coi_document'];
         }
 
         return null;
@@ -61,6 +64,9 @@ class CoiContactResolver
     /**
      * Newest certificate first — an agency that changed hands should be chased
      * at the address on the most recent document, not the first one filed.
+     *
+     * Only an address found under a producer / agency key counts. Any other
+     * address on a certificate may be the insured's or the holder's.
      */
     private function fromExtractions(int|string $dotNumber): ?string
     {
@@ -69,31 +75,15 @@ class CoiContactResolver
             ->limit(5)
             ->get();
 
-        $fallback = null;
-
         foreach ($extractions as $extraction) {
-            $candidates = $this->collectEmails($extraction->extracted_json ?? []);
-
-            foreach ($candidates as $candidate) {
+            foreach ($this->collectEmails($extraction->extracted_json ?? []) as $candidate) {
                 if ($candidate['is_producer']) {
                     return $candidate['email'];
                 }
-
-                // Any other address on the certificate is better than nothing,
-                // but only once every producer field has been ruled out —
-                // across every extraction, not just this one.
-                $fallback ??= $candidate['email'];
             }
         }
 
-        return $fallback;
-    }
-
-    private function fromCarrierRecord(int|string $dotNumber): ?string
-    {
-        $email = Carrier::where('dot_number', $dotNumber)->value('email_address');
-
-        return $this->isUsable((string) $email) ? strtolower(trim((string) $email)) : null;
+        return null;
     }
 
     /**

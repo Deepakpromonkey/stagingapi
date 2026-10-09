@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Carrier\CarrierAccountService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Mockery;
@@ -130,6 +131,20 @@ class CarrierOnboardingCompletionTest extends TestCase
         return $pdf->Output('S');
     }
 
+    /** The compressed fixture as qpdf rewrites it, so FPDI can count its pages. */
+    private function rewrittenFixture(): string
+    {
+        $in = tempnam(sys_get_temp_dir(), 'fixture-');
+        $out = $in.'-classic.pdf';
+        file_put_contents($in, base64_decode(self::COMPRESSED_XREF_PDF));
+        exec('qpdf --object-streams=disable '.escapeshellarg($in).' '.escapeshellarg($out));
+        $bytes = file_get_contents($out);
+        @unlink($in);
+        @unlink($out);
+
+        return $bytes;
+    }
+
     private function signaturePng(): UploadedFile
     {
         return UploadedFile::fake()->image('signature.png', 400, 180);
@@ -173,8 +188,39 @@ class CarrierOnboardingCompletionTest extends TestCase
         $this->assertSame(2, $check->setSourceFile(StreamReader::createByString($signed)));
     }
 
+    public function test_a_pdf_with_compressed_cross_references_is_stamped_on_the_server(): void
+    {
+        if (! (new \Symfony\Component\Process\ExecutableFinder)->find('qpdf')) {
+            $this->markTestSkipped('qpdf is not installed.');
+        }
+
+        // What Word and most modern tools write, and what FPDI's free parser
+        // cannot read without qpdf rewriting it first.
+        $request = $this->connectRequest(base64_decode(self::COMPRESSED_XREF_PDF));
+
+        $this->sign($request)->assertOk();
+
+        $request->refresh();
+        $this->assertNotNull($request->signed_agreement_path);
+
+        $signed = Storage::disk($request->signed_agreement_disk)->get($request->signed_agreement_path);
+
+        $this->assertStringStartsWith('%PDF-', $signed);
+        // The signature image is embedded, and the pages are all still there.
+        $this->assertStringContainsString('/Subtype /Image', $signed);
+        $check = new Fpdi;
+        $original = new Fpdi;
+        $this->assertSame(
+            $original->setSourceFile(StreamReader::createByString($this->rewrittenFixture())),
+            $check->setSourceFile(StreamReader::createByString($signed))
+        );
+    }
+
     public function test_the_wizards_copy_is_kept_when_the_original_cannot_be_stamped(): void
     {
+        // qpdf missing or unable to read the file either.
+        Process::fake(['*' => Process::result(exitCode: 2)]);
+
         $request = $this->connectRequest(base64_decode(self::COMPRESSED_XREF_PDF));
 
         $browserCopy = UploadedFile::fake()->createWithContent('signed.pdf', '%PDF-1.7 stamped in the browser');

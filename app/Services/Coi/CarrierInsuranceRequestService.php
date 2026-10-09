@@ -81,7 +81,7 @@ class CarrierInsuranceRequestService
         if ($contact === null && ! $forced) {
             throw new RuntimeException(
                 'No insurance contact could be found for DOT '.$dotNumber
-                .'. The certificate on file does not carry an agency email address.'
+                .'. The certificate on file does not carry a producer email address.'
             );
         }
 

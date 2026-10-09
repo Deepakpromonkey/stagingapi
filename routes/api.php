@@ -204,6 +204,11 @@ Route::prefix('v1')->group(function () {
     | 2xx, so a rate limit would turn a burst into a retry storm; the handler is
     | idempotent on the event id instead.
     */
+    //
+    // /webhooks/terminal is the URL production's Terminal dashboard already
+    // delivers to; /eld/terminal/webhook is the one staging uses. Both reach
+    // the same idempotent handler.
+    Route::post('/webhooks/terminal', [TerminalWebhookController::class, 'handle']);
     Route::post('/eld/terminal/webhook', [TerminalWebhookController::class, 'handle']);
 
     /*

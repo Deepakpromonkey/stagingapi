@@ -43,29 +43,6 @@ Schedule::command('carrier:refresh-fleet-stats --stale --limit=2000')
 
 /*
 |--------------------------------------------------------------------------
-| ELD / telematics
-|--------------------------------------------------------------------------
-|
-| Refreshes the fleets of carriers that are actually under load. Terminal bills
-| for data synced rather than for vehicles and drivers held, so polling every
-| carrier who ever finished onboarding would run up a bill for fleets nobody is
-| looking at — the command scopes itself to carriers with an active shipment and
-| goes quiet again when the load is delivered.
-|
-| The first import after a carrier connects does not come from here: it is
-| dispatched on the spot by the Link exchange. Nor does the routine case of new
-| data arriving — Terminal's sync.completed and vehicle.added webhooks queue a
-| pass as it happens. This is the floor under both of those, for the connection
-| whose webhook was never delivered.
-|
-*/
-Schedule::command('eld:sync-active')
-    ->hourly()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-/*
-|--------------------------------------------------------------------------
 | Queue
 |--------------------------------------------------------------------------
 |
@@ -80,7 +57,7 @@ Schedule::command('eld:sync-active')
 |
 | --stop-when-empty means this normally exits in well under a second and does
 | nothing at all when there is nothing to do. If it dies, the next minute
-| starts a fresh one — which is more supervision than it had before.
+| starts a fresh one - which is more supervision than it had before.
 |
 | `default` is named first because Laravel drains queues in order, and a broker
 | waiting on a request should not queue behind a VIN batch or a fleet import.
@@ -149,14 +126,42 @@ Schedule::command('coi:chase-requests')
     ->withoutOverlapping()
     ->onOneServer();
 
+/*
+|--------------------------------------------------------------------------
+| ELD / telematics
+|--------------------------------------------------------------------------
+|
+| Refreshes the fleets of carriers that are actually under load. Terminal bills
+| for data synced rather than for vehicles and drivers held, so polling every
+| carrier who ever finished onboarding would run up a bill for fleets nobody is
+| looking at — the command scopes itself to carriers with an active shipment and
+| goes quiet again when the load is delivered.
+|
+| The first import after a carrier connects does not come from here: it is
+| dispatched on the spot by the Link exchange. Nor does the routine case of new
+| data arriving — Terminal's sync.completed and vehicle.added webhooks queue a
+| pass as it happens. This is the floor under both of those, for the connection
+| whose webhook was never delivered.
+|
+*/
+Schedule::command('eld:sync-active')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
 
 Schedule::command('eld:poll-shipments')
     ->everyMinute()
     ->withoutOverlapping(5)
     ->onOneServer();
+
 /*
+|--------------------------------------------------------------------------
+| Audit trail retention
+|--------------------------------------------------------------------------
+|
 | Drop audit trail entries once they pass the one year retention in
-| config/activitylog.php.
+| config/activitylog.php. The `audit` queue above carries the Teams posts and
+| `drayage` the directory imports.
 |
 | --force is required because the command asks for confirmation when
 | APP_ENV=production, and the scheduler has no one to answer it.
@@ -164,3 +169,27 @@ Schedule::command('eld:poll-shipments')
 Schedule::command('activitylog:clean --force')
     ->dailyAt('02:00')
     ->onOneServer();
+
+/*
+|--------------------------------------------------------------------------
+| Operational alerts
+|--------------------------------------------------------------------------
+|
+| See config/ops.php. Production checks its own services; the watcher (the
+| staging box) checks the production sites from outside, which is the only
+| way an outage of the whole production box gets reported. Not onOneServer:
+| each box has its own job, and they share no cache to agree through.
+*/
+if (config('ops.role') === 'production') {
+    Schedule::command('ops:check-services')
+        ->everyMinute()
+        ->withoutOverlapping(5)
+        ->runInBackground();
+}
+
+if (config('ops.role') === 'watcher') {
+    Schedule::command('ops:check-uptime')
+        ->everyMinute()
+        ->withoutOverlapping(5)
+        ->runInBackground();
+}

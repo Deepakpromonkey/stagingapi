@@ -5,9 +5,11 @@ namespace App\Services\Carrier;
 use App\Models\CarrierConnectRequest;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use setasign\Fpdi\Fpdi;
+use setasign\Fpdi\PdfParser\CrossReference\CrossReferenceException;
 
 /**
  * Produces and stores the signed copy of a broker agreement.
@@ -17,13 +19,14 @@ use setasign\Fpdi\Fpdi;
  * electronically" line beneath it, and the result is stored next to the
  * original so both the broker and the carrier can download what was signed.
  *
- * The server stamps the broker's original file itself whenever it can, so the
- * stored copy cannot have been altered in the browser. FPDI's free parser does
- * not read PDFs saved with compressed cross-reference streams (PDF 1.5+, which
- * is what Word and most modern tools write), so for those the copy the wizard
- * stamped in the browser with pdf-lib is kept instead. The original, the
- * signature image and its placement are all retained either way, so any
- * signed copy can be checked against them.
+ * The server stamps the broker's original file itself, so the stored copy
+ * cannot have been altered in the browser. FPDI's free parser does not read
+ * PDFs saved with compressed cross-reference streams (PDF 1.5+, which is what
+ * Word and most modern tools write), so such a file is first rewritten by qpdf
+ * with a classic cross-reference table - lossless, the pages are untouched -
+ * and stamped from that. Only if that also fails is a copy the wizard stamped
+ * in the browser used. The original, the signature image and its placement
+ * are all retained either way, so any signed copy can be checked against them.
  */
 class SignedAgreementService
 {
@@ -90,33 +93,24 @@ class SignedAgreementService
             pathinfo($connectRequest->signature_path, PATHINFO_EXTENSION) ?: 'png'
         );
 
+        $rewritten = null;
+
         try {
             if (! $original || ! $signature) {
                 return null;
             }
 
-            $pdf = new Fpdi;
-            $pdf->SetAutoPageBreak(false);
+            try {
+                return $this->stampFile($connectRequest, $original, $signature);
+            } catch (CrossReferenceException $e) {
+                $rewritten = $this->withClassicXref($original);
 
-            $pageCount = $pdf->setSourceFile($original);
-
-            // Clamped so a stale page number cannot leave the signature off
-            // the document altogether.
-            $target = min(max((int) $connectRequest->signature_page, 1), $pageCount);
-
-            for ($page = 1; $page <= $pageCount; $page++) {
-                $template = $pdf->importPage($page);
-                $size = $pdf->getTemplateSize($template);
-
-                $pdf->AddPage($size['orientation'], [$size['width'], $size['height']]);
-                $pdf->useTemplate($template);
-
-                if ($page === $target) {
-                    $this->drawSignature($pdf, $connectRequest, $signature, $size['width'], $size['height']);
+                if ($rewritten === null) {
+                    throw $e;
                 }
-            }
 
-            return $pdf->Output('S');
+                return $this->stampFile($connectRequest, $rewritten, $signature);
+            }
         } catch (\Throwable $e) {
             Log::warning('Server-side agreement stamping unavailable for this PDF', [
                 'connect_request' => $connectRequest->uuid,
@@ -125,12 +119,72 @@ class SignedAgreementService
 
             return null;
         } finally {
-            foreach ([$original, $signature] as $file) {
+            foreach ([$original, $signature, $rewritten] as $file) {
                 if ($file && is_file($file)) {
                     @unlink($file);
                 }
             }
         }
+    }
+
+    private function stampFile(CarrierConnectRequest $connectRequest, string $original, string $signature): string
+    {
+        $pdf = new Fpdi;
+        $pdf->SetAutoPageBreak(false);
+
+        $pageCount = $pdf->setSourceFile($original);
+
+        // Clamped so a stale page number cannot leave the signature off
+        // the document altogether.
+        $target = min(max((int) $connectRequest->signature_page, 1), $pageCount);
+
+        for ($page = 1; $page <= $pageCount; $page++) {
+            $template = $pdf->importPage($page);
+            $size = $pdf->getTemplateSize($template);
+
+            $pdf->AddPage($size['orientation'], [$size['width'], $size['height']]);
+            $pdf->useTemplate($template);
+
+            if ($page === $target) {
+                $this->drawSignature($pdf, $connectRequest, $signature, $size['width'], $size['height']);
+            }
+        }
+
+        return $pdf->Output('S');
+    }
+
+    /**
+     * The same PDF rewritten with a classic cross-reference table and no
+     * object streams, which FPDI's free parser can read. Null when qpdf is
+     * not installed or cannot read the file either.
+     */
+    private function withClassicXref(string $original): ?string
+    {
+        $rewritten = $original.'-classic.pdf';
+
+        try {
+            $result = Process::timeout(30)->run([
+                'qpdf', '--object-streams=disable', '--decrypt', $original, $rewritten,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('qpdf could not rewrite the agreement', ['error' => $e->getMessage()]);
+
+            return null;
+        }
+
+        // qpdf exits 3 when it repaired something but still wrote the file.
+        if (! in_array($result->exitCode(), [0, 3], true) || ! is_file($rewritten)) {
+            Log::warning('qpdf could not rewrite the agreement', [
+                'exit_code' => $result->exitCode(),
+                'error' => trim($result->errorOutput()) ?: 'qpdf not available',
+            ]);
+
+            @unlink($rewritten);
+
+            return null;
+        }
+
+        return $rewritten;
     }
 
     private function drawSignature(

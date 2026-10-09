@@ -34,6 +34,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Reading the agency's address off the certificate
+    |--------------------------------------------------------------------------
+    |
+    | The OCR extraction drops the producer's E-MAIL line, so the newest COI
+    | document on file is read for it when a request is raised. A small model
+    | is enough: it is one address off one page.
+    |
+    */
+
+    'contact' => [
+        'model' => env('COI_CONTACT_MODEL', 'claude-haiku-4-5'),
+        'disk' => env('COI_DOCUMENT_DISK', 's3'),
+        'max_bytes' => (int) env('COI_CONTACT_MAX_BYTES', 8 * 1024 * 1024),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Test recipient
     |--------------------------------------------------------------------------
     |
