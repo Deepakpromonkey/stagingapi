@@ -5,6 +5,7 @@ namespace App\Services\Carrier;
 use App\Models\Carriers\Carrier;
 use App\Services\DtScore\DtScore;
 use App\Support\Fmcsa;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -183,7 +184,7 @@ class DtSearchScoringService
      * and no engine run. The extension calls this on hover, so it
      * has to answer in well under a second; a missing score is filled by the
      * same background job the search page uses (the caller dispatches it on
-     * a cache miss), off the same carrier_dt_score:{dot} key, so the number
+     * a cache miss), read through DtScore::cached() like search is, so the number
      * a broker sees on someone else's website is the number they see in
      * DollarTraq.
      *
@@ -194,13 +195,8 @@ class DtSearchScoringService
         // v2: the cached shape changed when the authority / insurance
         // flags were dropped - see the docblock.
         $cardKey = 'ext:card:v2:'.$dot;
-        $scoreKey = 'carrier_dt_score:'.$dot;
 
-        // One cache round trip for both, not two - on a `database` store
-        // each read is a query of its own.
-        $cached = Cache::many([$cardKey, $scoreKey]);
-
-        $facts = $cached[$cardKey];
+        $facts = Cache::get($cardKey);
 
         /*
         | A broker on a load board hovers the same handful of DOTs over and
@@ -222,8 +218,11 @@ class DtSearchScoringService
             return null;
         }
 
+        // Through DtScore, never by key: the score's cache key carries the
+        // scoring config's fingerprint, so a hand-built key reads a score
+        // nobody writes any more.
         return $facts + [
-            'dt_score' => $cached[$scoreKey] !== null ? (int) $cached[$scoreKey] : null,
+            'dt_score' => DtScore::cached((string) $dot),
         ];
     }
 
