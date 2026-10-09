@@ -5,13 +5,16 @@ namespace App\Http\Controllers\Api\V1\Shipment;
 use App\Http\Controllers\Api\V1\BaseController;
 use App\Http\Requests\Shipment\CreateShipmentRequest;
 use App\Http\Resources\ShipmentResource;
+use App\Jobs\NotifyDriversOfNewLoad;
 use App\Models\Shipment;
 use App\Models\ShipmentTemplate;
 use App\Services\DriverActivityService;
+use App\Services\Shipment\LoadAssignmentNotifier;
 use App\Services\ShipmentService;
 use App\Services\SubscriptionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ShipmentController extends BaseController
 {
@@ -53,6 +56,8 @@ class ShipmentController extends BaseController
 
         $shipment = $this->shipmentService->create($data, $user);
 
+        $this->notifyDrivers($shipment, $data['country_code_1'] ?? null);
+
         /*
         | Templates are keyed on the tracking number, so a load without one
         | cannot be saved as a template — updateOrCreate matching on NULL never
@@ -87,6 +92,35 @@ class ShipmentController extends BaseController
             $message,
             201
         );
+    }
+
+    /**
+     * Tell the drivers on a new load about it - a push if they have the
+     * driver app, an SMS with the download links if they don't (see
+     * LoadAssignmentNotifier).
+     *
+     * After the response: the booking is done and returned before any SMS or
+     * push gateway is called, so neither can slow it down or fail it.
+     */
+    private function notifyDrivers(Shipment $shipment, ?string $countryCode1): void
+    {
+        if (! config('driver_app.notify_on_new_load')) {
+            return;
+        }
+
+        $phones = LoadAssignmentNotifier::phonesFor($shipment, $countryCode1);
+
+        if ($phones === []) {
+            return;
+        }
+
+        try {
+            NotifyDriversOfNewLoad::dispatch($shipment->id, $phones)->afterResponse();
+        } catch (\Throwable $e) {
+            Log::warning('[LoadAssignment] could not schedule driver notifications: '.$e->getMessage(), [
+                'shipment' => $shipment->uuid,
+            ]);
+        }
     }
 
     public function addStops(Request $request, $uuid)
