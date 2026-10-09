@@ -271,17 +271,23 @@ class CarrierController extends Controller
     ];
 
     /**
-     * National 50th / 75th / 90th cut-points for each BASIC measure.
-     *
-     * The Motus feed carries no `*_pct` column, so the percentile bands the
-     * scoring is written against are rebuilt from the raw measures. Computing
-     * them is a five-way window sort over the whole SMS table (~12s), so like
-     * the other benchmarks it is refreshed by `carrier:refresh-benchmarks` and
-     * only read here.
+     * One BASIC as the DT score sees it: the carrier's peer group, that
+     * group's cut-points, the estimated percentile and the verdict. The
+     * threshold (65 or 80) comes from dtscore.rules.sms.basics.
      */
-    private function smsPercentiles(): array
+    private function smsBasicView(string $basic, $sms): array
     {
-        return CarrierBenchmarks::smsCuts();
+        return CarrierBenchmarks::smsBasicView(
+            $basic,
+            $sms,
+            (int) config("dtscore.rules.sms.basics.{$basic}.threshold", 65)
+        );
+    }
+
+    /** The carrier's peer-group cuts for a BASIC, or null when not ranked. */
+    private function smsGroupCuts(string $basic, $sms): ?array
+    {
+        return $this->smsBasicView($basic, $sms)['cuts'];
     }
 
     /**
@@ -293,11 +299,11 @@ class CarrierController extends Controller
      * A zero measure is never banded: for BASICs where most carriers sit at
      * zero the cut-points are zero too, and a plain `>=` would flag everybody.
      */
-    private function measureBand($measure, array $cuts): float
+    private function measureBand($measure, ?array $cuts): float
     {
         $measure = (float) ($measure ?? 0);
 
-        if ($measure <= 0) {
+        if ($measure <= 0 || $cuts === null) {
             return 0.0;
         }
 
@@ -309,8 +315,8 @@ class CarrierController extends Controller
         };
     }
 
-    /** Is this BASIC at or above the national alert (90th percentile) line? */
-    private function basicAlert($measure, array $cuts): bool
+    /** Is this BASIC at or above its peer group's 90th-percentile line? */
+    private function basicAlert($measure, ?array $cuts): bool
     {
         return $this->measureBand($measure, $cuts) >= 90;
     }
@@ -321,15 +327,19 @@ class CarrierController extends Controller
      */
     private function smsPercentileFields($sms): array
     {
-        $cuts = $this->smsPercentiles();
         $fields = [];
 
         foreach (self::SMS_BASICS as $basic) {
             $measure = $sms?->{"{$basic}_measure"};
+            $view = $this->smsBasicView($basic, $sms);
 
-            $fields["{$basic}_pct"] = $this->measureBand($measure, $cuts[$basic]);
-            $fields["{$basic}_basic_alert"] = $this->basicAlert($measure, $cuts[$basic]);
+            $fields["{$basic}_pct"] = $this->measureBand($measure, $view['cuts']);
+            $fields["{$basic}_basic_alert"] = $this->basicAlert($measure, $view['cuts']);
+            // Peer group, cuts, ≈percentile and verdict, for the BASIC gauge.
+            $fields["{$basic}_basic"] = $view;
         }
+
+        $fields['benchmark_vintage'] = CarrierBenchmarks::smsVintage();
 
         return $fields;
     }
@@ -610,7 +620,7 @@ class CarrierController extends Controller
 
                 // FMCSA data started long before 2000,
                 // so convert 74 → 1974, 06 → 2006
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
 
                 $fixedDate = substr($addDate, 0, -2).$century.$year;
 
@@ -1316,7 +1326,7 @@ class CarrierController extends Controller
         // nothing. Compare against the national alert cut-point instead.
         $basicRoadsideAlertUnsafeDriving = $this->basicAlert(
             $sms?->unsafe_driv_measure,
-            $this->smsPercentiles()['unsafe_driv'],
+            $this->smsGroupCuts('unsafe_driv', $sms),
         );
 
         // Last activity dates
@@ -1738,7 +1748,7 @@ class CarrierController extends Controller
             // FMCSA format: 01-JUN-74
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($value))) {
                 $year = substr($value, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $fixed = substr($value, 0, -2).$century.$year;
 
                 return Carbon::createFromFormat('d-M-Y', strtoupper($fixed));
@@ -1850,15 +1860,7 @@ class CarrierController extends Controller
      */
     private function benchmarks(): array
     {
-        $b = CarrierBenchmarks::all();
-
-        $cuts = $this->smsPercentiles();
-
-        foreach (self::SMS_BASICS as $basic) {
-            $b["p90_{$basic}_measure"] = $cuts[$basic][90] > 0 ? $cuts[$basic][90] : null;
-        }
-
-        return $b;
+        return CarrierBenchmarks::all();
     }
 
     // ------------------------------------------------------------- assembly
@@ -2061,14 +2063,9 @@ class CarrierController extends Controller
 
         $alert = false;
         if ($sms) {
-            foreach ([
-                ['unsafe_driv_measure', 'p90_unsafe_driv_measure'],
-                ['hos_driv_measure', 'p90_hos_driv_measure'],
-                ['driv_fit_measure', 'p90_driv_fit_measure'],
-                ['contr_subst_measure', 'p90_contr_subst_measure'],
-                ['veh_maint_measure', 'p90_veh_maint_measure'],
-            ] as [$mk, $bk]) {
-                if ($sms->$mk !== null && $bm[$bk] !== null && (float) $sms->$mk >= $bm[$bk]) {
+            // Any BASIC at or above its own peer group's 90th percentile.
+            foreach (self::SMS_BASICS as $basic) {
+                if ($this->basicAlert($sms->{"{$basic}_measure"}, $this->smsGroupCuts($basic, $sms))) {
                     $alert = true;
                     break;
                 }
@@ -2224,7 +2221,26 @@ class CarrierController extends Controller
 
     public function show(string $dot)
     {
-        $result = $this->strengthsWeaknesses($dot);
+        /*
+        | Kept per carrier for 6 hours - the same window as its DT score
+        | (carrier_dt_score:{dot}) and the network-graph counts.
+        |
+        | Building this is ~20 queries against the carrier database, several
+        | of them cross-carrier lookups over the 4.48M-row census (shared
+        | phone / email / address / DUNS / VINs). The profile page asks for
+        | it twice per visit (once per factor card) and the Chrome extension
+        | on every hover, and each of those used to pay the whole cost again.
+        |
+        | v1 in the key so a change to the labels in META can be rolled out
+        | by bumping it, rather than waiting six hours for old entries to go.
+        | A carrier that isn't found is not kept (remember() treats null as
+        | a miss), and a failure throws before anything is stored.
+        */
+        $result = Cache::remember(
+            'carrier_risk:v1:'.$dot,
+            now()->addHours(6),
+            fn () => $this->strengthsWeaknesses($dot),
+        );
 
         if ($result === null) {
             return response()->json([

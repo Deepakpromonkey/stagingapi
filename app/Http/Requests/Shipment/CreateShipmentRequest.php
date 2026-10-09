@@ -117,6 +117,16 @@ class CreateShipmentRequest extends FormRequest
                 'max:10',
             ],
 
+            // Dial code for driver_phone_1 - the form sends one per phone and
+            // `country_code` is phone 2's. Not stored on the shipment; read
+            // once, to text the driver at the right number (see
+            // ShipmentController::notifyDrivers()).
+            'country_code_1' => [
+                'nullable',
+                'string',
+                'max:10',
+            ],
+
             'tracking_number' => [
                 'nullable',
                 'string',

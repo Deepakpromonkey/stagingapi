@@ -33,5 +33,14 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <!-- Never a real text or push from a test run, whatever .env holds:
+             a test that needs a gateway sets its own fake config and
+             Http::fake()s the call. -->
+        <env name="TELNYX_API_KEY" value=""/>
+        <env name="TELNYX_FROM" value=""/>
+        <env name="TELNYX_MESSAGING_PROFILE_ID" value=""/>
+        <env name="SMS_OVERRIDE_TO" value=""/>
+        <env name="ONESIGNAL_APP_ID" value=""/>
+        <env name="ONESIGNAL_REST_API_KEY" value=""/>
     </php>
 </phpunit>

@@ -215,6 +215,8 @@ class CarrierShortlistController extends Controller
             'insurance_current' => $insuranceCurrent,
             'dt_score' => $dtScore['score'] ?? null,
             'risk_level' => $this->riskLevelFor($dtScore['status'] ?? null),
+            'dt_band' => $dtScore['band'] ?? null,
+            'dt_needs_manual_review' => (bool) ($dtScore['needs_manual_review'] ?? false),
         ];
     }
 

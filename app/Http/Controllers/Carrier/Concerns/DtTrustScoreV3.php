@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Carrier\Concerns;
 
 use App\Models\Carriers\Carrier;
 use App\Models\Carriers\Inspection;
+use App\Support\CarrierBenchmarks;
 use App\Support\Fmcsa;
 use Illuminate\Support\Facades\Cache;
 
@@ -290,6 +291,15 @@ trait DtTrustScoreV3
             'pillars' => $fail ? [] : $this->dtLegacyPillars($groups),
 
             'model_version' => $this->dtConfig('model_version'),
+
+            // Which benchmark edition judged this score, so two scores a
+            // month apart are comparable or explainably not.
+            'benchmark_vintage' => CarrierBenchmarks::smsVintage(),
+
+            // Per BASIC: measure, peer group, that group's cuts, threshold,
+            // estimated percentile and verdict (over / elevated / clear /
+            // not_ranked). Empty when the carrier has no usable SMS row.
+            'sms_basics' => $groups['safety_roadside']['sms_basics'] ?? [],
 
             // The short answer, ready to render: a verdict line plus the
             // checks that triggered, passed and could not be run.
@@ -889,14 +899,15 @@ trait DtTrustScoreV3
         | BASICs — intervention thresholds
         |--------------------------------------------------------------------------
         | Property-carrier percentiles left the public feed with the FAST
-        | Act, so the bands are reconstructed from raw measures against the
-        | national cut-points (smsPercentiles). The intervention thresholds
+        | Act, so they are rebuilt FMCSA's way: the measure is ranked inside
+        | the carrier's safety-event peer group (CarrierBenchmarks::
+        | SMS_GROUPS), among carriers with violations in that BASIC. Below a
+        | group's event floor FMCSA assigns no percentile, and neither do we:
+        | the BASIC abstains (thin history is INSP-02's job). The thresholds
         | live in dtscore.rules.sms.basics: 65 (Unsafe Driving, HOS,
         | Controlled Substances — CAVRA §7 pins CS at 65, stricter than
-        | FMCSA's 80) and 80 (Vehicle Maintenance, Driver Fitness). Until
-        | carrier:refresh-benchmarks emits 65/80 cut-points, the nearest cut
-        | ABOVE the threshold is used (fallback_cut, 75 / 90) — deliberately
-        | under-inclusive, never over.
+        | FMCSA's 80) and 80 (Vehicle Maintenance, Driver Fitness).
+        | fallback_cut is the next cut up if a group ever lacks the threshold.
         |
         | One BASIC over: Medium. Two or more over: SMS-MULTI.
         */
@@ -927,17 +938,36 @@ trait DtTrustScoreV3
 
             $over = [];
 
+            $g['sms_basics'] = [];
+
             foreach ($basics as $basic => $setting) {
 
                 $threshold = $setting['threshold'];
 
                 $fallback = $setting['fallback_cut'];
 
-                $cut = $cuts[$basic][$threshold] ?? $cuts[$basic][$fallback] ?? null;
-
                 $measure = $sms->{"{$basic}_measure"};
 
                 $g['params']["{$basic}_measure"] = $measure;
+
+                $view = CarrierBenchmarks::smsBasicView($basic, $sms, $threshold, $cuts);
+
+                $g['sms_basics'][$basic] = $view;
+
+                if ($view['peer_group'] === null) {     // below FMCSA's data floor: no percentile exists
+
+                    $g['unknown'][] = "{$basic}_peer_group";
+
+                    continue;
+                }
+
+                $grp = $view['peer_group'];
+
+                $g['params']["{$basic}_peer_group"] = $grp;
+
+                $g['params']["p90_{$basic}_measure"] = $cuts[$basic][$grp][90] ?? null;
+
+                $cut = $cuts[$basic][$grp][$threshold] ?? $cuts[$basic][$grp][$fallback] ?? null;
 
                 if ($cut === null || $cut <= 0) {
 
@@ -958,7 +988,17 @@ trait DtTrustScoreV3
                         $g,
                         'SMS-'.strtoupper($basic),
                         $this->dtConfig('rules.sms.tier'),
-                        $labels[$basic].' BASIC at or above the intervention threshold.'
+                        sprintf(
+                            '%s BASIC at or above the intervention threshold — measure %.2f vs %dth-percentile cut %.2f · peer group %d (%s%s)%s',
+                            $labels[$basic],
+                            (float) $measure,
+                            $threshold,
+                            (float) $cut,
+                            $grp,
+                            $view['peer_group_label'],
+                            $view['group_n'] !== null ? ', '.number_format($view['group_n']).' carriers ranked' : '',
+                            $view['percentile_est'] !== null ? ' · ≈'.$this->dtOrdinal($view['percentile_est']) : ''
+                        )
                     );
 
                 }
@@ -1391,8 +1431,12 @@ trait DtTrustScoreV3
 
         $street = strtoupper(($carrier->phy_street ?? '').' | '.($carrier->mailing_street ?? ''));
 
+        $physical = strtoupper($carrier->phy_street ?? '');
+
         $virtual = collect($this->dtConfig('rules.ID-01.patterns'))
-            ->contains(fn ($pattern) => str_contains($street, $pattern));
+            ->contains(fn ($pattern) => str_contains($street, $pattern))
+            || collect($this->dtConfig('rules.ID-01.physical_only_patterns', []))
+                ->contains(fn ($pattern) => str_contains($physical, $pattern));
 
         if ($virtual) {
             $this->dtFire($g, 'ID-01', $this->dtRuleTier('ID-01'), 'Physical or mailing address matches a known mail-drop pattern.');
@@ -1869,6 +1913,16 @@ trait DtTrustScoreV3
     | Helpers — scoring machinery
     |--------------------------------------------------------------------------
     */
+
+    /** 1 -> "1st", 82 -> "82nd", 13 -> "13th". */
+    private function dtOrdinal(int $n): string
+    {
+        $suffix = in_array($n % 100, [11, 12, 13], true)
+            ? 'th'
+            : (['th', 'st', 'nd', 'rd'][$n % 10] ?? 'th');
+
+        return $n.$suffix;
+    }
 
     private function dtGroup(): array
     {

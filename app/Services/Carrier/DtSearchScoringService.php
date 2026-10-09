@@ -162,6 +162,91 @@ class DtSearchScoringService
             'insurance_current' => $insuranceCurrent,
             'dt_score' => $dtScore['score'] ?? null,
             'risk_level' => $this->riskLevelFor($dtScore['status'] ?? null),
+            'dt_band' => $dtScore['band'] ?? null,
+            'dt_needs_manual_review' => (bool) ($dtScore['needs_manual_review'] ?? false),
+        ];
+    }
+
+    /**
+     * The Chrome extension's hover card for one DOT - who the carrier is
+     * and whatever DT score is already cached.
+     *
+     * Only identity, on purpose. The card's reliability / risk factors come
+     * from the profile's own GET /carriers/{dot}/risk, which the extension
+     * calls alongside this - so the card can never disagree with the
+     * profile. (It used to carry its own authority / insurance flags; the
+     * insurance one was a simpler "any BIPD filing on record" check than the
+     * profile's "BIPD at or above the federal minimum", and the two did
+     * disagree.)
+     *
+     * Deliberately light, unlike enrichCarriers() above: one small relation
+     * and no engine run. The extension calls this on hover, so it
+     * has to answer in well under a second; a missing score is filled by the
+     * same background job the search page uses (the caller dispatches it on
+     * a cache miss), off the same carrier_dt_score:{dot} key, so the number
+     * a broker sees on someone else's website is the number they see in
+     * DollarTraq.
+     *
+     * Returns null when no carrier has this DOT.
+     */
+    public function quickCard(int $dot): ?array
+    {
+        // v2: the cached shape changed when the authority / insurance
+        // flags were dropped - see the docblock.
+        $cardKey = 'ext:card:v2:'.$dot;
+        $scoreKey = 'carrier_dt_score:'.$dot;
+
+        // One cache round trip for both, not two - on a `database` store
+        // each read is a query of its own.
+        $cached = Cache::many([$cardKey, $scoreKey]);
+
+        $facts = $cached[$cardKey];
+
+        /*
+        | A broker on a load board hovers the same handful of DOTs over and
+        | over, and the census behind these facts reloads daily at most - so
+        | they are kept for half an hour rather than re-read from the carrier
+        | database on every hover. A DOT with no carrier is remembered too
+        | (as false, for less time), so hovering a number that only looks
+        | like a DOT does not go back to the database each time. The score is
+        | deliberately NOT part of this: it lives under its own key, which
+        | the background job fills, and is read fresh on every call.
+        */
+        if ($facts === null) {
+            $facts = $this->quickCardFacts($dot) ?? false;
+
+            Cache::put($cardKey, $facts, now()->addMinutes($facts === false ? 10 : 30));
+        }
+
+        if ($facts === false) {
+            return null;
+        }
+
+        return $facts + [
+            'dt_score' => $cached[$scoreKey] !== null ? (int) $cached[$scoreKey] : null,
+        ];
+    }
+
+    /** The cacheable part of quickCard() - everything but the score. */
+    private function quickCardFacts(int $dot): ?array
+    {
+        $carrier = Carrier::where('dot_number', $dot)
+            ->select(['id', 'dot_number', 'legal_name', 'dba_name', 'phy_city', 'phy_state'])
+            ->with('authority') // for the MC number
+            ->first();
+
+        if (! $carrier) {
+            return null;
+        }
+
+        return [
+            'carrier_id' => $carrier->id,
+            'dot_number' => (string) $carrier->dot_number,
+            'legal_name' => $carrier->legal_name,
+            'dba_name' => $carrier->dba_name,
+            'mc_number' => $carrier->authority?->docket_number,
+            'city' => $carrier->phy_city,
+            'state' => $carrier->phy_state,
         ];
     }
 

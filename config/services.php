@@ -128,6 +128,20 @@ return [
     ],
 
     /*
+    | Push notifications to the DollarTraq driver app.
+    |
+    | The same OneSignal app and key the driver API (driverapi.dollartraq.com)
+    | sends its own tracking alerts with - copy both from that project's .env.
+    | The app registers each phone there and the driver API keeps its
+    | subscription id on app_drivers.device_token, which is what a push from
+    | here is addressed to. See PushSender.
+    */
+    'onesignal' => [
+        'app_id' => env('ONESIGNAL_APP_ID'),
+        'rest_api_key' => env('ONESIGNAL_REST_API_KEY'),
+    ],
+
+    /*
      | ELD / telematics connections (Terminal).
      |
      | Two keys, two audiences: the publishable key is the one that travels in

@@ -210,6 +210,9 @@ class AdvancedCarrierSearchController extends Controller
 
         return response()->json([
             'scores' => $this->scoreCurrentPage($request->input('dots')),
+            // band + review flag for the carriers already scored, so the
+            // search card can mark a flagged score (see DtScore::remember()).
+            'flags' => $this->scoreFlags($request->input('dots')),
         ]);
     }
 
@@ -861,6 +864,7 @@ class AdvancedCarrierSearchController extends Controller
         | still null.
         */
         $scores = $this->scoreCurrentPage(array_column($items, 'dot_number'));
+        $flags = $this->scoreFlags(array_column($items, 'dot_number'));
 
         if (! empty($scores)) {
             foreach ($items as &$item) {
@@ -869,6 +873,9 @@ class AdvancedCarrierSearchController extends Controller
                 if ($dot !== null && isset($scores[$dot])) {
                     $item['dt_score'] = $scores[$dot];
                 }
+
+                $item['dt_band'] = $flags[$dot]['band'] ?? null;
+                $item['dt_needs_manual_review'] = $flags[$dot]['needs_manual_review'] ?? false;
             }
             unset($item);
         }
@@ -1128,6 +1135,20 @@ class AdvancedCarrierSearchController extends Controller
      * @param  array<int, mixed>  $dots
      * @return array<int|string, int>
      */
+    /**
+     * Band and review flag for each DOT that already has a cached score.
+     *
+     * @param  array<int, mixed>  $dots
+     * @return array<string, array{band: ?string, needs_manual_review: bool}>
+     */
+    private function scoreFlags(array $dots): array
+    {
+        return array_map(fn ($entry) => [
+            'band' => $entry['band'] ?? null,
+            'needs_manual_review' => (bool) ($entry['needs_manual_review'] ?? false),
+        ], DtScore::cachedEntries($dots));
+    }
+
     private function scoreCurrentPage(array $dots): array
     {
         $dots = array_values(array_filter(array_unique(array_map(
