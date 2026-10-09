@@ -89,11 +89,11 @@ trait DtTrustScoreSupport
     private ?array $dtSmsCutMemo = null;
 
     /**
-     * National 50th / 75th / 90th cut-points for each BASIC measure.
+     * Peer-grouped cut-points for each BASIC: [basic][group][percentile].
      *
-     * The Motus feed carries no `*_pct` column, so the percentile bands the
-     * scoring is written against are rebuilt from the raw measures. Computing
-     * them is a five-way window sort over the whole SMS table (~12s), so it is
+     * The Motus feed carries no `*_pct` column, so FMCSA's percentiles are
+     * rebuilt from the raw measures inside each safety-event group. Computing
+     * them is a window sort per BASIC over the whole SMS table, so it is
      * refreshed by `carrier:refresh-benchmarks` and only read here.
      */
     private function smsPercentiles(): array
@@ -101,22 +101,15 @@ trait DtTrustScoreSupport
         return $this->dtSmsCutMemo ??= CarrierBenchmarks::smsCuts();
     }
 
-    /** National benchmarks, plus the p90 measure for each BASIC. */
+    /**
+     * National benchmarks. The p90 of each BASIC is per peer group now, so
+     * the safety loop sets it per carrier once the group is known.
+     */
     private function benchmarks(): array
     {
-        if ($this->dtBenchmarkMemo !== null) {
-            return $this->dtBenchmarkMemo;
-        }
-
-        $b = CarrierBenchmarks::all();
-
-        $cuts = $this->smsPercentiles();
-
-        foreach (self::SMS_BASICS as $basic) {
-            $b["p90_{$basic}_measure"] = $cuts[$basic][90] > 0 ? $cuts[$basic][90] : null;
-        }
-
-        return $this->dtBenchmarkMemo = $b;
+        return $this->dtBenchmarkMemo ??= CarrierBenchmarks::all() + [
+            'benchmark_vintage' => CarrierBenchmarks::smsVintage(),
+        ];
     }
 
     /** Letter grade for a 0-100 score, from dtscore.grades. */
