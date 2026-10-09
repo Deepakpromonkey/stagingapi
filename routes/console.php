@@ -84,6 +84,11 @@ Schedule::command('eld:sync-active')
 |
 | `default` is named first because Laravel drains queues in order, and a broker
 | waiting on a request should not queue behind a VIN batch or a fleet import.
+| `audit` comes next: a security alert is worth little an hour late, but it is
+| still not worth making someone wait on, which is the whole reason the Teams
+| post is queued rather than sent on the sign-in path.
+| `drayage` after it: an administrator's directory import is waiting on it,
+| and at a few seconds for ~5k carriers it holds nothing up for long.
 | `eld` is last because a first sync after a carrier connects can run for
 | minutes on a large fleet, and nothing is waiting on it. The connection named
 | explicitly because QUEUE_CONNECTION is `sync` here; a worker without it
@@ -106,7 +111,7 @@ Schedule::command('eld:sync-active')
 | supervisor, run a long-lived `queue:work` instead and delete this.
 |
 */
-Schedule::command('queue:work database --queue=default,vin,eld --stop-when-empty --max-time=50')
+Schedule::command('queue:work database --queue=default,audit,drayage,vin,eld --stop-when-empty --max-time=50')
     ->everyMinute()
     ->withoutOverlapping(2)
     ->runInBackground()
@@ -148,4 +153,14 @@ Schedule::command('coi:chase-requests')
 Schedule::command('eld:poll-shipments')
     ->everyMinute()
     ->withoutOverlapping(5)
+    ->onOneServer();
+/*
+| Drop audit trail entries once they pass the one year retention in
+| config/activitylog.php.
+|
+| --force is required because the command asks for confirmation when
+| APP_ENV=production, and the scheduler has no one to answer it.
+*/
+Schedule::command('activitylog:clean --force')
+    ->dailyAt('02:00')
     ->onOneServer();

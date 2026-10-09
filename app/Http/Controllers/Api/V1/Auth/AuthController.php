@@ -10,6 +10,7 @@ use App\Http\Requests\Auth\SignupRequest;
 use App\Http\Requests\Auth\UpdateProfileRequest;
 use App\Http\Requests\Auth\VerifyLoginOtpRequest;
 use App\Http\Resources\AuthUserResource;
+use App\Services\AuditLog;
 use App\Services\AuthService;
 use App\Services\SubscriptionService;
 use Illuminate\Support\Facades\Log;
@@ -138,6 +139,10 @@ class AuthController extends BaseController
 
     public function logout()
     {
+        AuditLog::recordByCurrentUser(AuditLog::LOGOUT, null, [
+            'portal' => 'broker',
+        ]);
+
         auth()->user()->currentAccessToken()->delete();
 
         return $this->success(

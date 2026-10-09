@@ -610,7 +610,7 @@ class CarrierProfileService
         try {
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($addDate))) {
                 $year = substr($addDate, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $addDate = substr($addDate, 0, -2).$century.$year;
 
                 return (int) Carbon::createFromFormat('d-M-Y', strtoupper($addDate))->diffInYears(now());
@@ -703,7 +703,7 @@ class CarrierProfileService
      * Live FMCSA snapshot. Cached for a day and never allowed to break the
      * profile response — the upstream service is slow and often unavailable.
      */
-    protected function fmcsaSnapshot(string $dot): ?array
+    public function fmcsaSnapshot(string $dot): ?array
     {
         $webKey = config('carriers.fmcsa_web_key');
 

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Shipment;
+use App\Services\DtScore\DtScore;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -65,6 +66,11 @@ class ShipmentService
                 'carrier_dot' => isset($data['carrier_dot'])
                     ? strtoupper(trim($data['carrier_dot']))
                     : $eld['carrier_dot'],
+
+                // The DT score the broker booked on, frozen at booking time.
+                'trust_score_evaluation_id' => DtScore::latestEvaluationId(
+                    isset($data['carrier_dot']) ? trim($data['carrier_dot']) : $eld['carrier_dot']
+                ),
 
                 'carrier_phone' => $data['carrier_phone'] ?? null,
 
@@ -505,12 +511,29 @@ class ShipmentService
     /**
      * Get all shipments for the authenticated user's company
      */
-    public function getAllForUser($user)
+    /**
+     * @return array<string, int> lower-cased status => shipments
+     */
+    public function countByStatusForUser($user): array
     {
+        return Shipment::where('company_id', $user->company_id)
+            ->selectRaw('LOWER(status) as status_key, COUNT(*) as aggregate')
+            ->groupBy('status_key')
+            ->pluck('aggregate', 'status_key')
+            ->map(fn ($count) => (int) $count)
+            ->all();
+    }
+
+    public function getAllForUser($user, ?int $perPage = null)
+    {
+        // The list asks for its page size; it was fixed at 15 whatever it
+        // asked for, so a page of 10 got 15 rows and a page of 25 got 15.
+        $perPage = max(1, min(100, $perPage ?? 15));
+
         return Shipment::where('company_id', $user->company_id)
             ->with(['stops', 'trackingUpdates', 'eldConnection'])
             ->latest('id')
-            ->paginate(15);
+            ->paginate($perPage);
     }
 
 

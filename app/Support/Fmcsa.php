@@ -120,9 +120,13 @@ final class Fmcsa
 
         try {
             // '24-APR-24' — two-digit year, so anchor the century by hand.
-            // The feed goes back to the 1970s, hence the pivot on today's year.
+            // Most warehouse date columns are typed DATE now and never reach
+            // this branch; a few (company_census_file.mcs150_date,
+            // crash_file.add_date) are still text. FMCSA legitimately writes
+            // dates a year or so ahead (cancellation notices), so a two-digit
+            // year only means 19xx once it is more than ten years out.
             if (preg_match('/^(\d{2})-([A-Z]{3})-(\d{2})$/', strtoupper($value), $m)) {
-                $century = $m[3] > date('y') ? '19' : '20';
+                $century = (int) $m[3] > ((int) date('y') + 10) ? '19' : '20';
 
                 return Carbon::createFromFormat('d-M-Y', "{$m[1]}-{$m[2]}-{$century}{$m[3]}")
                     ->startOfDay();

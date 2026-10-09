@@ -3,7 +3,11 @@
 namespace App\Providers;
 
 use Anthropic\Client as AnthropicClient;
+use App\Models\CarrierConnectRequest;
+use App\Models\Shipment;
 use App\Models\User;
+use App\Observers\CarrierConnectRequestObserver;
+use App\Observers\ShipmentObserver;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
@@ -46,6 +50,20 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(AnthropicClient::class, function () {
             return new AnthropicClient(apiKey: config('services.anthropic.key'));
         });
+
+        /*
+         | The drayage directory decodes its search index once per request:
+         | scoped, so the list endpoint's search, facets and export share one
+         | copy, and a queue worker or Octane process starts each job clean.
+         */
+        $this->app->scoped(\App\Services\Drayage\DrayageDirectoryService::class);
+
+        /*
+         | One DT score calculator per request or queued job, so the national
+         | benchmarks it reads are fetched once per request rather than once
+         | per carrier, and never outlive the request that read them.
+         */
+        $this->app->scoped(\App\Services\DtScore\DtScore::class);
     }
 
     /**
@@ -53,6 +71,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Live updates over Reverb, in place of the pages polling for them.
+        Shipment::observe(ShipmentObserver::class);
+        CarrierConnectRequest::observe(CarrierConnectRequestObserver::class);
+
         /*
          | SendGrid over its HTTP API instead of SMTP.
          |

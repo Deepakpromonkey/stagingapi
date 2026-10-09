@@ -248,7 +248,7 @@ class BackfillVinPatterns extends Command
     protected function newRowVins(): \Generator
     {
         $chunk = max(1000, (int) $this->option('chunk'));
-        $lastId = (int) Cache::get(self::CURSOR_KEY, 0);
+        $lastId = (int) Cache::store(config('cache.durable_store'))->get(self::CURSOR_KEY, 0);
         $highest = $lastId;
 
         while (true) {
@@ -278,7 +278,7 @@ class BackfillVinPatterns extends Command
 
         // Only advanced once the pass completes, so an interrupted run repeats
         // rather than skips.
-        Cache::forever(self::CURSOR_KEY, $highest);
+        Cache::store(config('cache.durable_store'))->forever(self::CURSOR_KEY, $highest);
     }
 
     /**

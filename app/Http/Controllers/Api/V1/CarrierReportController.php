@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Requests\Carrier\StoreCarrierReportRequest;
 use App\Mail\CarrierReportMail;
+use App\Mail\CarrierReportReceivedMail;
 use App\Models\CarrierReport;
 use App\Models\CarrierReportDocument;
 use App\Models\Carriers\Carrier;
@@ -263,6 +264,17 @@ class CarrierReportController extends BaseController
                     'error' => $emailError,
                 ]);
             }
+        }
+
+        // Confirmation to whoever filed it. Like the carrier's copy, a failure
+        // here must not cost the broker the report, so it only logs.
+        try {
+            Mail::to($user->email)->send(new CarrierReportReceivedMail($report, $user));
+        } catch (\Throwable $e) {
+            Log::error('Carrier report confirmation email failed', [
+                'report_uuid' => $report->uuid,
+                'error' => $e->getMessage(),
+            ]);
         }
 
         return $this->success([

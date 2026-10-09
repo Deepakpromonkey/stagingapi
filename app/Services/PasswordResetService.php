@@ -26,17 +26,39 @@ class PasswordResetService
     /**
      * Step 1 — email a reset OTP.
      *
-     * The response is identical whether or not the address belongs to an
-     * account, so this endpoint cannot be used to discover registered emails.
+     * An unknown or deactivated address is rejected outright rather than
+     * answered with a dummy session, so the user isn't sent to an OTP screen
+     * for a code that will never arrive. Signup already reports a taken
+     * email, and the route throttle bounds probing.
      */
     public function sendOtp(string $email, ?string $ipAddress): array
     {
         $user = User::where('email', strtolower($email))->first();
 
-        if (! $user || ! $user->status) {
-            // Same shape as the success path, but nothing is stored, so any
-            // OTP submitted against this session will fail.
-            return ['otp_session' => (string) Str::uuid()];
+        if (! $user) {
+            AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $user, null, [
+                'email' => $email,
+                'outcome' => 'rejected',
+                'reason' => AuditLog::REASON_UNKNOWN_EMAIL,
+                'portal' => 'broker',
+            ]);
+
+            throw ValidationException::withMessages([
+                'email' => ['No account found with this email address.'],
+            ]);
+        }
+
+        if (! $user->status) {
+            AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $user, null, [
+                'email' => $email,
+                'outcome' => 'rejected',
+                'reason' => AuditLog::REASON_DISABLED,
+                'portal' => 'broker',
+            ]);
+
+            throw ValidationException::withMessages([
+                'email' => ['Your account has been deactivated.'],
+            ]);
         }
 
         // Only one live reset request per user.
@@ -72,6 +94,12 @@ class PasswordResetService
             Log::info('========================================');
         }
 
+        AuditLog::record(AuditLog::PASSWORD_RESET_REQUESTED, $user, null, [
+            'email' => $user->email,
+            'outcome' => 'otp_sent',
+            'portal' => 'broker',
+        ]);
+
         return ['otp_session' => $otpSession];
     }
 
@@ -102,6 +130,13 @@ class PasswordResetService
 
         if (! Hash::check($data['otp'], $record->otp)) {
             $record->increment('attempts');
+
+            AuditLog::record(AuditLog::OTP_FAILED, $record->user, null, [
+                'reason' => AuditLog::REASON_BAD_OTP,
+                'attempt' => $record->attempts,
+                'flow' => 'password_reset',
+                'portal' => 'broker',
+            ]);
 
             throw ValidationException::withMessages([
                 'otp' => ['Invalid OTP.'],
@@ -163,6 +198,11 @@ class PasswordResetService
             LoginOtp::where('user_id', $user->id)->delete();
 
             $record->delete();
+
+            AuditLog::record(AuditLog::PASSWORD_RESET_COMPLETED, $user, $user, [
+                'email' => $user->email,
+                'portal' => 'broker',
+            ]);
 
             return $user;
         });

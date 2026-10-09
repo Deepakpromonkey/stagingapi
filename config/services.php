@@ -56,6 +56,11 @@ return [
         'key' => env('ANTHROPIC_API_KEY'),
     ],
 
+    // RS256 key the Fleetra assistant tokens are signed with.
+    'fleetra' => [
+        'jwt_private_key_path' => env('FLEETRA_JWT_PRIVATE_KEY_PATH', storage_path('app/fleetra/jwt-private.pem')),
+    ],
+
     // SMS gateway for onboarding OTPs.
     'telnyx' => [
         'key' => env('TELNYX_API_KEY'),
@@ -199,6 +204,43 @@ return [
         // Pause between retries of a failed Terminal call. Zero in tests, so a
         // failure case does not sit through a real backoff.
         'retry_delay_ms' => (int) env('TERMINAL_RETRY_DELAY_MS', 500),
+    ],
+
+    /*
+    | Microsoft Teams channel that the security audit trail posts to.
+    |
+    | This must be a Power Automate "Workflows" webhook — in Teams, channel
+    | → ... → Workflows → "Post to a channel when a webhook request is
+    | received". The older Office 365 connector webhooks, and the MessageCard
+    | payload they accepted, have been retired; what goes out here is an
+    | Adaptive Card, which is what Workflows expects.
+    |
+    | The URL is a credential: anyone holding it can post to the channel. It
+    | belongs in .env, never in the repository.
+    */
+    'teams' => [
+        'webhook_url' => env('TEAMS_WEBHOOK_URL'),
+
+        'enabled' => filter_var(env('TEAMS_ALERTS_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+
+        // Short on purpose. The alert is queued, but a webhook that hangs
+        // should not hold the worker open ahead of the rest of the queue.
+        'timeout' => (int) env('TEAMS_WEBHOOK_TIMEOUT', 5),
+
+        /*
+        | Which audit events to post. '*' means every event the trail records,
+        | including routine sign-ins — deliberate, and a lot of traffic. To
+        | quieten it later set TEAMS_ALERT_EVENTS to a comma separated list:
+        |
+        |   TEAMS_ALERT_EVENTS=login.failed,user.role_changed,user.removed
+        |
+        | No code change needed. The trail still records everything either
+        | way; this only decides what is worth interrupting someone for.
+        */
+        'events' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('TEAMS_ALERT_EVENTS', '*'))
+        ))),
     ],
 
 ];

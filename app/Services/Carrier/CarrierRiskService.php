@@ -659,7 +659,7 @@ class CarrierRiskService
         try {
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($value))) {
                 $year = substr($value, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
 
                 return Carbon::createFromFormat('d-M-Y', strtoupper(substr($value, 0, -2).$century.$year));
             }

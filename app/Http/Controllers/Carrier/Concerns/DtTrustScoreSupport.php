@@ -9,29 +9,11 @@ use Carbon\Carbon;
 /**
  * The members DtTrustScoreV3 needs from whatever class installs it.
  *
- * DtTrustScoreV3 carries the whole scoring engine but deliberately leans on
- * eight small helpers that already lived on CarrierController — its own
- * docblock names them and says it "will fail loudly at boot if they are
- * removed". That was fine while CarrierController was the only host. Once a
- * second controller needed to score carriers, those eight became the thing
- * standing between the engine and reuse.
+ * App\Services\DtScore\DtScore is the one class that installs it; call
+ * DtScore::for() rather than composing these traits anywhere else.
  *
- * So they live here, and any class that wants a DT score writes:
- *
- *     use DtTrustScoreV3, DtTrustScoreSupport;
- *
- * NOTE: CarrierController still defines its own copies of all eight and is
- * deliberately left untouched. It is 5,700 lines of working, live profile
- * and risk-factor code, and the carrier database it reads is not reachable
- * from every environment, so a refactor there could not be verified end to
- * end at the time this was written. Switching it to this trait — delete its
- * eight members, add DtTrustScoreSupport to its `use` — is a safe follow-up
- * for whoever can run the profile page against a live carrier DB, and would
- * leave exactly one definition of each.
- *
- * Everything here is pure or delegates to CarrierBenchmarks, which is itself
- * the shared source of truth for national cut-points — so the numbers that
- * actually drive scoring are single-sourced regardless.
+ * Everything here is pure or delegates to CarrierBenchmarks, the shared
+ * source of truth for national cut-points.
  */
 trait DtTrustScoreSupport
 {
@@ -42,15 +24,6 @@ trait DtTrustScoreSupport
         'driv_fit',
         'contr_subst',
         'veh_maint',
-    ];
-
-    /**
-     * Address fragments that signal a mail drop rather than a real yard.
-     * Used by the identity rules to spot a carrier with no physical premises.
-     */
-    private const MAIL_DROP_PATTERNS = [
-        'UPS STORE', 'REGUS', 'WEWORK', 'PMB ', 'POSTAL ANNEX',
-        'MAIL BOXES ETC', 'MAILBOX', 'REGISTERED AGENT', 'VIRTUAL OFFICE', 'SUITE #',
     ];
 
     /**
@@ -146,21 +119,25 @@ trait DtTrustScoreSupport
         return $this->dtBenchmarkMemo = $b;
     }
 
+    /** Letter grade for a 0-100 score, from dtscore.grades. */
     private function getGrade($score)
     {
-        return match (true) {
-            $score >= 90 => 'A',
-            $score >= 80 => 'B',
-            $score >= 70 => 'C',
-            $score >= 60 => 'D',
-            default => 'F',
-        };
+        foreach (config('dtscore.grades') as $grade => $min) {
+
+            if ($score >= $min) {
+                return $grade;
+            }
+
+        }
+
+        return 'F';
     }
 
     /**
      * FMCSA writes dates as '01-JUN-74', which Carbon cannot read on its own
-     * and which has no century. Anything later than the current two-digit
-     * year is read as 19xx — a 1974 add date is real, a 2074 one is not.
+     * and which has no century. Anything more than ten years past the current
+     * two-digit year is read as 19xx — a 1974 add date is real, a 2074 one is
+     * not, and a notice dated next year stays next year.
      */
     private function parseFmcsaDate(?string $value): ?Carbon
     {
@@ -172,7 +149,7 @@ trait DtTrustScoreSupport
             // FMCSA format: 01-JUN-74
             if (preg_match('/^\d{2}-[A-Z]{3}-\d{2}$/', strtoupper($value))) {
                 $year = substr($value, -2);
-                $century = $year > date('y') ? '19' : '20';
+                $century = (int) $year > ((int) date('y') + 10) ? '19' : '20';
                 $fixed = substr($value, 0, -2).$century.$year;
 
                 return Carbon::createFromFormat('d-M-Y', strtoupper($fixed));

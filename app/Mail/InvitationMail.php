@@ -3,6 +3,7 @@
 namespace App\Mail;
 
 use App\Models\Invitation;
+use App\Services\EmailTemplateService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Mail\Mailable;
 use Illuminate\Queue\SerializesModels;
@@ -32,11 +33,29 @@ class InvitationMail extends Mailable
 
     public function build()
     {
+        $invitation = $this->invitation;
+
+        $rendered = app(EmailTemplateService::class)->resolve($invitation->company_id, 'invitation', [
+            'first_name' => $invitation->first_name,
+            'last_name' => $invitation->last_name,
+            'email' => $invitation->email,
+            'role_name' => $invitation->role?->name,
+            'company_name' => $invitation->company->company_name,
+            'invited_by' => trim(($invitation->creator?->first_name ?? '').' '.($invitation->creator?->last_name ?? '')),
+            'accept_url' => $this->acceptUrl,
+            'login_url' => rtrim((string) config('app.frontend_url'), '/').'/login',
+            'sent_at' => now()->format('m/d/y'),
+            'expires_at' => $invitation->expires_at?->format('m/d/y'),
+        ]);
+
         // A text/plain alternative alongside the HTML. Filters score an
         // HTML-only transactional mail worse than a multipart one, and this
         // is the cheapest deliverability win available.
-        return $this->subject($this->invitation->company->company_name.' added you to their team')
-            ->view('emails.invitation')
+        return $this->subject($rendered['subject'])
+            ->view('emails.layouts.template', [
+                'title' => $rendered['subject'],
+                'body' => $rendered['body_html'],
+            ])
             ->text('emails.invitation-text');
     }
 }

@@ -61,11 +61,14 @@ class UserService
         return DB::transaction(function () use ($actor, $target, $data) {
 
             $roleChanged = false;
+            $previousRole = $target->role()?->name;
+            $newRole = null;
 
             if (isset($data['role_id'])) {
                 $role = $this->roleService->resolveAssignable($actor, $data['role_id']);
 
                 $roleChanged = $target->role()?->id !== $role->id;
+                $newRole = $role->name;
 
                 // One seat per user — sync rather than assign, so the old role
                 // is dropped instead of a second one stacking on top.
@@ -90,6 +93,21 @@ class UserService
             // happens to expire. Either way, drop the sessions.
             if ($roleChanged || (array_key_exists('status', $data) && ! $data['status'])) {
                 $target->tokens()->delete();
+            }
+
+            if ($roleChanged) {
+                AuditLog::record(AuditLog::ROLE_CHANGED, $target, $actor, [
+                    'from_role' => $previousRole,
+                    'to_role' => $newRole,
+                    'portal' => 'broker',
+                ]);
+            }
+
+            if (array_key_exists('status', $data)) {
+                AuditLog::record(AuditLog::ACCOUNT_STATUS_CHANGED, $target, $actor, [
+                    'enabled' => (bool) $data['status'],
+                    'portal' => 'broker',
+                ]);
             }
 
             return $target->fresh()->load('roles.permissions');
@@ -119,7 +137,11 @@ class UserService
             ]);
         }
 
-        return DB::transaction(function () use ($target) {
+        return DB::transaction(function () use ($actor, $target) {
+
+            // Kept for the trail: the tombstone below overwrites it, and who
+            // was removed is the whole point of the entry.
+            $removedEmail = $target->email;
 
             // Cut the session first. Deleting the row on its own would leave a
             // live bearer token sitting in their browser until it expired.
@@ -136,6 +158,11 @@ class UserService
             $target->save();
 
             $target->delete();
+
+            AuditLog::record(AuditLog::USER_REMOVED, $target, $actor, [
+                'removed_email' => $removedEmail,
+                'portal' => 'broker',
+            ]);
 
             return $target;
         });

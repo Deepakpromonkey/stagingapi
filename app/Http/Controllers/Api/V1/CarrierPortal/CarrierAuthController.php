@@ -8,6 +8,7 @@ use App\Http\Requests\CarrierPortal\CarrierForgetDeviceRequest;
 use App\Http\Requests\CarrierPortal\CarrierLoginRequest;
 use App\Http\Requests\CarrierPortal\CarrierVerifyLoginOtpRequest;
 use App\Http\Resources\CarrierUserResource;
+use App\Services\AuditLog;
 use App\Services\Carrier\CarrierAccountService;
 use App\Services\Carrier\CarrierTwoFactorService;
 
@@ -127,6 +128,10 @@ class CarrierAuthController extends BaseController
 
     public function logout()
     {
+        AuditLog::recordByCurrentUser(AuditLog::LOGOUT, null, [
+            'portal' => 'carrier',
+        ]);
+
         auth()->user()->currentAccessToken()->delete();
 
         return $this->success(null, 'Logged out successfully.');

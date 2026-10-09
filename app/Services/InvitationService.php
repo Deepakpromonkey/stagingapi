@@ -102,6 +102,12 @@ class InvitationService
 
         $this->sendInvitationMail($invitation);
 
+        AuditLog::record(AuditLog::USER_INVITED, $invitation->user, $user, [
+            'email' => $invitation->email,
+            'role' => $role->name,
+            'portal' => 'broker',
+        ]);
+
         return $invitation;
     }
 
@@ -172,6 +178,11 @@ class InvitationService
                 'email' => ['We could not deliver the invitation email. Please try again shortly.'],
             ]);
         }
+
+        AuditLog::record(AuditLog::INVITATION_RESENT, $invitedUser, $actor, [
+            'email' => $invitedUser->email,
+            'portal' => 'broker',
+        ]);
 
         return $invitation;
     }

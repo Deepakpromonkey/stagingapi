@@ -5,6 +5,7 @@ namespace App\Services\Carrier;
 use App\Mail\CarrierInvitationMail;
 use App\Models\CarrierInvitation;
 use App\Models\CarrierUser;
+use App\Services\AuditLog;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -95,6 +96,12 @@ class CarrierInvitationService
 
         $this->sendInvitationMail($invitation, $temporaryPassword);
 
+        AuditLog::record(AuditLog::USER_INVITED, $invitation->carrierUser, $invitedBy, [
+            'email' => $invitation->email,
+            'role' => $invitation->role?->name,
+            'portal' => 'carrier',
+        ]);
+
         return $invitation;
     }
 
@@ -134,7 +141,9 @@ class CarrierInvitationService
      */
     public function listUsers(CarrierUser $carrierUser, int $perPage = 15)
     {
-        return CarrierUser::with('roles')
+        // roles.permissions and permissions too: the resource lists every
+        // user's effective permissions, which is two queries a row otherwise.
+        return CarrierUser::with(['roles.permissions', 'permissions'])
             ->where('carrier_company_id', $carrierUser->carrier_company_id)
             ->orderByDesc('is_owner')
             ->orderBy('first_name')
@@ -180,8 +189,15 @@ class CarrierInvitationService
 
         return DB::transaction(function () use ($actor, $target, $data) {
 
+            $roleChanged = false;
+            $previousRole = $target->roles->first()?->name;
+            $newRole = null;
+
             if (isset($data['role_id'])) {
                 $role = $this->carrierRoleService->resolveAssignable($actor, $data['role_id']);
+
+                $roleChanged = $target->roles->first()?->id !== $role->id;
+                $newRole = $role->name;
 
                 $target->syncRoles([$role]);
             }
@@ -194,6 +210,21 @@ class CarrierInvitationService
             // at the end of whatever they are doing.
             if (array_key_exists('status', $data) && ! $data['status']) {
                 $target->tokens()->delete();
+            }
+
+            if ($roleChanged) {
+                AuditLog::record(AuditLog::ROLE_CHANGED, $target, $actor, [
+                    'from_role' => $previousRole,
+                    'to_role' => $newRole,
+                    'portal' => 'carrier',
+                ]);
+            }
+
+            if (array_key_exists('status', $data)) {
+                AuditLog::record(AuditLog::ACCOUNT_STATUS_CHANGED, $target, $actor, [
+                    'enabled' => (bool) $data['status'],
+                    'portal' => 'carrier',
+                ]);
             }
 
             return $target->fresh()->load('roles.permissions', 'carrierCompany');

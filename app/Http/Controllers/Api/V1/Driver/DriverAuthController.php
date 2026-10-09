@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\BaseController;
 use App\Models\Driver;
 use App\Models\DriverLoginOtp;
 use App\Models\Shipment;
+use App\Services\AuditLog;
 use App\Services\SmsSender;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -69,6 +70,11 @@ class DriverAuthController extends BaseController
             Log::info('===================================================');
         }
 
+        AuditLog::record(AuditLog::OTP_SENT, null, null, [
+            'phone' => $phone,
+            'portal' => 'driver',
+        ]);
+
         return $this->success(
             ['expires_in_minutes' => $lifetime],
             'If that number is registered to a driver, a code is on its way.'
@@ -102,6 +108,12 @@ class DriverAuthController extends BaseController
             ->first();
 
         if (! $otp || $otp->expires_at->isPast()) {
+            AuditLog::record(AuditLog::OTP_FAILED, null, null, [
+                'phone' => $phone,
+                'reason' => 'expired',
+                'portal' => 'driver',
+            ]);
+
             return $this->error('That code has expired. Request a new one.', null, 422);
         }
 
@@ -111,11 +123,24 @@ class DriverAuthController extends BaseController
             // Burn it, so guessing cannot continue against the same code.
             $otp->forceFill(['consumed_at' => now()])->save();
 
+            AuditLog::record(AuditLog::OTP_FAILED, null, null, [
+                'phone' => $phone,
+                'reason' => 'too_many_attempts',
+                'portal' => 'driver',
+            ]);
+
             return $this->error('Too many incorrect attempts. Request a new code.', null, 429);
         }
 
         if (! Hash::check($request->input('code'), $otp->code_hash)) {
             $otp->increment('attempts');
+
+            AuditLog::record(AuditLog::OTP_FAILED, null, null, [
+                'phone' => $phone,
+                'reason' => AuditLog::REASON_BAD_OTP,
+                'attempt' => $otp->attempts,
+                'portal' => 'driver',
+            ]);
 
             return $this->error('That code is not correct.', null, 422);
         }
@@ -134,6 +159,12 @@ class DriverAuthController extends BaseController
         $driver = Driver::where('phone_e164', $phone)->first();
 
         if (! $driver && ! $named) {
+            AuditLog::record(AuditLog::LOGIN_FAILED, null, null, [
+                'phone' => $phone,
+                'reason' => 'not_on_any_load',
+                'portal' => 'driver',
+            ]);
+
             return $this->error(
                 'This number is not on any active load. Ask your broker to add it to the shipment.',
                 null,
@@ -149,6 +180,12 @@ class DriverAuthController extends BaseController
         }
 
         if (! $driver->is_active) {
+            AuditLog::record(AuditLog::LOGIN_FAILED, $driver->exists ? $driver : null, null, [
+                'phone' => $phone,
+                'reason' => AuditLog::REASON_DISABLED,
+                'portal' => 'driver',
+            ]);
+
             return $this->error('This driver account is no longer active.', null, 403);
         }
 
@@ -164,6 +201,11 @@ class DriverAuthController extends BaseController
         $driver->tokens()->delete();
 
         $token = $driver->createToken('driver-app', [Driver::TOKEN_ABILITY])->plainTextToken;
+
+        AuditLog::record(AuditLog::LOGIN_SUCCEEDED, $driver, $driver, [
+            'phone' => $phone,
+            'portal' => 'driver',
+        ]);
 
         return $this->success([
             'token' => $token,
@@ -188,6 +230,10 @@ class DriverAuthController extends BaseController
 
     public function logout(Request $request)
     {
+        AuditLog::record(AuditLog::LOGOUT, $request->user(), $request->user(), [
+            'portal' => 'driver',
+        ]);
+
         $request->user()->currentAccessToken()->delete();
 
         return $this->success(null, 'Signed out.');
