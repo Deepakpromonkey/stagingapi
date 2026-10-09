@@ -5,6 +5,7 @@ namespace App\Services\Carrier;
 use App\Models\Carriers\Carrier;
 use App\Services\DtScore\DtScore;
 use App\Support\Fmcsa;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
