@@ -7,6 +7,7 @@ use App\Models\CarrierBlocked;
 use App\Models\CarrierShortlist;
 use App\Models\Company;
 use App\Models\User;
+use App\Services\DtScore\DtScore;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -116,7 +117,7 @@ class ExtensionCarrierLookupTest extends TestCase
     public function test_a_cached_score_comes_back_with_the_companys_own_flags(): void
     {
         $this->seedCard();
-        Cache::put('carrier_dt_score:'.self::DOT, 81, now()->addHours(6));
+        DtScore::store((string) self::DOT, 81);
 
         CarrierShortlist::create([
             'company_id' => $this->user->company_id,
