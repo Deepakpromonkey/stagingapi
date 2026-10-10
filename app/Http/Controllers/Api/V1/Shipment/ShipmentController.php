@@ -12,6 +12,7 @@ use App\Services\DriverActivityService;
 use App\Services\Shipment\LoadAssignmentNotifier;
 use App\Services\ShipmentService;
 use App\Services\SubscriptionService;
+use App\Support\StopLocation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -132,12 +133,55 @@ class ShipmentController extends BaseController
         $stopsArray = json_decode($request->stops_data, true);
 
         if (! is_array($stopsArray) || count($stopsArray) < 2) {
-            return $this->error('Invalid stops data. Minimum 2 stops required.', 422);
+            return $this->error('Invalid stops data. Minimum 2 stops required.', null, 422);
         }
 
         $shipment = Shipment::where('uuid', $uuid)
             ->where('company_id', auth()->user()->company_id)
             ->firstOrFail();
+
+        /*
+        | A load's stops are saved once.
+        |
+        | Saving replaces every stop - deletes them and creates new ones, under
+        | new ids - and the driver's progress is kept against those ids
+        | (shipment_stop_progress, stop_event_answers, stop_verification_otps,
+        | which the load page here reads by stop id too). A second save mid-trip
+        | would cut the driver off from their own progress. Nothing in the app
+        | edits stops after the load is booked, so nothing legitimate is refused.
+        |
+        | 409 and only ever for this: the Trip Sheet page reads it as "already
+        | saved" - the retry of a save that reached the server but whose answer
+        | never made it back.
+        */
+        if ($shipment->stops()->exists()) {
+            return $this->error(
+                "This load's stops are already saved and can't be replaced.",
+                ['stops' => ['already_saved']],
+                409
+            );
+        }
+
+        // Before anything is written - ShipmentService::addStops() starts by
+        // deleting the load's stops.
+        $problems = $this->stopProblems($stopsArray);
+
+        if ($problems !== []) {
+            $messages = array_merge(...array_values($problems));
+            $more = count($messages) - 1;
+
+            return $this->error(
+                $messages[0].($more > 0 ? " (and {$more} more)" : ''),
+                $problems,
+                422
+            );
+        }
+
+        // Stored as numbers, whichever way they arrived.
+        $stopsArray = array_map(fn (array $stop) => [
+            'latitude' => StopLocation::number($stop['latitude']),
+            'longitude' => StopLocation::number($stop['longitude']),
+        ] + $stop, array_values($stopsArray));
 
         $updatedShipment = $this->shipmentService->addStops($shipment, $stopsArray, $request);
 
@@ -146,6 +190,48 @@ class ShipmentController extends BaseController
             'Trip Sheet stops saved successfully.',
             200
         );
+    }
+
+    /**
+     * What is wrong with each stop, worded for the broker - empty when every
+     * stop has an address and a place on the map (StopLocation's rule, the
+     * one the driver side applies).
+     *
+     * @param  array<int|string, mixed>  $stops
+     * @return array<string, array<int, string>> keyed like a validation error bag
+     */
+    private function stopProblems(array $stops): array
+    {
+        $problems = [];
+
+        foreach (array_values($stops) as $i => $stop) {
+            $label = 'Stop '.($i + 1);
+
+            if (! is_array($stop)) {
+                $problems["stops.{$i}"] = ["{$label}: this stop could not be read."];
+
+                continue;
+            }
+
+            $type = is_string($stop['stop_type'] ?? null) ? trim($stop['stop_type']) : '';
+
+            if ($type !== '') {
+                $label .= " ({$type})";
+            }
+
+            if (! is_string($stop['address'] ?? null) || trim($stop['address']) === '') {
+                $problems["stops.{$i}.address"] = ["{$label}: enter the address."];
+
+                continue;
+            }
+
+            if (! StopLocation::isLatitude($stop['latitude'] ?? null)
+                || ! StopLocation::isLongitude($stop['longitude'] ?? null)) {
+                $problems["stops.{$i}.location"] = ["{$label}: choose the address from the suggestions."];
+            }
+        }
+
+        return $problems;
     }
 
     public function index(Request $request)
