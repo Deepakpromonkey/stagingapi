@@ -327,9 +327,59 @@ Route::prefix('v1')->group(function () {
             });
     });
 
+    /*
+    | DT Pay, public side: Guest Pay (reached through a private tracking
+    | token) and Stripe's webhook (verified by its signature).
+    */
+    Route::post('/dtpay/stripe/webhook', [\App\Pay\Http\WebhookController::class, 'handle']);
+
+    Route::prefix('dtpay/guest')->middleware('throttle:30,1')->group(function () {
+        Route::get('/config', [\App\Pay\Http\GuestController::class, 'config']);
+        Route::get('/carriers', [\App\Pay\Http\GuestController::class, 'carrierSearch']);
+        Route::post('/quote', [\App\Pay\Http\GuestController::class, 'quote']);
+        Route::post('/payments', [\App\Pay\Http\GuestController::class, 'store'])->middleware('throttle:6,1');
+        Route::get('/payments/{token}', [\App\Pay\Http\GuestController::class, 'show']);
+        Route::post('/payments/{token}/intent', [\App\Pay\Http\GuestController::class, 'intent']);
+        Route::post('/payments/{token}/sync', [\App\Pay\Http\GuestController::class, 'sync']);
+        Route::post('/payments/{token}/release', [\App\Pay\Http\GuestController::class, 'release']);
+        Route::post('/payments/{token}/dispute', [\App\Pay\Http\GuestController::class, 'dispute']);
+    });
+
     // Protected Routes
     Route::middleware(['auth:sanctum', EnsureBrokerUser::class, EnsurePasswordChanged::class])->group(function () {
         Route::post('/check-pro-number', [ShipmentController::class, 'checkProNumber']);
+
+        /*
+        | DT Pay for brokers. Viewing needs create-fund-payment; the actions
+        | that move money check their own permissions (release limits,
+        | refund-cancel-payment) in the controller. Every payment is scoped
+        | to the caller's company.
+        */
+        Route::prefix('dtpay')->middleware(PermissionMiddleware::using(['create-fund-payment', 'release-conditional-payment-capped', 'release-conditional-payment-unlimited', 'refund-cancel-payment']))->group(function () {
+            Route::get('/config', [\App\Pay\Http\BrokerController::class, 'config']);
+            Route::get('/summary', [\App\Pay\Http\BrokerController::class, 'summary']);
+            Route::get('/methods', [\App\Pay\Http\BrokerController::class, 'methods']);
+            Route::post('/methods/setup-intent', [\App\Pay\Http\BrokerController::class, 'setupIntent']);
+            Route::delete('/methods/{methodId}', [\App\Pay\Http\BrokerController::class, 'removeMethod']);
+            Route::get('/shipments', [\App\Pay\Http\BrokerController::class, 'shipments']);
+            Route::get('/carriers', [\App\Pay\Http\BrokerController::class, 'carrierSearch']);
+            Route::get('/carriers/{dot}/payout', [\App\Pay\Http\BrokerController::class, 'carrierPayout'])->where('dot', '[0-9]+');
+            Route::post('/carriers/{dot}/payout-link', [\App\Pay\Http\BrokerController::class, 'carrierPayoutLink'])->where('dot', '[0-9]+');
+            Route::post('/quote', [\App\Pay\Http\BrokerController::class, 'quote']);
+            Route::get('/payments', [\App\Pay\Http\BrokerController::class, 'index']);
+            Route::post('/payments', [\App\Pay\Http\BrokerController::class, 'store']);
+            Route::get('/payments/{id}', [\App\Pay\Http\BrokerController::class, 'show']);
+            Route::post('/payments/{id}/pay', [\App\Pay\Http\BrokerController::class, 'pay']);
+            Route::post('/payments/{id}/sync', [\App\Pay\Http\BrokerController::class, 'sync']);
+            Route::post('/payments/{id}/release', [\App\Pay\Http\BrokerController::class, 'release']);
+            Route::post('/payments/{id}/refund', [\App\Pay\Http\BrokerController::class, 'refund']);
+            Route::post('/payments/{id}/cancel', [\App\Pay\Http\BrokerController::class, 'cancel']);
+            Route::post('/payments/{id}/hold', [\App\Pay\Http\BrokerController::class, 'hold']);
+            Route::post('/payments/{id}/pod', [\App\Pay\Http\BrokerController::class, 'pod']);
+            Route::post('/payments/{id}/disputes', [\App\Pay\Http\BrokerController::class, 'dispute']);
+            Route::post('/payments/{id}/disputes/{disputeId}/resolve', [\App\Pay\Http\BrokerController::class, 'resolveDispute'])->where('disputeId', '[0-9]+');
+            Route::get('/payments/{id}/files/{kind}', [\App\Pay\Http\BrokerController::class, 'file'])->where('kind', 'rate-confirmation|pod|evidence');
+        });
 
         /*
         | The header bell. Derived from the onboarding rows rather than stored,

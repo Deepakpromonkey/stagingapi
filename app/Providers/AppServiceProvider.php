@@ -36,6 +36,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        // DT Pay talks to Stripe only through this; tests bind a fake.
+        $this->app->bind(\App\Pay\Stripe\Gateway::class, \App\Pay\Stripe\StripeGateway::class);
+
         /*
          | FMCSA filings come from the external carrier database. Bound to an
          | interface so a test can stand in for it — reading that host from the
