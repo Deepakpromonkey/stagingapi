@@ -42,8 +42,8 @@ interface Gateway
     /** @return array{id: string, status: string} */
     public function createRefund(string $paymentIntentId, array $metadata, string $idempotencyKey): array;
 
-    /** A new Express account for a carrier; returns its id. */
-    public function createExpressAccount(string $carrierDot, ?string $email, ?string $businessName): string;
+    /** A new connected account (Accounts v2 recipient) for a carrier; returns its id. */
+    public function createRecipientAccount(string $carrierDot, ?string $email, ?string $businessName): string;
 
     /** A hosted onboarding link for an Express account. */
     public function createAccountLink(string $accountId, string $refreshUrl, string $returnUrl): string;

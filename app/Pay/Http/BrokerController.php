@@ -456,7 +456,26 @@ class BrokerController extends Controller
     {
         $payment->loadMissing(['events', 'disputes']);
 
-        return Presenter::detail($payment, $request->user(), $this->payments->payoutAccount($payment->carrier_dot));
+        return Presenter::detail($payment, $request->user(), $this->freshPayout($payment));
+    }
+
+    /**
+     * The carrier's payout account, re-read from Stripe while a funded
+     * payment is waiting on it, so Release unlocks as soon as they finish.
+     */
+    private function freshPayout(Payment $payment): ?\App\Pay\Models\PayoutAccount
+    {
+        $account = $this->payments->payoutAccount($payment->carrier_dot);
+
+        if ($account && ! $account->ready() && $payment->status === Payment::FUNDED) {
+            try {
+                $account = $this->payments->refreshPayoutAccount($account);
+            } catch (Throwable) {
+                // Stripe unreachable: show what we last knew.
+            }
+        }
+
+        return $account;
     }
 
     /** Runs an action, turning rule breaks and Stripe trouble into clean JSON. */

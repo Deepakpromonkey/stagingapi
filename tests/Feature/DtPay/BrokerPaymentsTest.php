@@ -110,6 +110,23 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk();
     }
 
+    public function test_release_rechecks_a_carrier_that_finished_setup_since(): void
+    {
+        $this->actingAsUser($this->user());
+        $payment = $this->createPayment();
+        $this->pay($payment['id'], 'card');
+
+        $this->postJson('/api/v1/dtpay/carriers/3577340/payout-link')->assertOk();
+        $this->getJson("/api/v1/dtpay/payments/{$payment['id']}")->assertJsonPath('payment.can.release', false)
+            ->assertJsonPath('payment.can.release_blocked_reason', 'The carrier has not finished payout setup.');
+
+        // The carrier completes Stripe's onboarding; no webhook reaches us.
+        $this->stripe->accounts['acct_fake_3577340'] = ['details_submitted' => true, 'payouts_enabled' => true, 'transfers_active' => true];
+
+        $this->getJson("/api/v1/dtpay/payments/{$payment['id']}")->assertJsonPath('payment.can.release', true);
+        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk()->assertJsonPath('payment.status', 'released');
+    }
+
     public function test_a_failed_transfer_leaves_the_money_held(): void
     {
         $this->actingAsUser($this->user());

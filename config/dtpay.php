@@ -51,7 +51,7 @@ return [
     'disk' => env('DTPAY_DISK', env('FILESYSTEM_DISK', 'local')),
 
     // Where carriers land after Stripe's payout onboarding.
-    'payout_return_url' => env('DTPAY_PAYOUT_RETURN_URL', rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/').'/dt-pay/payout-setup-complete'),
+    'payout_return_url' => env('DTPAY_PAYOUT_RETURN_URL', rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/').'/payouts/complete'),
 
     // Guest tracking links point here: {base}/guest-pay/track/{token}
     'frontend_url' => rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/'),

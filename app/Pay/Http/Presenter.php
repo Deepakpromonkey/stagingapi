@@ -62,9 +62,9 @@ final class Presenter
             'livemode' => $p->livemode,
             'breakdown' => [
                 'amount' => self::money($p->amount_cents),
-                'platform_fee' => self::money($p->platform_fee_cents),
+                'platform_fee' => self::money($p->platform_fee_cents) + ['pct' => $p->platform_fee_pct],
                 'platform_fee_pct' => $p->platform_fee_pct,
-                'card_fee' => self::money($p->card_fee_cents),
+                'card_fee' => self::money($p->card_fee_cents) + ['pct' => $p->card_fee_cents > 0 ? (float) config('dtpay.fees.card_pct') : 0],
                 'total' => self::money($p->total_cents),
                 'carrier_receives' => self::money($p->amount_cents),
             ],
@@ -87,7 +87,7 @@ final class Presenter
                 'actor' => $e->actor_type,
                 'at' => $e->created_at?->toIso8601String(),
             ])->values(),
-            'can' => $guest ? self::guestCan($p, $open !== null) : self::brokerCan($p, $user, $open !== null, $payout),
+            'can' => $guest ? self::guestCan($p, $open !== null, $payout) : self::brokerCan($p, $user, $open !== null, $payout),
         ];
     }
 
@@ -121,7 +121,7 @@ final class Presenter
         return [
             'pay' => $create && $p->payable(),
             'cancel' => $refund && $p->payable(),
-            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && Permissions::canRelease($user, $p),
+            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && (bool) $payout?->ready() && Permissions::canRelease($user, $p),
             'release_blocked_reason' => self::releaseBlocker($p, $disputed, $payout),
             'refund' => $refund && $p->status === Payment::FUNDED,
             'hold' => $create && $held && ! $p->on_hold,
@@ -131,13 +131,13 @@ final class Presenter
         ];
     }
 
-    private static function guestCan(Payment $p, bool $disputed): array
+    private static function guestCan(Payment $p, bool $disputed, ?PayoutAccount $payout): array
     {
         $held = in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true);
 
         return [
             'pay' => $p->payable(),
-            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed,
+            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && (bool) $payout?->ready(),
             'dispute' => $held && ! $disputed,
         ];
     }

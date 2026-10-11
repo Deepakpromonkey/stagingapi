@@ -141,7 +141,7 @@ class FakeGateway implements Gateway
         return $this->idempotent[$idempotencyKey] = ['id' => 're_fake_'.count($this->refunds), 'status' => 'succeeded'];
     }
 
-    public function createExpressAccount(string $carrierDot, ?string $email, ?string $businessName): string
+    public function createRecipientAccount(string $carrierDot, ?string $email, ?string $businessName): string
     {
         $id = 'acct_fake_'.$carrierDot;
         $this->accounts[$id] = ['details_submitted' => false, 'payouts_enabled' => false, 'transfers_active' => false];

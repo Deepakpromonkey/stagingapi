@@ -8,7 +8,7 @@ use Stripe\Webhook;
 
 final class StripeGateway implements Gateway
 {
-    private ?StripeClient $client = null;
+    private ?QuietStripe $client = null;   // a StripeClient, notice-tolerant
 
     public function livemode(): bool
     {
@@ -120,37 +120,58 @@ final class StripeGateway implements Gateway
         return ['id' => $refund->id, 'status' => $refund->status];
     }
 
-    public function createExpressAccount(string $carrierDot, ?string $email, ?string $businessName): string
+    /*
+     * Carriers are Accounts v2 recipients: they only receive transfers from
+     * DollarTraq (separate charges and transfers), onboard on Stripe's hosted
+     * pages and see payouts in the Express dashboard. Stripe no longer allows
+     * Accounts v1 creation for new Connect integrations.
+     */
+    public function createRecipientAccount(string $carrierDot, ?string $email, ?string $businessName): string
     {
-        return $this->stripe()->accounts->create(array_filter([
-            'type' => 'express',
-            'country' => 'US',
-            'email' => $email,
-            'business_type' => 'company',
-            'business_profile' => array_filter(['name' => $businessName, 'mcc' => '4214']),
-            'capabilities' => ['transfers' => ['requested' => true]],
+        return $this->stripe()->v2->core->accounts->create(array_filter([
+            'contact_email' => $email,
+            'display_name' => $businessName ?: 'Carrier DOT '.$carrierDot,
+            'dashboard' => 'express',
+            'identity' => ['country' => 'us', 'entity_type' => 'company'],
+            'configuration' => [
+                'recipient' => [
+                    'capabilities' => [
+                        'stripe_balance' => ['stripe_transfers' => ['requested' => true]],
+                    ],
+                ],
+            ],
+            // An Express dashboard requires the platform to hold these.
+            'defaults' => ['responsibilities' => ['fees_collector' => 'application', 'losses_collector' => 'application']],
             'metadata' => ['carrier_dot' => $carrierDot, 'source' => 'dtpay'],
         ]))->id;
     }
 
     public function createAccountLink(string $accountId, string $refreshUrl, string $returnUrl): string
     {
-        return $this->stripe()->accountLinks->create([
+        return $this->stripe()->v2->core->accountLinks->create([
             'account' => $accountId,
-            'refresh_url' => $refreshUrl,
-            'return_url' => $returnUrl,
-            'type' => 'account_onboarding',
+            'use_case' => [
+                'type' => 'account_onboarding',
+                'account_onboarding' => [
+                    'configurations' => ['recipient'],
+                    'refresh_url' => $refreshUrl,
+                    'return_url' => $returnUrl,
+                ],
+            ],
         ])->url;
     }
 
     public function retrieveAccount(string $accountId): array
     {
-        $account = $this->stripe()->accounts->retrieve($accountId);
+        $account = $this->stripe()->v2->core->accounts->retrieve($accountId, ['include' => ['configuration.recipient', 'requirements']])->toArray();
+
+        $transfers = $account['configuration']['recipient']['capabilities']['stripe_balance']['stripe_transfers']['status'] ?? null;
+        $due = $account['requirements']['entries'] ?? [];
 
         return [
-            'details_submitted' => (bool) $account->details_submitted,
-            'payouts_enabled' => (bool) $account->payouts_enabled,
-            'transfers_active' => ($account->capabilities->transfers ?? null) === 'active',
+            'details_submitted' => $due === [] || $transfers === 'active',
+            'payouts_enabled' => $transfers === 'active',
+            'transfers_active' => $transfers === 'active',
         ];
     }
 
@@ -165,7 +186,7 @@ final class StripeGateway implements Gateway
         return Webhook::constructEvent($payload, $signature, $secret)->toArray();
     }
 
-    private function stripe(): StripeClient
+    private function stripe(): QuietStripe
     {
         $secret = config('dtpay.stripe.secret');
 
@@ -178,7 +199,7 @@ final class StripeGateway implements Gateway
             throw new PaymentsUnavailable('DT Pay refuses a live Stripe key unless DTPAY_ALLOW_LIVE=true.');
         }
 
-        return $this->client ??= new StripeClient($secret);
+        return $this->client ??= new QuietStripe(new StripeClient($secret));
     }
 
     private function describe($pm): array

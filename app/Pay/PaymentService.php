@@ -312,6 +312,16 @@ class PaymentService
     {
         $account = PayoutAccount::where('carrier_dot', $payment->carrier_dot)->where('livemode', $payment->livemode)->first();
 
+        // The carrier may have finished Stripe's setup since we last looked;
+        // ask Stripe rather than turn the release away on a stale flag.
+        if ($account && ! $account->ready()) {
+            try {
+                $account = $this->refreshPayoutAccount($account);
+            } catch (Throwable $e) {
+                Log::warning("[DTPay] could not refresh payout account {$account->stripe_account_id}: ".$e->getMessage());
+            }
+        }
+
         $payment = DB::transaction(function () use ($payment, $account) {
             $locked = Payment::whereKey($payment->id)->lockForUpdate()->first();
 
@@ -530,7 +540,7 @@ class PaymentService
             $account = PayoutAccount::create([
                 'carrier_dot' => $carrierDot,
                 'livemode' => $this->stripe->livemode(),
-                'stripe_account_id' => $this->stripe->createExpressAccount($carrierDot, $email, $businessName),
+                'stripe_account_id' => $this->stripe->createRecipientAccount($carrierDot, $email, $businessName),
             ]);
         }
 
