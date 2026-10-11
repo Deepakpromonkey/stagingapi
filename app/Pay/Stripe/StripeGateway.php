@@ -210,7 +210,7 @@ final class StripeGateway implements Gateway
             return [
                 'id' => $pm->id,
                 'type' => 'card',
-                'label' => trim("{$brand} ···· {$pm->card->last4}"),
+                'label' => trim("{$brand} ending {$pm->card->last4}"),
                 'brand' => $brand,
                 'last4' => $pm->card->last4,
                 'exp' => sprintf('%02d/%02d', $pm->card->exp_month, $pm->card->exp_year % 100),
@@ -221,7 +221,7 @@ final class StripeGateway implements Gateway
         return [
             'id' => $pm->id,
             'type' => 'us_bank_account',
-            'label' => trim(($pm->us_bank_account->bank_name ?? 'Bank').' ···· '.$pm->us_bank_account->last4),
+            'label' => trim(($pm->us_bank_account->bank_name ?? 'Bank').' ending '.$pm->us_bank_account->last4),
             'brand' => null,
             'last4' => $pm->us_bank_account->last4,
             'exp' => null,

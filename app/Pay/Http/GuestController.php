@@ -146,7 +146,8 @@ class GuestController extends Controller
     {
         abort_unless(strlen($token) === 48, 404);
 
-        return Payment::where('source', Payment::SOURCE_GUEST)->where('guest_token', $token)->firstOrFail();
+        return Payment::where('source', Payment::SOURCE_GUEST)->where('guest_token', $token)->first()
+            ?? abort(404, 'This payment link is not valid. Check that you copied the whole link.');
     }
 
     private function present(Payment $payment): array

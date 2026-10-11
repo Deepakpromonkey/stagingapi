@@ -290,7 +290,8 @@ class BrokerController extends Controller
         ]);
 
         if ($data['source'] === Payment::SOURCE_SHIPMENT) {
-            $shipment = Shipment::where('company_id', $user->company_id)->findOrFail($data['shipment_id']);
+            $shipment = Shipment::where('company_id', $user->company_id)->find($data['shipment_id'])
+                ?? abort(404, 'That load was not found.');
 
             abort_unless($shipment->carrier_dot, 422, 'That load has no carrier assigned.');
 
@@ -410,7 +411,8 @@ class BrokerController extends Controller
     {
         $data = $request->validate(['resolution' => ['required', 'string', 'min:3', 'max:2000']]);
         $payment = $this->payment($request, $id);
-        $dispute = Dispute::where('payment_id', $payment->id)->findOrFail($disputeId);
+        $dispute = Dispute::where('payment_id', $payment->id)->find($disputeId)
+            ?? abort(404, 'That dispute was not found.');
 
         return $this->guarded(function () use ($request, $payment, $dispute, $data) {
             $this->payments->resolveDispute($payment, $dispute, $data['resolution'], 'broker', $request->user()->id);
@@ -431,7 +433,8 @@ class BrokerController extends Controller
         };
 
         if ($kind === 'evidence') {
-            $dispute = Dispute::where('payment_id', $payment->id)->findOrFail((int) $request->query('dispute'));
+            $dispute = Dispute::where('payment_id', $payment->id)->find((int) $request->query('dispute'))
+                ?? abort(404, 'That dispute was not found.');
             $path = ($dispute->evidence_paths ?? [])[(int) $request->query('index', 0)] ?? null;
         }
 
@@ -449,7 +452,8 @@ class BrokerController extends Controller
     /** A payment of the caller's company, or 404. */
     private function payment(Request $request, string $id): Payment
     {
-        return Payment::where('company_id', $request->user()->company_id)->where('uuid', $id)->firstOrFail();
+        return Payment::where('company_id', $request->user()->company_id)->where('uuid', $id)->first()
+            ?? abort(404, 'This payment was not found. It may belong to another company.');
     }
 
     private function present(Payment $payment, Request $request): array

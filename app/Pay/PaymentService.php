@@ -176,7 +176,7 @@ class PaymentService
 
         $attempt = $payment->events()->where('type', 'pay_attempt')->count() + 1;
 
-        $this->log($payment, 'pay_attempt', 'Payment submitted', $method['label'].' · '.$this->money($payment->total_cents), 'broker', $user->id);
+        $this->log($payment, 'pay_attempt', 'Payment submitted', $this->money($payment->total_cents).' from '.$method['label'], 'broker', $user->id);
 
         $intent = $this->stripe->createPaymentIntent($params, "dtpay-pay-{$payment->uuid}-{$attempt}");
 
@@ -258,7 +258,7 @@ class PaymentService
                     $payment->funded_at ??= now();
                     $payment->failure_reason = null;
                     if ($before !== Payment::FUNDED) {
-                        $this->log($payment, 'funded', 'Funds received and held', $this->money($payment->total_cents).' secured · ready to release', $actorType, $actorId);
+                        $this->log($payment, 'funded', 'Funds received and held', $this->money($payment->total_cents).' received. Ready to release when the load delivers.', $actorType, $actorId);
                     }
                     break;
 
@@ -422,7 +422,7 @@ class PaymentService
             'refunded_by' => $actorType === 'broker' ? $actorId : null,
         ])->save();
 
-        $this->log($payment, 'refunded', 'Refunded to payer', $this->money($payment->total_cents).($reason ? ' · '.$reason : ''), $actorType, $actorId, ['refund' => $refund['id']]);
+        $this->log($payment, 'refunded', 'Refunded to payer', $this->money($payment->total_cents).($reason ? '. '.$reason : ''), $actorType, $actorId, ['refund' => $refund['id']]);
 
         return $payment;
     }

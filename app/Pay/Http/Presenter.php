@@ -13,7 +13,7 @@ final class Presenter
     public const STATUS_LABELS = [
         Payment::DRAFT => 'Awaiting payment',
         Payment::PROCESSING => 'Processing',
-        Payment::FUNDED => 'Funded · held',
+        Payment::FUNDED => 'Held',
         Payment::RELEASING => 'Releasing',
         Payment::RELEASED => 'Released',
         Payment::REFUNDING => 'Refunding',

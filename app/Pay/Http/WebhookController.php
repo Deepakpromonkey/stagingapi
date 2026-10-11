@@ -94,6 +94,6 @@ class WebhookController extends Controller
             $payment->forceFill(['on_hold' => true])->save();
         }
 
-        $this->payments->log($payment, 'chargeback', 'Card payment disputed with the bank', ($dispute['reason'] ?? 'unknown').' · held automatically', 'stripe');
+        $this->payments->log($payment, 'chargeback', 'Card payment disputed with the bank', 'Reason: '.str_replace('_', ' ', $dispute['reason'] ?? 'unknown').'. The payment is on hold.', 'stripe');
     }
 }
