@@ -67,8 +67,65 @@ class BrokerController extends Controller
             'open_disputes' => Dispute::where('status', Dispute::OPEN)
                 ->whereIn('payment_id', $base()->select('id'))->count(),
             'fees_paid' => Presenter::money((int) $base()->whereIn('status', [Payment::FUNDED, Payment::RELEASED])->sum(DB::raw('platform_fee_cents + card_fee_cents'))),
-            'recent' => $base()->latest('id')->limit(6)->get()->map(fn ($p) => Presenter::summary($p))->values(),
+            'fees_this_month' => Presenter::money((int) $base()->whereIn('status', [Payment::FUNDED, Payment::RELEASED])->where('funded_at', '>=', $monthStart)->sum(DB::raw('platform_fee_cents + card_fee_cents'))),
+            'counts' => $this->statusCounts($company),
+            'to_release' => $base()->where('status', Payment::FUNDED)->oldest('funded_at')->limit(5)->get()
+                ->map(fn ($p) => Presenter::summary($p) + [
+                    'payout_ready' => (bool) $this->payments->payoutAccount($p->carrier_dot)?->ready(),
+                    'disputed' => (bool) $p->openDispute(),
+                ])->values(),
+            'daily' => $this->daily($base(), 30),
+            'recent' => $base()->latest('id')->limit(8)->get()->map(fn ($p) => Presenter::summary($p))->values(),
         ]);
+    }
+
+    /** How many payments sit under each list filter. */
+    private function statusCounts(int $company): array
+    {
+        $byStatus = Payment::where('company_id', $company)
+            ->selectRaw('status, count(*) as n')->groupBy('status')->pluck('n', 'status')->map(fn ($n) => (int) $n);
+
+        return [
+            '' => $byStatus->sum(),
+            'draft' => $byStatus->get(Payment::DRAFT, 0),
+            'processing' => $byStatus->get(Payment::PROCESSING, 0),
+            'held' => $byStatus->get(Payment::FUNDED, 0),
+            'disputed' => Dispute::where('status', Dispute::OPEN)
+                ->whereIn('payment_id', Payment::where('company_id', $company)->select('id'))->distinct()->count('payment_id'),
+            'released' => $byStatus->get(Payment::RELEASED, 0),
+            'refunded' => $byStatus->get(Payment::REFUNDED, 0),
+            'failed' => $byStatus->get(Payment::FAILED, 0),
+            'cancelled' => $byStatus->get(Payment::CANCELLED, 0),
+        ];
+    }
+
+    /**
+     * Money funded and released per day for the last $days days, oldest
+     * first, bucketed here so it works the same on MySQL and SQLite.
+     *
+     * @return list<array{date: string, funded_cents: int, released_cents: int}>
+     */
+    private function daily($query, int $days): array
+    {
+        $from = now()->subDays($days - 1)->startOfDay();
+        $buckets = [];
+
+        for ($d = $from->copy(); $d->lte(now()); $d->addDay()) {
+            $buckets[$d->toDateString()] = ['date' => $d->toDateString(), 'funded_cents' => 0, 'released_cents' => 0];
+        }
+
+        $query->where(fn ($w) => $w->where('funded_at', '>=', $from)->orWhere('released_at', '>=', $from))
+            ->get(['amount_cents', 'funded_at', 'released_at'])
+            ->each(function ($p) use (&$buckets, $from) {
+                if ($p->funded_at && $p->funded_at->gte($from)) {
+                    $buckets[$p->funded_at->toDateString()]['funded_cents'] += $p->amount_cents;
+                }
+                if ($p->released_at && $p->released_at->gte($from)) {
+                    $buckets[$p->released_at->toDateString()]['released_cents'] += $p->amount_cents;
+                }
+            });
+
+        return array_values($buckets);
     }
 
     /*
@@ -265,6 +322,7 @@ class BrokerController extends Controller
         return response()->json([
             'data' => collect($page->items())->map(fn ($p) => Presenter::summary($p))->values(),
             'meta' => ['current_page' => $page->currentPage(), 'last_page' => $page->lastPage(), 'total' => $page->total()],
+            'counts' => $this->statusCounts($request->user()->company_id),
         ]);
     }
 

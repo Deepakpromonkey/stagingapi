@@ -313,7 +313,15 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->assertSame(1, $summary['held']['count']);
         $this->assertSame(1, $summary['awaiting_payment']['count']);
 
-        $this->getJson('/api/v1/dtpay/payments?status=held')->assertJsonCount(1, 'data');
+        $this->assertSame(['' => 2, 'draft' => 1, 'processing' => 0, 'held' => 1, 'disputed' => 0, 'released' => 0, 'refunded' => 0, 'failed' => 0, 'cancelled' => 0], $summary['counts']);
+        $this->assertCount(1, $summary['to_release']);
+        $this->assertSame($a['id'], $summary['to_release'][0]['id']);
+        $this->assertFalse($summary['to_release'][0]['payout_ready']);
+        $this->assertCount(30, $summary['daily']);
+        $this->assertSame(now()->toDateString(), $summary['daily'][29]['date']);
+        $this->assertSame(100000, $summary['daily'][29]['funded_cents']);
+
+        $this->getJson('/api/v1/dtpay/payments?status=held')->assertJsonCount(1, 'data')->assertJsonPath('counts.held', 1);
         $this->getJson('/api/v1/dtpay/payments?q=LD-5521')->assertJsonCount(2, 'data');
     }
 
