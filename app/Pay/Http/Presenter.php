@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Pay\Models\Dispute;
 use App\Pay\Models\Payment;
 use App\Pay\Models\PayoutAccount;
+use App\Pay\Models\RefundRequest;
 
 /** The JSON shape of a DT Pay payment, shared by the broker and guest APIs. */
 final class Presenter
@@ -31,6 +32,7 @@ final class Presenter
             'status' => $p->status,
             'status_label' => self::STATUS_LABELS[$p->status] ?? $p->status,
             'on_hold' => $p->on_hold,
+            'refund_requested' => $p->refundRequests()->whereIn('status', RefundRequest::OPEN)->exists(),
             'carrier' => ['dot' => $p->carrier_dot, 'name' => $p->carrier_name, 'mc' => $p->carrier_mc],
             'load_number' => $p->load_number,
             'origin' => $p->origin,
@@ -87,6 +89,7 @@ final class Presenter
                 'actor' => $e->actor_type,
                 'at' => $e->created_at?->toIso8601String(),
             ])->values(),
+            'refund_request' => $guest ? null : (($r = $p->refundRequests()->first()) ? self::refundRequest($r) : null),
             'can' => $guest ? self::guestCan($p, $open !== null, $payout) : self::brokerCan($p, $user, $open !== null, $payout),
         ];
     }
@@ -107,6 +110,19 @@ final class Presenter
         ];
     }
 
+    public static function refundRequest(RefundRequest $r): array
+    {
+        return [
+            'id' => $r->uuid,
+            'status' => $r->status,
+            'reason' => $r->reason,
+            'decision_note' => $r->decision_note,
+            'decided_by' => $r->decided_by_name ? 'DollarTraq' : null,
+            'created_at' => $r->created_at?->toIso8601String(),
+            'decided_at' => $r->decided_at?->toIso8601String(),
+        ];
+    }
+
     public static function money(int $cents): array
     {
         return ['cents' => $cents, 'formatted' => '$'.number_format($cents / 100, 2)];
@@ -117,13 +133,15 @@ final class Presenter
         $create = Permissions::can($user, 'create-fund-payment');
         $refund = Permissions::can($user, 'refund-cancel-payment');
         $held = in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true);
+        $refunding = $p->openRefundRequest();
 
         return [
             'pay' => $create && $p->payable(),
             'cancel' => $refund && $p->payable(),
-            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && (bool) $payout?->ready() && Permissions::canRelease($user, $p),
-            'release_blocked_reason' => self::releaseBlocker($p, $disputed, $payout),
-            'refund' => $refund && $p->status === Payment::FUNDED,
+            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && ! $refunding && (bool) $payout?->ready() && Permissions::canRelease($user, $p),
+            'release_blocked_reason' => self::releaseBlocker($p, $disputed, $payout, (bool) $refunding),
+            'refund' => $refund && $p->status === Payment::FUNDED && ! $refunding,
+            'withdraw_refund' => $refund && $refunding?->status === RefundRequest::PENDING,
             'hold' => $create && $held && ! $p->on_hold,
             'unhold' => $create && $held && $p->on_hold,
             'dispute' => $create && $held && ! $disputed,
@@ -142,11 +160,12 @@ final class Presenter
         ];
     }
 
-    private static function releaseBlocker(Payment $p, bool $disputed, ?PayoutAccount $payout): ?string
+    private static function releaseBlocker(Payment $p, bool $disputed, ?PayoutAccount $payout, bool $refunding = false): ?string
     {
         return match (true) {
             $p->status === Payment::PROCESSING => 'Waiting for the funds to clear.',
             $p->status !== Payment::FUNDED => null,
+            $refunding => 'A refund was requested. DollarTraq is reviewing it.',
             $p->on_hold => 'On hold.',
             $disputed => 'Open dispute.',
             ! $payout || ! $payout->ready() => 'The carrier has not finished payout setup.',

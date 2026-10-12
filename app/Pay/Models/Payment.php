@@ -65,6 +65,17 @@ class Payment extends Model
         return $this->disputes()->where('status', Dispute::OPEN)->first();
     }
 
+    public function refundRequests(): HasMany
+    {
+        return $this->hasMany(RefundRequest::class)->orderByDesc('id');
+    }
+
+    /** The refund request DollarTraq is still deciding on, if any. */
+    public function openRefundRequest(): ?RefundRequest
+    {
+        return $this->refundRequests()->whereIn('status', RefundRequest::OPEN)->first();
+    }
+
     /** Can the payer still pay (or pay again after a failure)? */
     public function payable(): bool
     {

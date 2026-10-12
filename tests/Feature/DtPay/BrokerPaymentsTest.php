@@ -167,22 +167,22 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk();
     }
 
-    public function test_refund_only_while_held_never_after_release(): void
+    public function test_refund_can_only_be_requested_while_held_never_after_release(): void
     {
         $this->actingAsUser($this->user());
 
         $held = $this->createPayment();
         $this->pay($held['id'], 'card');
-        $this->postJson("/api/v1/dtpay/payments/{$held['id']}/refund")->assertOk()->assertJsonPath('payment.status', 'refunded');
-        $this->postJson("/api/v1/dtpay/payments/{$held['id']}/refund")->assertStatus(422);
-        $this->assertCount(1, $this->stripe->refunds);
+        $this->postJson("/api/v1/dtpay/payments/{$held['id']}/refund", ['reason' => 'Load cancelled by shipper'])->assertCreated();
+        $this->postJson("/api/v1/dtpay/payments/{$held['id']}/refund", ['reason' => 'Asking again'])->assertStatus(422);
+        $this->assertCount(0, $this->stripe->refunds, 'a broker request never refunds by itself');
 
         $released = $this->createPayment(200.00);
         $this->pay($released['id'], 'card');
         $this->carrierReady();
         $this->postJson("/api/v1/dtpay/payments/{$released['id']}/release")->assertOk();
-        $this->postJson("/api/v1/dtpay/payments/{$released['id']}/refund")->assertStatus(422);
-        $this->assertCount(1, $this->stripe->refunds, 'no refund once the carrier has the money');
+        $this->postJson("/api/v1/dtpay/payments/{$released['id']}/refund", ['reason' => 'Too late now'])->assertStatus(422);
+        $this->assertCount(0, $this->stripe->refunds, 'no refund once the carrier has the money');
     }
 
     public function test_another_company_cannot_see_or_move_the_payment(): void

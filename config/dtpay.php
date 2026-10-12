@@ -28,6 +28,12 @@ return [
     */
     'allow_live' => filter_var(env('DTPAY_ALLOW_LIVE', false), FILTER_VALIDATE_BOOLEAN),
 
+    /*
+    | Shared secret the DollarTraq admin backend sends to the admin endpoints
+    | (refund approvals, escrow ledger). Empty switches those endpoints off.
+    */
+    'admin_token' => env('DTPAY_ADMIN_TOKEN'),
+
     'currency' => 'usd',
 
     'fees' => [

@@ -333,6 +333,15 @@ Route::prefix('v1')->group(function () {
     */
     Route::post('/dtpay/stripe/webhook', [\App\Pay\Http\WebhookController::class, 'handle']);
 
+    // DollarTraq admins, through the admin backend (shared token, see AdminToken).
+    Route::prefix('dtpay/admin')->middleware([\App\Pay\Http\AdminToken::class, 'throttle:60,1'])->group(function () {
+        Route::get('/overview', [\App\Pay\Http\AdminController::class, 'overview']);
+        Route::get('/payments', [\App\Pay\Http\AdminController::class, 'payments']);
+        Route::get('/refund-requests', [\App\Pay\Http\AdminController::class, 'refundRequests']);
+        Route::post('/refund-requests/{id}/approve', [\App\Pay\Http\AdminController::class, 'approve']);
+        Route::post('/refund-requests/{id}/reject', [\App\Pay\Http\AdminController::class, 'reject']);
+    });
+
     Route::prefix('dtpay/guest')->middleware('throttle:30,1')->group(function () {
         Route::get('/config', [\App\Pay\Http\GuestController::class, 'config']);
         Route::get('/carriers', [\App\Pay\Http\GuestController::class, 'carrierSearch']);
@@ -373,6 +382,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/payments/{id}/sync', [\App\Pay\Http\BrokerController::class, 'sync']);
             Route::post('/payments/{id}/release', [\App\Pay\Http\BrokerController::class, 'release']);
             Route::post('/payments/{id}/refund', [\App\Pay\Http\BrokerController::class, 'refund']);
+            Route::delete('/payments/{id}/refund-request', [\App\Pay\Http\BrokerController::class, 'withdrawRefund']);
             Route::post('/payments/{id}/cancel', [\App\Pay\Http\BrokerController::class, 'cancel']);
             Route::post('/payments/{id}/hold', [\App\Pay\Http\BrokerController::class, 'hold']);
             Route::post('/payments/{id}/pod', [\App\Pay\Http\BrokerController::class, 'pod']);
@@ -762,10 +772,13 @@ Route::prefix('v1')->group(function () {
         Route::post('/dt-pay/transactions', [DtPayTransactionsController::class, 'listTransactions']);
         Route::post('/dt-pay/transactions/load', [DtPayTransactionsController::class, 'loadTransaction']);
 
-        Route::post('/dt-pay/transactions/refund', [DtPayTransactionsController::class, 'refundPayment']);
+        // Retired: the old code refunded straight to the broker and could pay a
+        // carrier twice. Refunds are now requests a DollarTraq admin approves,
+        // and release lives in the rebuilt /dtpay API.
+        Route::post('/dt-pay/transactions/refund', fn () => response()->json(['message' => 'Refunds are now requested from the payment page and approved by DollarTraq.'], 410));
         Route::post('/dt-pay/transactions/hold', [DtPayTransactionsController::class, 'holdPayment']);
 
-        Route::post('/dt-pay/transactions/release', [DtPayTransactionsController::class, 'releasePayment']);
+        Route::post('/dt-pay/transactions/release', fn () => response()->json(['message' => 'Release payments from the DT Pay payment page.'], 410));
 
         /*
         Disputes

@@ -9,6 +9,7 @@ use App\Pay\Models\Dispute;
 use App\Pay\Models\Event;
 use App\Pay\Models\Payment;
 use App\Pay\Models\PayoutAccount;
+use App\Pay\Models\RefundRequest;
 use App\Pay\Stripe\Gateway;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -342,6 +343,10 @@ class PaymentService
                 throw new PaymentRuleViolation('This payment has an open dispute. Resolve it before releasing.');
             }
 
+            if ($locked->openRefundRequest()) {
+                throw new PaymentRuleViolation('A refund was requested for this payment. DollarTraq is reviewing it, so it cannot be released.');
+            }
+
             if (! $account || ! $account->ready()) {
                 throw new PaymentRuleViolation('The carrier has not finished setting up payouts yet. Send them the payout setup link.');
             }
@@ -425,6 +430,124 @@ class PaymentService
         $this->log($payment, 'refunded', 'Refunded to payer', $this->money($payment->total_cents).($reason ? '. '.$reason : ''), $actorType, $actorId, ['refund' => $refund['id']]);
 
         return $payment;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Refund requests
+    |--------------------------------------------------------------------------
+    |
+    | Brokers never refund directly. They ask; the money stays held (and
+    | cannot be released) until a DollarTraq admin approves - which runs the
+    | Stripe refund - or rejects the request.
+    */
+
+    public function requestRefund(Payment $payment, User $user, string $reason): RefundRequest
+    {
+        return DB::transaction(function () use ($payment, $user, $reason) {
+            $locked = Payment::whereKey($payment->id)->lockForUpdate()->first();
+
+            if ($locked->status !== Payment::FUNDED) {
+                throw new PaymentRuleViolation(match ($locked->status) {
+                    Payment::RELEASED, Payment::RELEASING => 'This payment was already released to the carrier, so it cannot be refunded.',
+                    Payment::REFUNDED, Payment::REFUNDING => 'This payment has already been refunded.',
+                    Payment::PROCESSING => 'The funds have not cleared yet. You can request a refund once they do.',
+                    default => 'Only a held payment can be refunded.',
+                });
+            }
+
+            if ($locked->openRefundRequest()) {
+                throw new PaymentRuleViolation('A refund request for this payment is already waiting for DollarTraq.');
+            }
+
+            $request = RefundRequest::create([
+                'uuid' => (string) Str::uuid(),
+                'payment_id' => $locked->id,
+                'company_id' => $locked->company_id,
+                'requested_by' => $user->id,
+                'reason' => $reason,
+                'status' => RefundRequest::PENDING,
+            ]);
+
+            $this->log($locked, 'refund_requested', 'Refund requested', Str::limit($reason, 240), 'broker', $user->id, ['refund_request' => $request->uuid]);
+
+            return $request;
+        });
+    }
+
+    public function withdrawRefundRequest(Payment $payment, User $user): RefundRequest
+    {
+        return DB::transaction(function () use ($payment, $user) {
+            $request = RefundRequest::where('payment_id', $payment->id)->where('status', RefundRequest::PENDING)->lockForUpdate()->first();
+
+            if (! $request) {
+                throw new PaymentRuleViolation('There is no refund request waiting for this payment.');
+            }
+
+            $request->forceFill(['status' => RefundRequest::WITHDRAWN, 'decided_at' => now()])->save();
+            $this->log($payment, 'refund_withdrawn', 'Refund request withdrawn', null, 'broker', $user->id, ['refund_request' => $request->uuid]);
+
+            return $request;
+        });
+    }
+
+    /** A DollarTraq admin approves: the payer is refunded through Stripe. */
+    public function approveRefundRequest(RefundRequest $request, string $adminName, string $adminEmail, ?string $note = null): RefundRequest
+    {
+        // Claim the request first, so two admins clicking at once cannot both refund.
+        DB::transaction(function () use ($request) {
+            $locked = RefundRequest::whereKey($request->id)->lockForUpdate()->first();
+
+            if ($locked->status !== RefundRequest::PENDING) {
+                throw new PaymentRuleViolation("This refund request is already {$locked->status}.");
+            }
+
+            $locked->forceFill(['status' => RefundRequest::APPROVING])->save();
+        });
+
+        $payment = $request->payment;
+
+        try {
+            $this->refund($payment, 'admin', null, "Approved by DollarTraq ({$adminName})".($note ? ". {$note}" : ''));
+        } catch (Throwable $e) {
+            $request->forceFill(['status' => RefundRequest::PENDING])->save();
+
+            throw $e;
+        }
+
+        $request->forceFill([
+            'status' => RefundRequest::APPROVED,
+            'decided_by_name' => $adminName,
+            'decided_by_email' => $adminEmail,
+            'decision_note' => $note,
+            'decided_at' => now(),
+        ])->save();
+
+        return $request->refresh();
+    }
+
+    /** A DollarTraq admin rejects: the money stays held and can be released again. */
+    public function rejectRefundRequest(RefundRequest $request, string $adminName, string $adminEmail, string $note): RefundRequest
+    {
+        return DB::transaction(function () use ($request, $adminName, $adminEmail, $note) {
+            $locked = RefundRequest::whereKey($request->id)->lockForUpdate()->first();
+
+            if ($locked->status !== RefundRequest::PENDING) {
+                throw new PaymentRuleViolation("This refund request is already {$locked->status}.");
+            }
+
+            $locked->forceFill([
+                'status' => RefundRequest::REJECTED,
+                'decided_by_name' => $adminName,
+                'decided_by_email' => $adminEmail,
+                'decision_note' => $note,
+                'decided_at' => now(),
+            ])->save();
+
+            $this->log($locked->payment, 'refund_rejected', 'Refund request declined by DollarTraq', Str::limit($note, 240), 'admin', null, ['refund_request' => $locked->uuid, 'admin' => $adminEmail]);
+
+            return $locked;
+        });
     }
 
     public function setHold(Payment $payment, bool $hold, string $actorType, ?int $actorId, ?string $note = null): Payment

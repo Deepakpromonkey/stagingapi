@@ -409,14 +409,31 @@ class BrokerController extends Controller
         ]));
     }
 
+    /**
+     * Ask DollarTraq to refund a held payment. Brokers cannot refund on
+     * their own: the money stays held until an admin approves or rejects.
+     */
     public function refund(Request $request, string $id): JsonResponse
     {
-        $data = $request->validate(['reason' => ['nullable', 'string', 'max:255']]);
         $payment = $this->payment($request, $id);
 
-        return $this->guarded(fn () => response()->json([
-            'payment' => $this->present($this->payments->refund($payment, 'broker', $request->user()->id, $data['reason'] ?? null), $request),
-        ]), 'refund-cancel-payment', $request);
+        return $this->guarded(function () use ($payment, $request) {
+            $data = $request->validate(['reason' => ['required', 'string', 'min:5', 'max:500']]);
+            $this->payments->requestRefund($payment, $request->user(), $data['reason']);
+
+            return response()->json(['payment' => $this->present($payment->refresh(), $request)], 201);
+        }, 'refund-cancel-payment', $request);
+    }
+
+    public function withdrawRefund(Request $request, string $id): JsonResponse
+    {
+        $payment = $this->payment($request, $id);
+
+        return $this->guarded(function () use ($payment, $request) {
+            $this->payments->withdrawRefundRequest($payment, $request->user());
+
+            return response()->json(['payment' => $this->present($payment->refresh(), $request)]);
+        }, 'refund-cancel-payment', $request);
     }
 
     public function cancel(Request $request, string $id): JsonResponse
