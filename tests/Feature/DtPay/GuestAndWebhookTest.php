@@ -42,7 +42,17 @@ class GuestAndWebhookTest extends DtPayTestCase
 
         PayoutAccount::create(['carrier_dot' => '3577340', 'livemode' => false, 'stripe_account_id' => 'acct_fake_3577340', 'transfers_active' => true]);
 
-        $this->postJson("/api/v1/dtpay/guest/payments/{$token}/release")->assertOk()->assertJsonPath('payment.status', 'released');
+        // The payer asks; DollarTraq releases.
+        $this->postJson("/api/v1/dtpay/guest/payments/{$token}/release")->assertCreated()
+            ->assertJsonPath('payment.status', 'funded')
+            ->assertJsonPath('payment.release_requested', true);
+        $this->assertCount(0, $this->stripe->transfers);
+
+        $queue = $this->getJson('/api/v1/dtpay/admin/requests?type=release', $this->adminHeaders())->json('data');
+        $this->assertTrue($queue[0]['requested_by']['guest']);
+        $this->postJson("/api/v1/dtpay/admin/requests/{$queue[0]['id']}/approve", [], $this->adminHeaders())->assertOk();
+
+        $this->getJson("/api/v1/dtpay/guest/payments/{$token}")->assertJsonPath('payment.status', 'released');
         $this->assertSame(100000, $this->stripe->transfers[0]['amountCents']);
     }
 
@@ -110,6 +120,7 @@ class GuestAndWebhookTest extends DtPayTestCase
         $held = Payment::where('uuid', $payment['id'])->first();
         $this->assertTrue($held->on_hold);
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
     }
 
     public function test_a_live_key_is_refused_unless_allowed(): void

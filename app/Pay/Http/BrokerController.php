@@ -404,9 +404,26 @@ class BrokerController extends Controller
 
         abort_unless(Permissions::canRelease($request->user(), $payment), 403, 'You are not allowed to release a payment of this amount.');
 
-        return $this->guarded(fn () => response()->json([
-            'payment' => $this->present($this->payments->release($payment, 'broker', $request->user()->id), $request),
-        ]));
+        // Brokers ask; a DollarTraq admin checks the load and releases.
+        return $this->guarded(function () use ($payment, $request) {
+            $note = $request->validate(['note' => ['nullable', 'string', 'max:500']])['note'] ?? null;
+            $this->payments->requestRelease($payment, 'broker', $request->user()->id, $note);
+
+            return response()->json(['payment' => $this->present($payment->refresh(), $request)], 201);
+        });
+    }
+
+    public function withdrawRelease(Request $request, string $id): JsonResponse
+    {
+        $payment = $this->payment($request, $id);
+
+        abort_unless(Permissions::canRelease($request->user(), $payment), 403, 'You are not allowed to release a payment of this amount.');
+
+        return $this->guarded(function () use ($payment, $request) {
+            $this->payments->withdrawRequest($payment, \App\Pay\Models\PaymentRequest::RELEASE, 'broker', $request->user()->id);
+
+            return response()->json(['payment' => $this->present($payment->refresh(), $request)]);
+        });
     }
 
     /**
@@ -430,7 +447,7 @@ class BrokerController extends Controller
         $payment = $this->payment($request, $id);
 
         return $this->guarded(function () use ($payment, $request) {
-            $this->payments->withdrawRefundRequest($payment, $request->user());
+            $this->payments->withdrawRequest($payment, \App\Pay\Models\PaymentRequest::REFUND, 'broker', $request->user()->id);
 
             return response()->json(['payment' => $this->present($payment->refresh(), $request)]);
         }, 'refund-cancel-payment', $request);

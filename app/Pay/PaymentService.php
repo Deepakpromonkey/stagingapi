@@ -9,7 +9,7 @@ use App\Pay\Models\Dispute;
 use App\Pay\Models\Event;
 use App\Pay\Models\Payment;
 use App\Pay\Models\PayoutAccount;
-use App\Pay\Models\RefundRequest;
+use App\Pay\Models\PaymentRequest;
 use App\Pay\Stripe\Gateway;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -343,8 +343,8 @@ class PaymentService
                 throw new PaymentRuleViolation('This payment has an open dispute. Resolve it before releasing.');
             }
 
-            if ($locked->openRefundRequest()) {
-                throw new PaymentRuleViolation('A refund was requested for this payment. DollarTraq is reviewing it, so it cannot be released.');
+            if ($locked->openRequest(PaymentRequest::REFUND)) {
+                throw new PaymentRuleViolation('A refund was requested for this payment. Decide on the refund before releasing.');
             }
 
             if (! $account || ! $account->ready()) {
@@ -383,6 +383,8 @@ class PaymentService
         ])->save();
 
         $this->log($payment, 'released', 'Released to carrier', $this->money($payment->amount_cents).' sent to '.($payment->carrier_name ?: 'DOT '.$payment->carrier_dot), $actorType, $actorId, ['transfer' => $transferId]);
+
+        $this->settleRequests($payment, PaymentRequest::RELEASE);
 
         return $payment;
     }
@@ -429,94 +431,124 @@ class PaymentService
 
         $this->log($payment, 'refunded', 'Refunded to payer', $this->money($payment->total_cents).($reason ? '. '.$reason : ''), $actorType, $actorId, ['refund' => $refund['id']]);
 
+        $this->settleRequests($payment, PaymentRequest::REFUND);
+
         return $payment;
     }
 
     /*
     |--------------------------------------------------------------------------
-    | Refund requests
+    | Release and refund requests
     |--------------------------------------------------------------------------
     |
-    | Brokers never refund directly. They ask; the money stays held (and
-    | cannot be released) until a DollarTraq admin approves - which runs the
-    | Stripe refund - or rejects the request.
+    | Payers never move held money themselves. They ask - release it to the
+    | carrier, or refund it - and the money stays held until a DollarTraq
+    | admin approves (which runs the transfer or refund) or rejects. One
+    | open request per payment at a time.
     */
 
-    public function requestRefund(Payment $payment, User $user, string $reason): RefundRequest
+    public function requestRelease(Payment $payment, string $actorType, ?int $actorId, ?string $note = null): PaymentRequest
     {
-        return DB::transaction(function () use ($payment, $user, $reason) {
+        return $this->openRequest($payment, PaymentRequest::RELEASE, $note, $actorType, $actorId);
+    }
+
+    public function requestRefund(Payment $payment, User $user, string $reason): PaymentRequest
+    {
+        return $this->openRequest($payment, PaymentRequest::REFUND, $reason, 'broker', $user->id);
+    }
+
+    private function openRequest(Payment $payment, string $type, ?string $reason, string $actorType, ?int $actorId): PaymentRequest
+    {
+        return DB::transaction(function () use ($payment, $type, $reason, $actorType, $actorId) {
             $locked = Payment::whereKey($payment->id)->lockForUpdate()->first();
+            $release = $type === PaymentRequest::RELEASE;
 
             if ($locked->status !== Payment::FUNDED) {
                 throw new PaymentRuleViolation(match ($locked->status) {
-                    Payment::RELEASED, Payment::RELEASING => 'This payment was already released to the carrier, so it cannot be refunded.',
+                    Payment::RELEASED, Payment::RELEASING => 'This payment was already released to the carrier.',
                     Payment::REFUNDED, Payment::REFUNDING => 'This payment has already been refunded.',
-                    Payment::PROCESSING => 'The funds have not cleared yet. You can request a refund once they do.',
-                    default => 'Only a held payment can be refunded.',
+                    Payment::PROCESSING => 'The funds have not cleared yet. You can ask once they do.',
+                    default => 'Only a held payment can be '.($release ? 'released.' : 'refunded.'),
                 });
             }
 
-            if ($locked->openRefundRequest()) {
-                throw new PaymentRuleViolation('A refund request for this payment is already waiting for DollarTraq.');
+            if ($release && $locked->on_hold) {
+                throw new PaymentRuleViolation('This payment is on hold. Take it off hold before asking for release.');
             }
 
-            $request = RefundRequest::create([
+            if ($release && $locked->openDispute()) {
+                throw new PaymentRuleViolation('This payment has an open dispute. DollarTraq will settle it before any release.');
+            }
+
+            if ($open = $locked->openRequest()) {
+                throw new PaymentRuleViolation($open->type === $type
+                    ? "A {$type} request for this payment is already waiting for DollarTraq."
+                    : "A {$open->type} request for this payment is waiting for DollarTraq. Withdraw it first.");
+            }
+
+            $request = PaymentRequest::create([
                 'uuid' => (string) Str::uuid(),
+                'type' => $type,
                 'payment_id' => $locked->id,
                 'company_id' => $locked->company_id,
-                'requested_by' => $user->id,
+                'requested_by' => $actorId,
+                'requested_by_type' => $actorType,
                 'reason' => $reason,
-                'status' => RefundRequest::PENDING,
+                'status' => PaymentRequest::PENDING,
             ]);
 
-            $this->log($locked, 'refund_requested', 'Refund requested', Str::limit($reason, 240), 'broker', $user->id, ['refund_request' => $request->uuid]);
+            $this->log($locked, "{$type}_requested", $release ? 'Release requested' : 'Refund requested', $reason ? Str::limit($reason, 240) : null, $actorType, $actorId, ['request' => $request->uuid]);
 
             return $request;
         });
     }
 
-    public function withdrawRefundRequest(Payment $payment, User $user): RefundRequest
+    public function withdrawRequest(Payment $payment, string $type, string $actorType, ?int $actorId): PaymentRequest
     {
-        return DB::transaction(function () use ($payment, $user) {
-            $request = RefundRequest::where('payment_id', $payment->id)->where('status', RefundRequest::PENDING)->lockForUpdate()->first();
+        return DB::transaction(function () use ($payment, $type, $actorType, $actorId) {
+            $request = PaymentRequest::where('payment_id', $payment->id)->where('type', $type)
+                ->where('status', PaymentRequest::PENDING)->lockForUpdate()->first();
 
             if (! $request) {
-                throw new PaymentRuleViolation('There is no refund request waiting for this payment.');
+                throw new PaymentRuleViolation("There is no {$type} request waiting for this payment.");
             }
 
-            $request->forceFill(['status' => RefundRequest::WITHDRAWN, 'decided_at' => now()])->save();
-            $this->log($payment, 'refund_withdrawn', 'Refund request withdrawn', null, 'broker', $user->id, ['refund_request' => $request->uuid]);
+            $request->forceFill(['status' => PaymentRequest::WITHDRAWN, 'decided_at' => now()])->save();
+            $this->log($payment, "{$type}_withdrawn", ucfirst($type).' request withdrawn', null, $actorType, $actorId, ['request' => $request->uuid]);
 
             return $request;
         });
     }
 
-    /** A DollarTraq admin approves: the payer is refunded through Stripe. */
-    public function approveRefundRequest(RefundRequest $request, string $adminName, string $adminEmail, ?string $note = null): RefundRequest
+    /** A DollarTraq admin approves: the money moves through Stripe. */
+    public function approveRequest(PaymentRequest $request, string $adminName, string $adminEmail, ?string $note = null): PaymentRequest
     {
-        // Claim the request first, so two admins clicking at once cannot both refund.
+        // Claim the request first, so two admins clicking at once cannot both move the money.
         DB::transaction(function () use ($request) {
-            $locked = RefundRequest::whereKey($request->id)->lockForUpdate()->first();
+            $locked = PaymentRequest::whereKey($request->id)->lockForUpdate()->first();
 
-            if ($locked->status !== RefundRequest::PENDING) {
-                throw new PaymentRuleViolation("This refund request is already {$locked->status}.");
+            if ($locked->status !== PaymentRequest::PENDING) {
+                throw new PaymentRuleViolation("This {$locked->type} request is already {$locked->status}.");
             }
 
-            $locked->forceFill(['status' => RefundRequest::APPROVING])->save();
+            $locked->forceFill(['status' => PaymentRequest::APPROVING])->save();
         });
 
         $payment = $request->payment;
 
         try {
-            $this->refund($payment, 'admin', null, "Approved by DollarTraq ({$adminName})".($note ? ". {$note}" : ''));
+            $request->type === PaymentRequest::RELEASE
+                ? $this->release($payment, 'admin', null)
+                : $this->refund($payment, 'admin', null, "Approved by DollarTraq ({$adminName})".($note ? ". {$note}" : ''));
         } catch (Throwable $e) {
-            $request->forceFill(['status' => RefundRequest::PENDING])->save();
+            // Back to waiting, so it can be approved once the problem is fixed.
+            PaymentRequest::whereKey($request->id)->update(['status' => PaymentRequest::PENDING]);
 
             throw $e;
         }
 
         $request->forceFill([
-            'status' => RefundRequest::APPROVED,
+            'status' => PaymentRequest::APPROVED,
             'decided_by_name' => $adminName,
             'decided_by_email' => $adminEmail,
             'decision_note' => $note,
@@ -526,28 +558,43 @@ class PaymentService
         return $request->refresh();
     }
 
-    /** A DollarTraq admin rejects: the money stays held and can be released again. */
-    public function rejectRefundRequest(RefundRequest $request, string $adminName, string $adminEmail, string $note): RefundRequest
+    /** A DollarTraq admin rejects: the money stays held. */
+    public function rejectRequest(PaymentRequest $request, string $adminName, string $adminEmail, string $note): PaymentRequest
     {
         return DB::transaction(function () use ($request, $adminName, $adminEmail, $note) {
-            $locked = RefundRequest::whereKey($request->id)->lockForUpdate()->first();
+            $locked = PaymentRequest::whereKey($request->id)->lockForUpdate()->first();
 
-            if ($locked->status !== RefundRequest::PENDING) {
-                throw new PaymentRuleViolation("This refund request is already {$locked->status}.");
+            if ($locked->status !== PaymentRequest::PENDING) {
+                throw new PaymentRuleViolation("This {$locked->type} request is already {$locked->status}.");
             }
 
             $locked->forceFill([
-                'status' => RefundRequest::REJECTED,
+                'status' => PaymentRequest::REJECTED,
                 'decided_by_name' => $adminName,
                 'decided_by_email' => $adminEmail,
                 'decision_note' => $note,
                 'decided_at' => now(),
             ])->save();
 
-            $this->log($locked->payment, 'refund_rejected', 'Refund request declined by DollarTraq', Str::limit($note, 240), 'admin', null, ['refund_request' => $locked->uuid, 'admin' => $adminEmail]);
+            $this->log($locked->payment, "{$locked->type}_rejected", ucfirst($locked->type).' request declined by DollarTraq', Str::limit($note, 240), 'admin', null, ['request' => $locked->uuid, 'admin' => $adminEmail]);
 
             return $locked;
         });
+    }
+
+    /**
+     * Once money has actually moved, close any request still waiting: the
+     * matching one is done, the other no longer possible.
+     */
+    private function settleRequests(Payment $payment, string $moved): void
+    {
+        PaymentRequest::where('payment_id', $payment->id)->where('status', PaymentRequest::PENDING)->get()
+            ->each(fn (PaymentRequest $r) => $r->forceFill([
+                'status' => $r->type === $moved ? PaymentRequest::APPROVED : PaymentRequest::REJECTED,
+                'decided_by_name' => 'DollarTraq',
+                'decision_note' => $moved === PaymentRequest::RELEASE ? 'The payment was released to the carrier.' : 'The payment was refunded.',
+                'decided_at' => now(),
+            ])->save());
     }
 
     public function setHold(Payment $payment, bool $hold, string $actorType, ?int $actorId, ?string $note = null): Payment
@@ -641,6 +688,35 @@ class PaymentService
         $this->log($payment, 'dispute_resolved', 'Dispute resolved', $resolution, $actorType, $actorId, ['dispute' => $dispute->id]);
 
         return $dispute;
+    }
+
+    /**
+     * A DollarTraq admin settles a dispute: in the carrier's favour
+     * (release), the payer's (refund), or just closes it. The dispute is
+     * closed first; if the money then cannot move (say the carrier has not
+     * finished payout setup) it stays held and the admin is told why.
+     */
+    public function settleDispute(Payment $payment, Dispute $dispute, string $outcome, string $note, string $adminName): Payment
+    {
+        $label = match ($outcome) {
+            'carrier' => 'Settled for the carrier: released',
+            'payer' => 'Settled for the payer: refunded',
+            default => 'Closed by DollarTraq',
+        };
+
+        $this->resolveDispute($payment, $dispute, "{$label}. {$note} ({$adminName})", 'admin', null);
+
+        try {
+            match ($outcome) {
+                'carrier' => $this->release($payment->refresh(), 'admin', null),
+                'payer' => $this->refund($payment->refresh(), 'admin', null, "Dispute settled for the payer by DollarTraq ({$adminName})"),
+                default => null,
+            };
+        } catch (PaymentRuleViolation $e) {
+            throw new PaymentRuleViolation('The dispute is closed, but the money is still held: '.$e->getMessage());
+        }
+
+        return $payment->refresh();
     }
 
     /*

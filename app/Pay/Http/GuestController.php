@@ -122,7 +122,23 @@ class GuestController extends Controller
     {
         $payment = $this->payment($token);
 
-        return $this->guarded(fn () => response()->json(['payment' => $this->present($this->payments->release($payment, 'guest', null))]));
+        // The payer asks; a DollarTraq admin releases.
+        return $this->guarded(function () use ($payment) {
+            $this->payments->requestRelease($payment, 'guest', null);
+
+            return response()->json(['payment' => $this->present($payment->refresh())], 201);
+        });
+    }
+
+    public function withdrawRelease(string $token): JsonResponse
+    {
+        $payment = $this->payment($token);
+
+        return $this->guarded(function () use ($payment) {
+            $this->payments->withdrawRequest($payment, \App\Pay\Models\PaymentRequest::RELEASE, 'guest', null);
+
+            return response()->json(['payment' => $this->present($payment->refresh())]);
+        });
     }
 
     public function dispute(Request $request, string $token): JsonResponse

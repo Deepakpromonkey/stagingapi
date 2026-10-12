@@ -6,7 +6,7 @@ use App\Models\User;
 use App\Pay\Models\Dispute;
 use App\Pay\Models\Payment;
 use App\Pay\Models\PayoutAccount;
-use App\Pay\Models\RefundRequest;
+use App\Pay\Models\PaymentRequest;
 
 /** The JSON shape of a DT Pay payment, shared by the broker and guest APIs. */
 final class Presenter
@@ -32,7 +32,9 @@ final class Presenter
             'status' => $p->status,
             'status_label' => self::STATUS_LABELS[$p->status] ?? $p->status,
             'on_hold' => $p->on_hold,
-            'refund_requested' => $p->refundRequests()->whereIn('status', RefundRequest::OPEN)->exists(),
+            'open_request' => ($open = $p->openRequest()) ? $open->type : null,
+            'refund_requested' => $open?->type === PaymentRequest::REFUND,
+            'release_requested' => $open?->type === PaymentRequest::RELEASE,
             'carrier' => ['dot' => $p->carrier_dot, 'name' => $p->carrier_name, 'mc' => $p->carrier_mc],
             'load_number' => $p->load_number,
             'origin' => $p->origin,
@@ -89,7 +91,8 @@ final class Presenter
                 'actor' => $e->actor_type,
                 'at' => $e->created_at?->toIso8601String(),
             ])->values(),
-            'refund_request' => $guest ? null : (($r = $p->refundRequests()->first()) ? self::refundRequest($r) : null),
+            'refund_request' => $guest ? null : (($r = $p->latestRequest(PaymentRequest::REFUND)) ? self::request($r) : null),
+            'release_request' => ($r = $p->latestRequest(PaymentRequest::RELEASE)) ? self::request($r) : null,
             'can' => $guest ? self::guestCan($p, $open !== null, $payout) : self::brokerCan($p, $user, $open !== null, $payout),
         ];
     }
@@ -110,10 +113,11 @@ final class Presenter
         ];
     }
 
-    public static function refundRequest(RefundRequest $r): array
+    public static function request(PaymentRequest $r): array
     {
         return [
             'id' => $r->uuid,
+            'type' => $r->type,
             'status' => $r->status,
             'reason' => $r->reason,
             'decision_note' => $r->decision_note,
@@ -133,16 +137,19 @@ final class Presenter
         $create = Permissions::can($user, 'create-fund-payment');
         $refund = Permissions::can($user, 'refund-cancel-payment');
         $held = in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true);
-        $refunding = $p->openRefundRequest();
+        $open = $p->openRequest();
+        $funded = $p->status === Payment::FUNDED;
 
         return [
             'pay' => $create && $p->payable(),
             'cancel' => $refund && $p->payable(),
-            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && ! $refunding && (bool) $payout?->ready() && Permissions::canRelease($user, $p),
-            'release_blocked_reason' => self::releaseBlocker($p, $disputed, $payout, (bool) $refunding),
-            'refund' => $refund && $p->status === Payment::FUNDED && ! $refunding,
-            'withdraw_refund' => $refund && $refunding?->status === RefundRequest::PENDING,
-            'hold' => $create && $held && ! $p->on_hold,
+            // Brokers ask; DollarTraq releases and refunds.
+            'release' => $funded && ! $p->on_hold && ! $disputed && ! $open && Permissions::canRelease($user, $p),
+            'release_blocked_reason' => self::releaseBlocker($p, $disputed, $open),
+            'withdraw_release' => $open?->type === PaymentRequest::RELEASE && $open->status === PaymentRequest::PENDING && Permissions::canRelease($user, $p),
+            'refund' => $refund && $funded && ! $open,
+            'withdraw_refund' => $refund && $open?->type === PaymentRequest::REFUND && $open->status === PaymentRequest::PENDING,
+            'hold' => $create && $held && ! $p->on_hold && ! $open,
             'unhold' => $create && $held && $p->on_hold,
             'dispute' => $create && $held && ! $disputed,
             'pod' => $create && ! in_array($p->status, [Payment::CANCELLED, Payment::REFUNDED], true),
@@ -152,23 +159,50 @@ final class Presenter
     private static function guestCan(Payment $p, bool $disputed, ?PayoutAccount $payout): array
     {
         $held = in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true);
+        $open = $p->openRequest();
 
         return [
             'pay' => $p->payable(),
-            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && (bool) $payout?->ready(),
+            'release' => $p->status === Payment::FUNDED && ! $p->on_hold && ! $disputed && ! $open,
+            'withdraw_release' => $open?->type === PaymentRequest::RELEASE && $open->status === PaymentRequest::PENDING,
             'dispute' => $held && ! $disputed,
         ];
     }
 
-    private static function releaseBlocker(Payment $p, bool $disputed, ?PayoutAccount $payout, bool $refunding = false): ?string
+    /** What a DollarTraq admin may do with a payment right now. */
+    public static function adminCan(Payment $p, ?PayoutAccount $payout): array
+    {
+        $disputed = (bool) $p->openDispute();
+        $funded = $p->status === Payment::FUNDED;
+        $refundAsked = (bool) $p->openRequest(PaymentRequest::REFUND);
+
+        return [
+            'release' => $funded && ! $p->on_hold && ! $disputed && ! $refundAsked && (bool) $payout?->ready(),
+            'release_blocked_reason' => match (true) {
+                ! $funded => null,
+                $p->on_hold => 'On hold.',
+                $disputed => 'Open dispute: settle it below.',
+                $refundAsked => 'The payer asked for a refund: approve or decline it first.',
+                ! $payout || ! $payout->ready() => 'The carrier has not finished payout setup. Send them the setup link.',
+                default => null,
+            },
+            'refund' => $funded,
+            'hold' => in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true) && ! $p->on_hold,
+            'unhold' => $p->on_hold && in_array($p->status, [Payment::PROCESSING, Payment::FUNDED], true),
+            'settle_dispute' => $disputed && $funded,
+            'payout_link' => ! in_array($p->status, [Payment::RELEASED, Payment::REFUNDED, Payment::CANCELLED], true) && ! $payout?->ready(),
+        ];
+    }
+
+    private static function releaseBlocker(Payment $p, bool $disputed, ?PaymentRequest $open): ?string
     {
         return match (true) {
             $p->status === Payment::PROCESSING => 'Waiting for the funds to clear.',
             $p->status !== Payment::FUNDED => null,
-            $refunding => 'A refund was requested. DollarTraq is reviewing it.',
+            $open?->type === PaymentRequest::RELEASE => 'Release requested. DollarTraq is reviewing it.',
+            $open?->type === PaymentRequest::REFUND => 'A refund was requested. DollarTraq is reviewing it.',
             $p->on_hold => 'On hold.',
             $disputed => 'Open dispute.',
-            ! $payout || ! $payout->ready() => 'The carrier has not finished payout setup.',
             default => null,
         };
     }

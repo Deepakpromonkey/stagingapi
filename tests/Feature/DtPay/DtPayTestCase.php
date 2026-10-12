@@ -33,8 +33,22 @@ abstract class DtPayTestCase extends TestCase
         $this->stripe = new FakeGateway;
         $this->app->instance(Gateway::class, $this->stripe);
 
-        config(['dtpay.disk' => 'local']);
+        config(['dtpay.disk' => 'local', 'dtpay.admin_token' => self::ADMIN_TOKEN]);
         Storage::fake('local');
+    }
+
+    protected const ADMIN_TOKEN = 'test-admin-token-123456';
+
+    /** Headers the admin backend sends for the signed-in DollarTraq admin. */
+    protected function adminHeaders(): array
+    {
+        return ['Authorization' => 'Bearer '.self::ADMIN_TOKEN, 'X-Admin-Email' => 'ops@dollartraq.com', 'X-Admin-Name' => 'Ops Desk'];
+    }
+
+    /** A DollarTraq admin releases a held payment to the carrier. */
+    protected function adminRelease(string $paymentId): \Illuminate\Testing\TestResponse
+    {
+        return $this->withHeaders($this->adminHeaders())->postJson("/api/v1/dtpay/admin/payments/{$paymentId}/release");
     }
 
     protected function company(string $name = 'Northwind Logistics'): Company

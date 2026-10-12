@@ -51,7 +51,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->assertSame(50600, $paid['breakdown']['total']['cents'], 'no card fee on ACH');
         $this->assertArrayHasKey('mandate_data', $this->stripe->intents['pi_fake_1']);
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
 
         $this->webhook('payment_intent.succeeded', ['id' => 'pi_fake_1', 'status' => 'succeeded', 'latest_charge' => 'ch_1', 'metadata' => []]);
 
@@ -81,10 +81,10 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->pay($payment['id'], 'card');
         $this->carrierReady();
 
-        $released = $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk()->json('payment');
+        $released = $this->adminRelease($payment['id'])->assertOk()->json('payment');
         $this->assertSame('released', $released['status']);
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
 
         $this->assertCount(1, $this->stripe->transfers, 'never pays twice');
         $this->assertSame(100000, $this->stripe->transfers[0]['amountCents'], 'the load amount, not the total charged');
@@ -98,7 +98,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $payment = $this->createPayment();
         $this->pay($payment['id'], 'card');
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")
+        $this->adminRelease($payment['id'])
             ->assertStatus(422)->assertJsonFragment(['message' => 'The carrier has not finished setting up payouts yet. Send them the payout setup link.']);
 
         $link = $this->postJson('/api/v1/dtpay/carriers/3577340/payout-link', ['email' => 'pay@powell.test'])->assertOk()->json('url');
@@ -107,7 +107,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->stripe->accounts['acct_fake_3577340'] = ['details_submitted' => true, 'payouts_enabled' => true, 'transfers_active' => true];
         $this->getJson('/api/v1/dtpay/carriers/3577340/payout')->assertJson(['ready' => true]);
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk();
+        $this->adminRelease($payment['id'])->assertOk();
     }
 
     public function test_release_rechecks_a_carrier_that_finished_setup_since(): void
@@ -117,14 +117,14 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->pay($payment['id'], 'card');
 
         $this->postJson('/api/v1/dtpay/carriers/3577340/payout-link')->assertOk();
-        $this->getJson("/api/v1/dtpay/payments/{$payment['id']}")->assertJsonPath('payment.can.release', false)
-            ->assertJsonPath('payment.can.release_blocked_reason', 'The carrier has not finished payout setup.');
+        $this->getJson("/api/v1/dtpay/admin/payments/{$payment['id']}", $this->adminHeaders())->assertJsonPath('payment.admin_can.release', false)
+            ->assertJsonPath('payment.admin_can.release_blocked_reason', 'The carrier has not finished payout setup. Send them the setup link.');
 
         // The carrier completes Stripe's onboarding; no webhook reaches us.
         $this->stripe->accounts['acct_fake_3577340'] = ['details_submitted' => true, 'payouts_enabled' => true, 'transfers_active' => true];
 
-        $this->getJson("/api/v1/dtpay/payments/{$payment['id']}")->assertJsonPath('payment.can.release', true);
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk()->assertJsonPath('payment.status', 'released');
+        $this->getJson("/api/v1/dtpay/admin/payments/{$payment['id']}", $this->adminHeaders())->assertJsonPath('payment.admin_can.release', true);
+        $this->adminRelease($payment['id'])->assertOk()->assertJsonPath('payment.status', 'released');
     }
 
     public function test_a_failed_transfer_leaves_the_money_held(): void
@@ -135,7 +135,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->carrierReady();
         $this->stripe->failTransfers = true;
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
 
         $after = $this->getJson("/api/v1/dtpay/payments/{$payment['id']}")->json('payment');
         $this->assertSame('funded', $after['status']);
@@ -150,7 +150,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->carrierReady();
 
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/hold", ['hold' => true])->assertOk();
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/hold", ['hold' => false])->assertOk();
 
         $disputed = $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/disputes", [
@@ -161,10 +161,10 @@ class BrokerPaymentsTest extends DtPayTestCase
         $this->assertSame('damaged', $disputed['open_dispute']['reason']);
         $this->assertSame(1, $disputed['open_dispute']['evidence_count']);
 
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertStatus(422);
+        $this->adminRelease($payment['id'])->assertStatus(422);
 
         $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/disputes/{$disputed['open_dispute']['id']}/resolve", ['resolution' => 'Carrier credited the damage.'])->assertOk();
-        $this->postJson("/api/v1/dtpay/payments/{$payment['id']}/release")->assertOk();
+        $this->adminRelease($payment['id'])->assertOk();
     }
 
     public function test_refund_can_only_be_requested_while_held_never_after_release(): void
@@ -180,7 +180,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         $released = $this->createPayment(200.00);
         $this->pay($released['id'], 'card');
         $this->carrierReady();
-        $this->postJson("/api/v1/dtpay/payments/{$released['id']}/release")->assertOk();
+        $this->adminRelease($released['id'])->assertOk();
         $this->postJson("/api/v1/dtpay/payments/{$released['id']}/refund", ['reason' => 'Too late now'])->assertStatus(422);
         $this->assertCount(0, $this->stripe->refunds, 'no refund once the carrier has the money');
     }
@@ -225,7 +225,7 @@ class BrokerPaymentsTest extends DtPayTestCase
         // Senior agents release up to $5,000.
         $this->actingAsUser($this->user('senior_agent', $company));
         $this->postJson("/api/v1/dtpay/payments/{$big['id']}/release")->assertForbidden();
-        $this->postJson("/api/v1/dtpay/payments/{$small['id']}/release")->assertOk();
+        $this->postJson("/api/v1/dtpay/payments/{$small['id']}/release")->assertCreated()->assertJsonPath('payment.release_requested', true);
 
         // Agents create and fund, but cannot release or refund.
         $this->actingAsUser($this->user('agent', $company));

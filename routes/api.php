@@ -334,12 +334,24 @@ Route::prefix('v1')->group(function () {
     Route::post('/dtpay/stripe/webhook', [\App\Pay\Http\WebhookController::class, 'handle']);
 
     // DollarTraq admins, through the admin backend (shared token, see AdminToken).
-    Route::prefix('dtpay/admin')->middleware([\App\Pay\Http\AdminToken::class, 'throttle:60,1'])->group(function () {
-        Route::get('/overview', [\App\Pay\Http\AdminController::class, 'overview']);
-        Route::get('/payments', [\App\Pay\Http\AdminController::class, 'payments']);
-        Route::get('/refund-requests', [\App\Pay\Http\AdminController::class, 'refundRequests']);
-        Route::post('/refund-requests/{id}/approve', [\App\Pay\Http\AdminController::class, 'approve']);
-        Route::post('/refund-requests/{id}/reject', [\App\Pay\Http\AdminController::class, 'reject']);
+    Route::prefix('dtpay/admin')->middleware([\App\Pay\Http\AdminToken::class, 'throttle:120,1'])->group(function () {
+        $admin = \App\Pay\Http\AdminController::class;
+        Route::get('/overview', [$admin, 'overview']);
+        Route::get('/payments', [$admin, 'payments']);
+        Route::get('/payments/{id}', [$admin, 'show']);
+        Route::get('/payments/{id}/files/{kind}', [$admin, 'file'])->where('kind', 'rate-confirmation|pod|evidence');
+        Route::post('/payments/{id}/release', [$admin, 'release']);
+        Route::post('/payments/{id}/refund', [$admin, 'refund']);
+        Route::post('/payments/{id}/hold', [$admin, 'hold']);
+        Route::post('/payments/{id}/disputes/{disputeId}/settle', [$admin, 'settleDispute'])->where('disputeId', '[0-9]+');
+        Route::post('/payments/{id}/payout-link', [$admin, 'payoutLink']);
+        Route::get('/requests', [$admin, 'requests']);
+        Route::post('/requests/{id}/approve', [$admin, 'approve']);
+        Route::post('/requests/{id}/reject', [$admin, 'reject']);
+        // The first admin panel build only knew refund requests.
+        Route::get('/refund-requests', fn (\Illuminate\Http\Request $r) => app($admin)->requests($r, 'refund'));
+        Route::post('/refund-requests/{id}/approve', [$admin, 'approve']);
+        Route::post('/refund-requests/{id}/reject', [$admin, 'reject']);
     });
 
     Route::prefix('dtpay/guest')->middleware('throttle:30,1')->group(function () {
@@ -351,6 +363,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/payments/{token}/intent', [\App\Pay\Http\GuestController::class, 'intent']);
         Route::post('/payments/{token}/sync', [\App\Pay\Http\GuestController::class, 'sync']);
         Route::post('/payments/{token}/release', [\App\Pay\Http\GuestController::class, 'release']);
+        Route::delete('/payments/{token}/release-request', [\App\Pay\Http\GuestController::class, 'withdrawRelease']);
         Route::post('/payments/{token}/dispute', [\App\Pay\Http\GuestController::class, 'dispute']);
     });
 
@@ -381,6 +394,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/payments/{id}/pay', [\App\Pay\Http\BrokerController::class, 'pay']);
             Route::post('/payments/{id}/sync', [\App\Pay\Http\BrokerController::class, 'sync']);
             Route::post('/payments/{id}/release', [\App\Pay\Http\BrokerController::class, 'release']);
+            Route::delete('/payments/{id}/release-request', [\App\Pay\Http\BrokerController::class, 'withdrawRelease']);
             Route::post('/payments/{id}/refund', [\App\Pay\Http\BrokerController::class, 'refund']);
             Route::delete('/payments/{id}/refund-request', [\App\Pay\Http\BrokerController::class, 'withdrawRefund']);
             Route::post('/payments/{id}/cancel', [\App\Pay\Http\BrokerController::class, 'cancel']);
