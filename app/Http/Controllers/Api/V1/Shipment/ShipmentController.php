@@ -9,9 +9,11 @@ use App\Jobs\NotifyDriversOfNewLoad;
 use App\Models\Shipment;
 use App\Models\ShipmentTemplate;
 use App\Services\DriverActivityService;
+use App\Services\Shipment\DriverAvailability;
 use App\Services\Shipment\LoadAssignmentNotifier;
 use App\Services\ShipmentService;
 use App\Services\SubscriptionService;
+use App\Support\LoadWindow;
 use App\Support\StopLocation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,7 +24,8 @@ class ShipmentController extends BaseController
     public function __construct(
         protected ShipmentService $shipmentService,
         protected DriverActivityService $driverActivity,
-        protected SubscriptionService $subscriptionService
+        protected SubscriptionService $subscriptionService,
+        protected DriverAvailability $driverAvailability
     ) {}
 
     public function getCarrier()
@@ -176,6 +179,17 @@ class ShipmentController extends BaseController
                 422
             );
         }
+
+        // The rule booking applied to the load's pickup and delivery, now on
+        // its stops - the times the driver app goes by. The load itself is
+        // already saved with these drivers, so it is left out.
+        $this->driverAvailability->assertFree(
+            $shipment->company_id,
+            [$shipment->driver_phone_1, $shipment->driver_phone_2, $shipment->driver_phone_3],
+            $shipment->eld_driver_id,
+            LoadWindow::fromStops($stopsArray),
+            $shipment->id
+        );
 
         // Stored as numbers, whichever way they arrived.
         $stopsArray = array_map(fn (array $stop) => [

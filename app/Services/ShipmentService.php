@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Models\Shipment;
 use App\Services\DtScore\DtScore;
+use App\Services\Shipment\DriverAvailability;
+use App\Support\LoadWindow;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -11,6 +13,10 @@ use Illuminate\Support\Facades\Storage;
 
 class ShipmentService
 {
+    public function __construct(
+        private readonly DriverAvailability $driverAvailability,
+    ) {}
+
     /**
      * Create Shipment
      */
@@ -33,6 +39,24 @@ class ShipmentService
             }
 
                         $eld = $this->resolveEldSelection($data, $user);
+
+            /*
+            | A driver can't be on two loads at once. Refused here, before the
+            | load exists, when one of its drivers is already on another of
+            | the company's open loads at an overlapping time. The trip sheet
+            | sends its first and last stop as the pickup and delivery for
+            | this; its stops are checked again when they are saved.
+            */
+            $this->driverAvailability->assertFree(
+                $user->company_id,
+                [
+                    $data['driver_phone_1'] ?? $eld['driver_phone'],
+                    $data['driver_phone_2'] ?? null,
+                    $data['driver_phone_3'] ?? null,
+                ],
+                $eld['driver_id'],
+                LoadWindow::fromPickupAndDelivery($data),
+            );
 
             $shipment = Shipment::create([
 
